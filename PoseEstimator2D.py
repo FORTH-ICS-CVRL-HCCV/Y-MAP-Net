@@ -1203,19 +1203,34 @@ class PoseEstimator2D:
         for i in range(self.cfg['outputChannels']):
                      self.labels.append(label_heatmap(self.cfg,i,self.keypoint_names,self.instanceLabels))
         #---------------------------------------------------------------------
-        self.chanDenoiseR = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denosing R")
-        self.chanDenoiseG = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denosing G")
-        self.chanDenoiseB = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denosing B")
-        self.chanDepth    = retrieveHeatmapIndex(self.cfg['heatmaps'],"depthmap")
-        self.chanNormalX  = retrieveHeatmapIndex(self.cfg['heatmaps'],"normalX")
-        self.chanNormalY  = retrieveHeatmapIndex(self.cfg['heatmaps'],"normalY")
-        self.chanNormalZ  = retrieveHeatmapIndex(self.cfg['heatmaps'],"normalZ")
-        self.chanText     = retrieveHeatmapIndex(self.cfg['heatmaps'],"Text")
-        self.chanVehicle  = retrieveHeatmapIndex(self.cfg['heatmaps'],"Vehicle")
-        self.chanAnimal   = retrieveHeatmapIndex(self.cfg['heatmaps'],"Animal")
-        self.chanObject   = retrieveHeatmapIndex(self.cfg['heatmaps'],"Object")
-        self.chanFurniture= retrieveHeatmapIndex(self.cfg['heatmaps'],"Furniture")
-        self.chanAppliance= retrieveHeatmapIndex(self.cfg['heatmaps'],"Appliance")
+        
+        #Legacy heatmap IDs
+        self.chanDepth     = 29
+        self.chanNormalX   = 30
+        self.chanNormalY   = 31
+        self.chanNormalZ   = 32
+        self.chanText      = 33
+        self.chanVehicle   = 35
+        self.chanAnimal    = 36
+        self.chanObject    = 37
+        self.chanFurniture = 38
+        self.chanAppliance = 39
+
+        # "Programmable" heatmap IDs
+        if "heatmaps" in self.cfg:
+          self.chanDenoiseR = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denosing R")
+          self.chanDenoiseG = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denosing G")
+          self.chanDenoiseB = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denosing B")
+          self.chanDepth    = retrieveHeatmapIndex(self.cfg['heatmaps'],"depthmap")
+          self.chanNormalX  = retrieveHeatmapIndex(self.cfg['heatmaps'],"normalX")
+          self.chanNormalY  = retrieveHeatmapIndex(self.cfg['heatmaps'],"normalY")
+          self.chanNormalZ  = retrieveHeatmapIndex(self.cfg['heatmaps'],"normalZ")
+          self.chanText     = retrieveHeatmapIndex(self.cfg['heatmaps'],"Text")
+          self.chanVehicle  = retrieveHeatmapIndex(self.cfg['heatmaps'],"Vehicle")
+          self.chanAnimal   = retrieveHeatmapIndex(self.cfg['heatmaps'],"Animal")
+          self.chanObject   = retrieveHeatmapIndex(self.cfg['heatmaps'],"Object")
+          self.chanFurniture= retrieveHeatmapIndex(self.cfg['heatmaps'],"Furniture")
+          self.chanAppliance= retrieveHeatmapIndex(self.cfg['heatmaps'],"Appliance")
         #--------------------------------------------------------------------- 
 
 
@@ -1417,10 +1432,9 @@ class PoseEstimator2D:
 
             self.imageIn, self.depthmap, self.heatmapsOut = convertIO(self.cfg,self.input_image,self.keypoints_predictions,self.heatmap_threshold)
 
-
-            self.denoised = self.process_denoising(self.imageIn, self.heatmapsOut[self.chanDenoiseR], self.heatmapsOut[self.chanDenoiseG], self.heatmapsOut[self.chanDenoiseB])
-            cv2.imshow('Denoised RGB', self.denoised)
-            cv2.imshow('Input RGB', self.imageIn)
+            
+            if "heatmaps" in self.cfg:
+              self.denoised = self.process_denoising(self.imageIn, self.heatmapsOut[self.chanDenoiseR], self.heatmapsOut[self.chanDenoiseG], self.heatmapsOut[self.chanDenoiseB])
 
             """
             vClose = countHits(self.heatmapsOut[44])
@@ -1565,6 +1579,8 @@ class PoseEstimator2D:
             # Visualize the heatmaps on the source image
             if show:
                visualize_heatmaps(self.cfg, self.instanceLabels, self.imageIn, self.frameNumber, self.heatmapsOut, self.keypoint_names, threshold=self.heatmap_threshold, drawJoints=self.drawJoints, drawPAFs=self.drawPAFs )
+               cv2.imshow('Denoised RGB', self.denoised)
+               cv2.imshow('Input RGB',    self.imageIn)
 
             #depthmap         =  self.heatmapsOut[17]
             #normals = compute_normals(self.depthmap)
@@ -1621,7 +1637,8 @@ class PoseEstimator2D:
                  #print("Depth 16 bit MAX: ",np.max(self.heatmap_16b))
                  #self.heatmap_16b = self.heatmap_16b / 32767
                  self.heatmap_16b = 0.5 + ( self.heatmap_16b / 65534 )
-                 cv2.imshow('Depth 16-bit', self.heatmap_16b)
+                 if show:
+                    cv2.imshow('Depth 16-bit', self.heatmap_16b)
 
 
 
@@ -1638,12 +1655,14 @@ class PoseEstimator2D:
               #  cv2.imshow('Normals from improved depthmap', normalsImp)
 
             if not self.skeletons is None:
-               drawSkeletons(self.skeletons, self.keypoint_names, self.cfg["keypoint_parents"], image_shape=(480, 640, 3))
+               if show:
+                 drawSkeletons(self.skeletons, self.keypoint_names, self.cfg["keypoint_parents"], image_shape=(480, 640, 3))
 
 
             if (not self.labeled_map is None) and (not self.bounding_boxes is None):
                labelsVisualiation = draw_labeled_blobs(self.labeled_map, self.bounding_boxes)
-               cv2.imshow('Person IDs', labelsVisualiation)
+               if show:
+                 cv2.imshow('Person IDs', labelsVisualiation)
 
             if (self.description):
              if show:

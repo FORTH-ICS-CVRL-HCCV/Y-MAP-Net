@@ -375,10 +375,10 @@ def main_pose_estimation():
 
     tiler     = PoseEstimatorTiler(estimator, tile_size=(estimator.cfg['inputWidth'],estimator.cfg['inputHeight']), overlap=(0, 0) )
 
-    if (save):
+    if (save) and (show):
         disable_screensaver()
 
-    if (visualize):
+    if (show):
            estimator.setup_threshold_control_window()
 
     failedFrames = 0
@@ -439,7 +439,8 @@ def main_pose_estimation():
             #Visualize
             if (visualize):
               
-              estimator.update_thresholds_from_gui()
+              if (show):
+               estimator.update_thresholds_from_gui()
               if (tile):
                frameWithVis = frame.copy()
                tiler.visualize(frameWithVis)
@@ -483,7 +484,7 @@ def main_pose_estimation():
     if show:
       cv2.destroyAllWindows()
 
-    if (save):
+    if (save) and (show):
         enable_screensaver()
         os.system("ffmpeg -framerate 25 -i colorFrame_0_%%05d.png -vf scale=-1:720 -y -r 25 -pix_fmt yuv420p -threads 8 %s_lastRun3DHiRes.mp4" % videoFilePath)
         os.system("rm colorFrame*.png")

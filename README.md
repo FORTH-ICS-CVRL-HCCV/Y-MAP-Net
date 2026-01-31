@@ -31,6 +31,8 @@ scripts/setup.sh
 
 ## Running
 
+![Illustration2](https://github.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/doc/screenshot2.jpg?raw=true)
+
 To run use :
 ```
 ./runYMAPNet.sh
