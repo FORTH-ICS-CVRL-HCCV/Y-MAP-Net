@@ -1,0 +1,29 @@
+# Core ML / TensorFlow
+tensorflow[and-cuda]
+tensorflow-model-optimization
+tf_keras
+
+# Numerical / acceleration
+numpy
+numba
+
+# TensorBoard
+tensorboard
+tensorboard-plugin-profile
+
+# Utilities
+etils
+importlib_resources
+wget
+
+# ONNX ecosystem
+tf2onnx
+onnx
+onnxruntime
+
+# Computer vision
+opencv-python
+
+# UI / demos
+gradio
+

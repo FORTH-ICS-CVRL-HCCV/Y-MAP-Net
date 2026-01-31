@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<CodeBlocks_project_file>
+	<FileVersion major="1" minor="6" />
+	<Project>
+		<Option title="DataLoader" />
+		<Option pch_mode="2" />
+		<Option compiler="gcc" />
+		<Build>
+			<Target title="Debug">
+				<Option output="./DataLoader" prefix_auto="1" extension_auto="1" />
+				<Option object_output="obj/Debug/" />
+				<Option type="3" />
+				<Option compiler="gcc" />
+				<Option createDefFile="1" />
+				<Option createStaticLib="1" />
+				<Compiler>
+					<Add option="-Wall" />
+					<Add option="-pg" />
+					<Add option="-fPIC" />
+					<Add option="-g" />
+					<Add option="-DINTEL_OPTIMIZATIONS" />
+					<Add option="-D_GNU_SOURCE" />
+				</Compiler>
+				<Linker>
+					<Add option="-pg" />
+				</Linker>
+			</Target>
+			<Target title="Release">
+				<Option output="./DataLoader" prefix_auto="1" extension_auto="1" />
+				<Option object_output="obj/Release/" />
+				<Option type="3" />
+				<Option compiler="gcc" />
+				<Option createDefFile="1" />
+				<Option createStaticLib="1" />
+				<Compiler>
+					<Add option="-O2" />
+				</Compiler>
+				<Linker>
+					<Add option="-s" />
+				</Linker>
+			</Target>
+		</Build>
+		<Compiler>
+			<Add option="-O3" />
+			<Add option="-Wall" />
+			<Add option="-fPIC" />
+			<Add option="-march=native" />
+			<Add option="-mtune=native" />
+			<Add option="-D_GNU_SOURCE" />
+		</Compiler>
+		<Linker>
+			<Add option="-pthread" />
+			<Add option="-lm" />
+			<Add option="-ljpeg" />
+			<Add option="-lpng" />
+			<Add option="-lzstd" />
+			<Add option="-fPIC" />
+		</Linker>
+		<Unit filename="DBLoader.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="DBLoader.h" />
+		<Unit filename="DataLoader.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="DataLoader.h" />
+		<Unit filename="HeatmapGenerator.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="HeatmapGenerator.h" />
+		<Unit filename="PrepareBatch.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="PrepareBatch.h" />
+		<Unit filename="cache.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="cache.h" />
+		<Unit filename="codecs/asciiInput.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="codecs/asciiInput.h" />
+		<Unit filename="codecs/bmpInput.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="codecs/bmpInput.h" />
+		<Unit filename="codecs/codecs.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="codecs/codecs.h" />
+		<Unit filename="codecs/image.h" />
+		<Unit filename="codecs/jpgInput.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="codecs/jpgInput.h" />
+		<Unit filename="codecs/pfmInput.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="codecs/pfmInput.h" />
+		<Unit filename="codecs/pngInput.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="codecs/pngInput.h" />
+		<Unit filename="codecs/ppmInput.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="codecs/ppmInput.h" />
+		<Unit filename="codecs/pzp.h" />
+		<Unit filename="codecs/pzpInput.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="codecs/pzpInput.h" />
+		<Unit filename="configuration.h" />
+		<Unit filename="descriptorConverter.h" />
+		<Unit filename="processing/AVX2/augmentations.h" />
+		<Unit filename="processing/AVX2/conversions.h" />
+		<Unit filename="processing/AVX2/normals.h" />
+		<Unit filename="processing/AVX2/sobel.h" />
+		<Unit filename="processing/augmentations.h" />
+		<Unit filename="processing/bilateral.h" />
+		<Unit filename="processing/conversions.h" />
+		<Unit filename="processing/draw.h" />
+		<Unit filename="processing/embeddings.h" />
+		<Unit filename="processing/flip.h" />
+		<Unit filename="processing/getpixels.h" />
+		<Unit filename="processing/labels.h" />
+		<Unit filename="processing/normals.h" />
+		<Unit filename="processing/resize.h" />
+		<Unit filename="processing/sobel.h" />
+		<Unit filename="pthreadWorkerPool.h" />
+		<Unit filename="tools.h" />
+		<Extensions>
+			<lib_finder disable_auto="1" />
+		</Extensions>
+	</Project>
+</CodeBlocks_project_file>

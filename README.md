@@ -32,10 +32,17 @@ scripts/setup.sh
 ## Running
 
 To run use :
-``` 
-source venv/bin/activate
+```
 ./runYMAPNet.sh
-``` 
+```
+
+## Training
+ 
+Since preparing the involved datasets to train the project is very complicated..
+We need some time before the full training code is polished enough to be redistributed..
+Thank you for your patience!
+
+
 
 ## More Information
 
