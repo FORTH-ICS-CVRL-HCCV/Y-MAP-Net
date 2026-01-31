@@ -27,7 +27,16 @@ else
     python3 -m venv venv
     source venv/bin/activate
   else
-    echo "Colab mode: not creating venv"
+    echo "Colab mode: creating a venv to make the rest of our scripts happy"
+    # create the expected directory structure
+    mkdir -p venv/bin
+
+    # create a dummy activate script
+    echo '#!/bin/sh' > venv/bin/activate
+    echo 'echo "Dummy venv activated"' >> venv/bin/activate
+
+   # make it executable (some scripts check this)
+   chmod +x venv/bin/activate 
   fi
 fi
 
