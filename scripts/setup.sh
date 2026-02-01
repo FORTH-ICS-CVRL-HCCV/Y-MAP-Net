@@ -43,8 +43,8 @@ fi
 python3 -m pip install --upgrade pip
 
 if [ "$USE_VENV" -eq "0" ]; then
-  echo "Setting up Colab packages"
-  python3 -m pip install tensorflow tensorflow-model-optimization tf_keras numpy numba tensorboard tensorboard-plugin-profile etils importlib_resources tf2onnx onnxruntime onnx opencv-python wget gradio
+  echo "Setting up Colab specific packages"
+  python3 -m pip install tensorflow tf_keras numpy numba tf2onnx onnxruntime onnx opencv-python wget
 else
   echo "Setting up regular set of packages"
   #python3 -m pip install nvidia-cudnn-cu12 tensorflow==2.17.0 tensorflow-model-optimization tf_keras numpy numba tensorboard tensorboard-plugin-profile tf2onnx onnxruntime onnx opencv-python wget gradio
