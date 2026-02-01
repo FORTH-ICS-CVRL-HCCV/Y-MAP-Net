@@ -1204,6 +1204,8 @@ class PoseEstimator2D:
                      self.labels.append(label_heatmap(self.cfg,i,self.keypoint_names,self.instanceLabels))
         #---------------------------------------------------------------------
         
+        self.denoised = None
+
         #Legacy heatmap IDs
         self.chanDepth     = 29
         self.chanNormalX   = 30
@@ -1218,9 +1220,9 @@ class PoseEstimator2D:
 
         # "Programmable" heatmap IDs
         if "heatmaps" in self.cfg:
-          self.chanDenoiseR = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denosing R")
-          self.chanDenoiseG = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denosing G")
-          self.chanDenoiseB = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denosing B")
+          self.chanDenoiseR = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denoising R")
+          self.chanDenoiseG = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denoising G")
+          self.chanDenoiseB = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denoising B")
           self.chanDepth    = retrieveHeatmapIndex(self.cfg['heatmaps'],"depthmap")
           self.chanNormalX  = retrieveHeatmapIndex(self.cfg['heatmaps'],"normalX")
           self.chanNormalY  = retrieveHeatmapIndex(self.cfg['heatmaps'],"normalY")
@@ -1579,8 +1581,9 @@ class PoseEstimator2D:
             # Visualize the heatmaps on the source image
             if show:
                visualize_heatmaps(self.cfg, self.instanceLabels, self.imageIn, self.frameNumber, self.heatmapsOut, self.keypoint_names, threshold=self.heatmap_threshold, drawJoints=self.drawJoints, drawPAFs=self.drawPAFs )
-               cv2.imshow('Denoised RGB', self.denoised)
-               cv2.imshow('Input RGB',    self.imageIn)
+               if self.denoised is not None:
+                 cv2.imshow('Denoised RGB', self.denoised)
+                 cv2.imshow('Input RGB',    self.imageIn) #If showing denoised then also show input
 
             #depthmap         =  self.heatmapsOut[17]
             #normals = compute_normals(self.depthmap)
