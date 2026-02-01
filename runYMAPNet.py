@@ -486,11 +486,11 @@ def main_pose_estimation():
 
     if (save) and (show):
         enable_screensaver()
-        os.system("ffmpeg -framerate 25 -i colorFrame_0_%%05d.png -vf scale=-1:720 -y -r 25 -pix_fmt yuv420p -threads 8 %s_lastRun3DHiRes.mp4" % videoFilePath)
+        os.system("ffmpeg -nostdin -framerate 25 -i colorFrame_0_%%05d.png -vf scale=-1:720 -y -r 25 -pix_fmt yuv420p -threads 8 %s_lastRun3DHiRes.mp4" % videoFilePath)
         os.system("rm colorFrame*.png")
 
     if (illustrate):
-        os.system("ffmpeg -framerate 25 -i composite_%%05d.png -vf scale=-1:720 -y -r 25 -pix_fmt yuv420p -threads 8 %s_illustration.mp4" % videoFilePath)
+        os.system("ffmpeg -nostdin -framerate 25 -i composite_%%05d.png -vf scale=-1:720 -y -r 25 -pix_fmt yuv420p -threads 8 %s_illustration.mp4" % videoFilePath)
         os.system("rm composite_*.png")
 
 
