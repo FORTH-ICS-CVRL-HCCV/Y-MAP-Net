@@ -1220,9 +1220,23 @@ class PoseEstimator2D:
 
         # "Programmable" heatmap IDs
         if "heatmaps" in self.cfg:
-          self.chanDenoiseR = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denoising R")
-          self.chanDenoiseG = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denoising G")
-          self.chanDenoiseB = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denoising B")
+ 
+          #Fix typo..
+          if "Denosing R" in self.cfg['heatmaps']:
+            self.chanDenoiseR = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denosing R")
+          else:
+            self.chanDenoiseR = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denoising R")
+
+          if "Denosing G" in self.cfg['heatmaps']:
+            self.chanDenoiseG = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denosing G")
+          else:
+            self.chanDenoiseG = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denoising G")
+
+          if "Denosing B" in self.cfg['heatmaps']:
+            self.chanDenoiseB = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denosing B")
+          else:
+            self.chanDenoiseB = retrieveHeatmapIndex(self.cfg['heatmaps'],"Denoising B")
+
           self.chanDepth    = retrieveHeatmapIndex(self.cfg['heatmaps'],"depthmap")
           self.chanNormalX  = retrieveHeatmapIndex(self.cfg['heatmaps'],"normalX")
           self.chanNormalY  = retrieveHeatmapIndex(self.cfg['heatmaps'],"normalY")
