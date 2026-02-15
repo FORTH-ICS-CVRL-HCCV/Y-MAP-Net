@@ -6,6 +6,6 @@ cd ..
 
 
 #This is the latest development model!
-scripts/downloadModel.sh 261
+scripts/downloadModel.sh 262
 
 exit 0

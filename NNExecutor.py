@@ -71,17 +71,18 @@ class TFExecutor():
                outputChannels = 18,
                VRAMLimit      = None,
                fp16           = False,
-               profiling      = False
+               profiling      = False,
+               pruneTokens    = False
               ):
-               self.input_size        = (inputWidth,inputHeight)
-               self.output_size       = (targetWidth,targetHeight)
-               self.numberOfHeatmaps  = outputChannels
-               self.profiling         = profiling
-               self.heatmaps          = None
-               self.heatmaps_16b      = None
-               self.description       = None
+               self.input_size           = (inputWidth,inputHeight)
+               self.output_size          = (targetWidth,targetHeight)
+               self.numberOfHeatmaps     = outputChannels
+               self.profiling            = profiling
+               self.heatmaps             = None
+               self.heatmaps_16b         = None
+               self.description          = None
                self.multihot_description = None
-               self.activity          = None
+               self.activity             = None
                #Tensorflow attempt to be reasonable
                #------------------------------------------
                print("Using Tensorflow Runtime")
@@ -156,8 +157,15 @@ class TFExecutor():
                  mixed_precision.set_global_policy('mixed_float16')
                  self.inf_dtype = np.float16
 
-               from NNModel import load_keypoints_model
-               self.model,self.input_size,self.output_size,self.numberOfHeatmaps = load_keypoints_model(modelPath)
+               if (pruneTokens):
+                   from NNModel import load_pictorial_only_ymapnet
+                   print("\n\n\n\n\nLoading pruned YMAPNET version, don't wonder why you wont see any tokens/descriptions..!\n\n\n\n\n")
+                   self.model,self.fast_call,self.input_size,self.output_size,self.numberOfHeatmaps = load_pictorial_only_ymapnet(modelPath)
+                   #self.model.summary()
+               else:
+                   from NNModel import load_keypoints_model
+                   self.model,self.input_size,self.output_size,self.numberOfHeatmaps = load_keypoints_model(modelPath)
+               
                #self.model.export("2d_pose_estimation", "tf_saved_model")    #Debug models
 
                if (fp16):
@@ -445,7 +453,8 @@ class NNExecutor():
                targetWidth    = 96,
                targetHeight   = 96,
                outputChannels = 18,
-               profiling      = False
+               profiling      = False,
+               pruneTokens    = False
               ):
                 defaultModelPath = "2d_pose_estimation/"
                 self.hz    = 0.0
@@ -463,7 +472,8 @@ class NNExecutor():
                                                 inputHeight    = inputHeight,
                                                 targetWidth    = targetWidth,
                                                 targetHeight   = targetHeight,
-                                                outputChannels = outputChannels
+                                                outputChannels = outputChannels,
+                                                pruneTokens    = pruneTokens
                                                 )
                 elif (engine=="tf-lite") or (engine=="tflite"):
                         if (modelPath==defaultModelPath):

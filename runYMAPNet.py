@@ -297,6 +297,7 @@ def main_pose_estimation():
     save      = False
     tile      = False
     noise     = 0.0
+    pruneTokens = False
     blur      = 0
     engine    = "tensorflow"
     monitor   = list()
@@ -334,6 +335,8 @@ def main_pose_estimation():
               customCrop = False 
            if (sys.argv[i]=="--save"):
               save=True
+           if (sys.argv[i]=="--prune"):
+              pruneTokens=True
            if (sys.argv[i]=="--tile"):
               tile=True
            if (sys.argv[i]=="--blur"):
@@ -370,7 +373,8 @@ def main_pose_estimation():
     cap = getCaptureDeviceFromPath(videoFilePath,videoWidth,videoHeight)
 
     from PoseEstimator2D import PoseEstimator2D, PoseEstimatorTiler
-    estimator = PoseEstimator2D(modelPath=model_path, threshold=threshold, keypoint_threshold=keypoint_threshold, engine=engine, profiling=profiling, illustrate=illustrate, monitor=monitor, window_arrangement=window_arrangement )
+    estimator = PoseEstimator2D(modelPath=model_path, threshold=threshold, keypoint_threshold=keypoint_threshold, engine=engine, profiling=profiling, illustrate=illustrate, 
+                                pruneTokens=pruneTokens, monitor=monitor, window_arrangement=window_arrangement )
     estimator.addedNoise = noise * 255.0
 
     tiler     = PoseEstimatorTiler(estimator, tile_size=(estimator.cfg['inputWidth'],estimator.cfg['inputHeight']), overlap=(0, 0) )

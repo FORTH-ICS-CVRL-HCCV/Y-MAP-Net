@@ -1105,7 +1105,8 @@ def thresholded_sum_of_heatmaps(a, b, c, threshold=120/3):
     return np.where(s > threshold, 120, -120)
 #----------------------------------------------------------------------------------------
 class PoseEstimator2D:
-    def __init__(self, modelPath, threshold=30, keypoint_threshold=50.0, engine="tensorflow", profiling = False, illustrate=False, monitor=list(), window_arrangement=list()):
+    def __init__(self, modelPath, threshold=30, keypoint_threshold=50.0, engine="tensorflow", profiling = False, illustrate=False, 
+                       pruneTokens=False, monitor=list(), window_arrangement=list()):
         self.model_path     = '2d_pose_estimation'
         self.cfg            = loadJSONConfiguration("%s/configuration.json" % self.model_path)
         self.serial         = self.cfg["serial"]
@@ -1123,7 +1124,8 @@ class PoseEstimator2D:
                                              inputHeight    = self.cfg['inputHeight'],
                                              targetWidth    = self.cfg['outputWidth'],
                                              targetHeight   = self.cfg['outputHeight'],
-                                             outputChannels = self.cfg['outputChannels']
+                                             outputChannels = self.cfg['outputChannels'],
+                                             pruneTokens    = pruneTokens
                                             )
         #---------------------------------------------------------------------
         """
@@ -1422,12 +1424,13 @@ class PoseEstimator2D:
              #Dynamically switch description subsystem based on what is available (GloVe or multihot)
              if (self.multihot_labels is None):
                self.glove = self.keypoints_model.description()
-               print("Recovered Glove shape ",self.glove.shape)
-               words = []
-               words = vector_to_sentence_close(self.glove, self.possible_glove_embeddings, D=self.D) 
-               #for i in range(7):
+               if (self.glove is not None):
+                 print("Recovered Glove shape ",self.glove.shape)
+                 words = []
+                 words = vector_to_sentence_close(self.glove, self.possible_glove_embeddings, D=self.D) 
+                 #for i in range(7):
                   #word = vector_to_sentence_close(self.glove[i], self.possible_glove_embeddings, D=self.D)
-               for i,word in enumerate(words):
+                 for i,word in enumerate(words):
                   print(i," - ",word)
                   self.description = self.description + " " + word
              else:
