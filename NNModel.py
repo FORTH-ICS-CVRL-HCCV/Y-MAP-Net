@@ -96,52 +96,49 @@ def load_keypoints_model(model_path):
     print("Output Shape is ", output_size)
 
     return model,input_size,output_size,numberOfHeatmaps
-#------------------------------------------------------------------------------- 
-
+#-------------------------------------------------------------------------------
 def load_pictorial_only_ymapnet(
     model_path,
     *,
     keep_hm16=False,
     keep_descriptors=False,
     use_tf_function=True,
-    use_xla=False,          # default OFF (often slower)
+    use_xla=False,
     warmup=True,
     warmup_iters=5,
+    force_save_reload=False,   # <---- Save/Reload
 ):
     """
-    Loads model via load_keypoints_model() :contentReference[oaicite:1]{index=1} and prunes token outputs.
-
-    Performance-oriented defaults:
-      - keep only 'hm' (single output tensor) unless keep_hm16/keep_descriptors are enabled
-      - tf.function enabled, XLA disabled by default
-      - fixed input_signature to avoid retracing
+    Load via load_keypoints_model() and prune token heads.
+    Optionally force save+reload to lock in pruned graph.
 
     Returns:
-      pruned_model, fast_call_or_None, input_size, output_size, numberOfHeatmaps
+        pruned_model, fast_call_or_None, input_size, output_size, numberOfHeatmaps
     """
-    model, input_size, output_size, numberOfHeatmaps = load_keypoints_model(model_path)  # :contentReference[oaicite:2]{index=2}
+    import os
+    import tempfile
+    model, input_size, output_size, numberOfHeatmaps = load_keypoints_model(model_path)
 
     if not isinstance(model, tf.keras.Model):
         print("Warning: not a tf.keras.Model (TF saved_model fallback). Returning as-is.")
         return model, None, input_size, output_size, numberOfHeatmaps
 
-    # --- choose outputs (KEEP SINGLE OUTPUT by default for speed/benchmark sanity) ---
+    # --- Keep pictorial outputs only ---
     outputs = []
-    outputs.append(model.get_layer("hm").output)  # :contentReference[oaicite:3]{index=3}
+    outputs.append(model.get_layer("hm").output)
 
     if keep_hm16:
         try:
-            outputs.append(model.get_layer("hm_16b").output)  # :contentReference[oaicite:4]{index=4}
+            outputs.append(model.get_layer("hm_16b").output)
         except Exception:
             pass
 
     if keep_descriptors:
         try:
-            outputs.append(model.get_layer("descriptors").output)  # :contentReference[oaicite:5]{index=5}
+            outputs.append(model.get_layer("descriptors").output)
         except Exception:
             pass
 
-    # If only hm, return a tensor output (not a list)
     pruned_outputs = outputs[0] if len(outputs) == 1 else outputs
 
     pruned = tf.keras.Model(
@@ -150,18 +147,45 @@ def load_pictorial_only_ymapnet(
         name=model.name + "_pictorial_only",
     )
 
-    # Keras compile doesn't speed inference much, but doesn't hurt.
-    # (We keep it lightweight.)
+    # ----------------------------------------------------------
+    # Force save & reload (graph hard-pruning)
+    # ----------------------------------------------------------
+    if force_save_reload:
+        print("Forcing save+reload of pruned model...")
+        tmp_dir = tempfile.mkdtemp()
+        tmp_path = os.path.join(tmp_dir, "pruned.keras")
+        print("Result is: ",tmp_path)
+
+        pruned.save(tmp_path)
+        pruned = tf.keras.models.load_model(
+            tmp_path,
+            compile=False,
+            safe_mode=False
+        )
+
+        # Optional: clean up directory
+        try:
+            os.remove(tmp_path)
+            os.rmdir(tmp_dir)
+        except Exception:
+            pass
+
+    # Compile (minimal; mainly for predict plumbing)
     pruned.compile(optimizer="adam", loss=None, jit_compile=False)
 
+    # ----------------------------------------------------------
+    # Fast inference path
+    # ----------------------------------------------------------
     fast_call = None
     if use_tf_function:
-        # Fix input signature to avoid retracing
-        h, w = int(input_size[1]), int(input_size[0])  # your loader uses (W,H) :contentReference[oaicite:6]{index=6}
+        h, w = int(input_size[1]), int(input_size[0])
         inp_dtype = pruned.inputs[0].dtype
-        sig = [tf.TensorSpec(shape=[None, h, w, 3], dtype=inp_dtype)]
 
-        @tf.function(input_signature=sig, jit_compile=bool(use_xla))
+        signature = [
+            tf.TensorSpec(shape=[None, h, w, 3], dtype=inp_dtype)
+        ]
+
+        @tf.function(input_signature=signature, jit_compile=bool(use_xla))
         def fast_call(x):
             return pruned(x, training=False)
 
@@ -169,7 +193,6 @@ def load_pictorial_only_ymapnet(
             dummy = tf.zeros([1, h, w, 3], dtype=inp_dtype)
             for _ in range(int(warmup_iters)):
                 y = fast_call(dummy)
-                # Force some computation on result so timing doesn’t get weird
                 if isinstance(y, (list, tuple)):
                     _ = tf.reduce_sum([tf.reduce_sum(t) for t in y])
                 else:
