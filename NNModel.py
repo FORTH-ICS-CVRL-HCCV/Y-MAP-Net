@@ -101,76 +101,79 @@ def load_keypoints_model(model_path):
 def load_pictorial_only_ymapnet(
     model_path,
     *,
-    export_path=None,
-    use_xla=True,
+    keep_hm16=False,
+    keep_descriptors=False,
+    use_tf_function=True,
+    use_xla=False,          # default OFF (often slower)
     warmup=True,
-    warmup_batch=1,
+    warmup_iters=5,
 ):
     """
-    Load via load_keypoints_model() and prune token heads.
-    Then enable graph/XLA execution for faster inference.
+    Loads model via load_keypoints_model() :contentReference[oaicite:1]{index=1} and prunes token outputs.
+
+    Performance-oriented defaults:
+      - keep only 'hm' (single output tensor) unless keep_hm16/keep_descriptors are enabled
+      - tf.function enabled, XLA disabled by default
+      - fixed input_signature to avoid retracing
 
     Returns:
-      pruned_model, fast_call, input_size, output_size, numberOfHeatmaps
-    Where:
-      - pruned_model: tf.keras.Model with pictorial outputs only
-      - fast_call: a compiled callable: fast_call(x) -> outputs
+      pruned_model, fast_call_or_None, input_size, output_size, numberOfHeatmaps
     """
-    model, input_size, output_size, numberOfHeatmaps = load_keypoints_model(model_path)  # :contentReference[oaicite:1]{index=1}
+    model, input_size, output_size, numberOfHeatmaps = load_keypoints_model(model_path)  # :contentReference[oaicite:2]{index=2}
 
-    # If TF saved_model fallback happened, can't prune same way.
     if not isinstance(model, tf.keras.Model):
-        print("Warning: model is not a tf.keras.Model (TF saved_model fallback). Returning as-is.")
+        print("Warning: not a tf.keras.Model (TF saved_model fallback). Returning as-is.")
         return model, None, input_size, output_size, numberOfHeatmaps
 
-    # --- Prune outputs by your stable layer names from NNModel.py ---
-    try:
-        outputs = [model.get_layer("hm").output]  # 8-bit heatmaps :contentReference[oaicite:2]{index=2}
-    except Exception as e:
-        raise RuntimeError("Could not locate layer 'hm' to keep pictorial output.") from e
+    # --- choose outputs (KEEP SINGLE OUTPUT by default for speed/benchmark sanity) ---
+    outputs = []
+    outputs.append(model.get_layer("hm").output)  # :contentReference[oaicite:3]{index=3}
 
-    # Optional 16-bit heatmaps :contentReference[oaicite:3]{index=3}
-    try:
-        outputs.append(model.get_layer("hm_16b").output)
-    except Exception:
-        pass
+    if keep_hm16:
+        try:
+            outputs.append(model.get_layer("hm_16b").output)  # :contentReference[oaicite:4]{index=4}
+        except Exception:
+            pass
 
-    # Optional descriptors :contentReference[oaicite:4]{index=4}
-    try:
-        outputs.append(model.get_layer("descriptors").output)
-    except Exception:
-        pass
+    if keep_descriptors:
+        try:
+            outputs.append(model.get_layer("descriptors").output)  # :contentReference[oaicite:5]{index=5}
+        except Exception:
+            pass
+
+    # If only hm, return a tensor output (not a list)
+    pruned_outputs = outputs[0] if len(outputs) == 1 else outputs
 
     pruned = tf.keras.Model(
         inputs=model.inputs,
-        outputs=outputs if len(outputs) > 1 else outputs[0],
+        outputs=pruned_outputs,
         name=model.name + "_pictorial_only",
     )
 
-    # Optional: save+reload to “lock in” the pruned graph in the artifact
-    if export_path is not None:
-        pruned.save(export_path)
-        pruned = tf.keras.models.load_model(export_path, compile=False, safe_mode=False)
+    # Keras compile doesn't speed inference much, but doesn't hurt.
+    # (We keep it lightweight.)
+    pruned.compile(optimizer="adam", loss=None, jit_compile=False)
 
-    # --- Compile: mainly to ensure predict() uses a traced function ---
-    # Loss is irrelevant for inference; this just sets up the Keras plumbing.
-    pruned.compile(
-        optimizer="adam",
-        loss=None,   # no training
-        jit_compile=False  # we use XLA on the call below (more direct)
-    )
+    fast_call = None
+    if use_tf_function:
+        # Fix input signature to avoid retracing
+        h, w = int(input_size[1]), int(input_size[0])  # your loader uses (W,H) :contentReference[oaicite:6]{index=6}
+        inp_dtype = pruned.inputs[0].dtype
+        sig = [tf.TensorSpec(shape=[None, h, w, 3], dtype=inp_dtype)]
 
-    # --- Fast inference path (graph + optional XLA) ---
-    # Note: XLA can help on GPU/CPU depending on shapes and ops.
-    @tf.function(jit_compile=bool(use_xla), reduce_retracing=True)
-    def fast_call(x):
-        return pruned(x, training=False)
+        @tf.function(input_signature=sig, jit_compile=bool(use_xla))
+        def fast_call(x):
+            return pruned(x, training=False)
 
-    # Warm-up run to trigger tracing/compilation before timing
-    if warmup:
-        h, w = input_size[1], input_size[0]  # your code stores (W,H) in input_size :contentReference[oaicite:5]{index=5}
-        dummy = tf.zeros([warmup_batch, h, w, 3], dtype=pruned.inputs[0].dtype)
-        _ = fast_call(dummy)
+        if warmup:
+            dummy = tf.zeros([1, h, w, 3], dtype=inp_dtype)
+            for _ in range(int(warmup_iters)):
+                y = fast_call(dummy)
+                # Force some computation on result so timing doesn’t get weird
+                if isinstance(y, (list, tuple)):
+                    _ = tf.reduce_sum([tf.reduce_sum(t) for t in y])
+                else:
+                    _ = tf.reduce_sum(y)
 
     return pruned, fast_call, input_size, output_size, numberOfHeatmaps
 #-------------------------------------------------------------------------------
