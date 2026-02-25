@@ -17,10 +17,10 @@ FILENAME="model.zip"   # change to whatever you want
 #rm -f cookies.txt page.html
 
 #Use Google Docs
-#wget -o "$FILENAME" "drive.google.com/u/3/uc?id=$FILEID&export=download&confirm=yes"
+#wget "drive.google.com/u/3/uc?id=$FILEID&export=download&confirm=yes" -O "$FILENAME"
 
 #Use trusty old ammar server..
-wget -o "$FILENAME" "http://ammar.gr/ymapnet/archive/YMapNET_ICRA26.zip"
+wget  "http://ammar.gr/ymapnet/archive/YMapNET_ICRA26.zip" -O "$FILENAME"
 
 unzip -o "$FILENAME"
 
