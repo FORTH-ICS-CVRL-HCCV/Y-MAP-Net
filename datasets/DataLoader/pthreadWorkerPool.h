@@ -14,13 +14,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <stdarg.h>
+#include <unistd.h>
+#include <time.h>
+#include <pwd.h>
+#include <sched.h>
+#include <sys/resource.h>
 
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
-static const char pthreadWorkerPoolVersion[]="0.33";
+static const char pthreadWorkerPoolVersion[]="0.40";
 
 #define SPIN_SLEEP_TIME_MICROSECONDS 120
 
@@ -48,7 +54,6 @@ struct workerPool
     volatile char mainThreadWaiting;
     //---------------------
     volatile int activeWorkers;
-    volatile int completedWorkNumber;
     //---------------------
     pthread_attr_t initializationAttribute;
 
@@ -68,7 +73,6 @@ struct workerPool
     pthread_t * workerPoolIDs;
 };
 
-#include <stdarg.h>
 static void logmsg(const char *format, ...)
 {
  #if DEBUG_LOG
@@ -86,26 +90,26 @@ static void logmsg(const char *format, ...)
 }
 
 
-#include <unistd.h>
-#include <time.h>
-
-
 static unsigned long tickBaseTPMN = 0;
-static unsigned long GetTickCountMicrosecondsT()
+static pthread_once_t tickBaseOnce = PTHREAD_ONCE_INIT;
+static void initTickBase(void)
 {
     struct timespec ts;
-    if ( clock_gettime(CLOCK_MONOTONIC,&ts) != 0)
-        {
-            return 0;
-        }
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+        tickBaseTPMN = ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
 
-    if (tickBaseTPMN==0)
-        {
-            tickBaseTPMN  = ts.tv_sec*1000000 + ts.tv_nsec/1000;
-            return 0;
-        }
-
-    return ( ts.tv_sec*1000000 + ts.tv_nsec/1000 ) - tickBaseTPMN ;
+/**
+ * @brief Return number of clock ticks for our system in microseconds
+ * @return Returns number of ticks in microseconds.
+ */
+static unsigned long GetTickCountMicrosecondsT()
+{
+    pthread_once(&tickBaseOnce, initTickBase);
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (ts.tv_sec * 1000000 + ts.tv_nsec / 1000) - tickBaseTPMN;
 }
 
 /**
@@ -123,9 +127,6 @@ static int nanoSleepT(long nanoseconds)
     return nanosleep(&req, &rem);
 }
 
-
-#include <pwd.h>
-#include <sched.h>
 /**
  * @brief Function to stick the thread that calls the function to a specific CPU core, if the core does not exist it will wrap-around depending on the number of cores.
  * @param Core we want to associate this thread with.
@@ -152,8 +153,6 @@ static int stick_this_thread_to_core(int core_id)
    #endif
 }
 
-
-
 /**
  * @brief Function to change the priority of the process using `nice()`
  * @param priority The niceness value to set (-20 for highest priority, 19 for lowest)
@@ -174,33 +173,23 @@ static int set_process_nice(int priority)
 
 
 
-
 /**
- * @brief Function to increase the process priority using sudo and renice.
+ * @brief Function to increase the process priority using setpriority().
  * @param priority The nice value to set (-20 for highest priority, 19 for lowest)
- * @return Returns 0 on success, -1 on failure.
+ * @return Returns 1 on success, 0 on failure.
  */
 static int elevate_nice_priority(int priority)
 {
-    pid_t pid = getpid();  // Get current process ID
-
-    // Construct command: sudo renice -n <priority> -p <pid>
-    char command[128]={0};
-    snprintf(command, sizeof(command), "sudo renice -n %d -p %d", priority, pid);
-
-    fprintf(stderr, "Please give password to execute command: %s\n", command);
-
-    // Execute the system command
-    int ret = system(command);
-    if (ret != 0)
+    if (setpriority(PRIO_PROCESS, 0, priority) == -1)
     {
-        fprintf(stderr, "Failed to elevate process priority\n");
+        perror("Failed to elevate process priority");
         return 0;
     }
 
     fprintf(stderr, "Process priority successfully elevated to %d\n", priority);
     return 1;
 }
+
 
 
 /**
@@ -256,65 +245,19 @@ static int set_realtime_thread_priority()
 
 
 
+
 /**
- * @brief Function to drop root privileges after setting priority.
- * @return Returns 0 on success, -1 on failure.
+ * @brief Function for retrieving the OMP_NUM_THREADS
+ * @return Returns the number of threads or 0 if OMP_NUM_THREADS is not declared.
  */
-static int drop_privileges(const char * user)
+static int get_omp_num_threads_from_env(void) 
 {
-    if (user == 0)
-    {
-     // Drop group privileges first
-     if (setgid(1000) != 0)
-     {
-        fprintf(stderr, "Failed to set GID to 1000\n");
-        return 0;
-     }
-
-     // Drop user privileges
-     if (setuid(1000) != 0)
-     {
-        fprintf(stderr, "Failed to set UID to 1000\n");
-        return 0;
-     }
-
-    fprintf(stderr, "Privileges dropped successfully to UID=%d, GID=%d\n", getuid(), getgid());
-    } else
-    {
-    struct passwd *pw = getpwnam(user);  // Use "nobody" or another low-privilege user
-    if (!pw)
-    {
-        fprintf(stderr, "Failed to find '%s' user\n",user);
-        return 0;
+    const char *env = getenv("OMP_NUM_THREADS");
+    if (env != NULL) {
+        return atoi(env);  // convert string to int
     }
-
-    // Drop group privileges first
-    if (setgid(pw->pw_gid) != 0)
-    {
-        fprintf(stderr, "Failed to set GID to %d\n", pw->pw_gid);
-        return 0;
-    }
-
-    // Drop user privileges
-    if (setuid(pw->pw_uid) != 0)
-    {
-        fprintf(stderr, "Failed to set UID to %d\n", pw->pw_uid);
-        return 0;
-    }
-
-    // Double-check that we're no longer root
-    if (geteuid() == 0 || getuid() == 0 || getgid() == 0)
-    {
-        fprintf(stderr, "Still running as root! Privilege drop failed.\n");
-        return 0;
-    }
-
-    fprintf(stderr, "Privileges dropped successfully to UID=%d, GID=%d\n", pw->pw_uid, pw->pw_gid);
-    }
-
-    return 1;
+    return 0;  // not set
 }
-
 
 
 /**
@@ -326,14 +269,16 @@ static int threadpoolWorkerInitialWait(struct threadContext * ctx)
 {
     if (ctx!=0)
     {
+     pthread_mutex_lock(&ctx->pool->completeWorkMutex);
      ctx->threadInitialized = 1;
+     pthread_cond_signal(&ctx->pool->completeWorkCondition);
+     pthread_mutex_unlock(&ctx->pool->completeWorkMutex);
      pthread_mutex_lock(&ctx->pool->startWorkMutex);
      pthread_cond_wait(&ctx->pool->startWorkCondition,&ctx->pool->startWorkMutex);
      return 1;
     }
     return 0;
 }
-
 
 /**
  * @brief Function for checking the loop condition of a worker thread.
@@ -368,25 +313,18 @@ static int threadpoolWorkerLoopEnd(struct threadContext * ctx)
     // Get a lock on "CompleteMutex" and make sure that the main thread is waiting, then set "TheCompletedBatch" to "ThisThreadNumber".  Set "MainThreadWaiting" to "FALSE".
     // If the main thread is not waiting, continue trying to get a lock on "CompleteMutex" until "MainThreadWaiting" is "TRUE".
 
-    //Monitor main thread waiting status and update it!
+    //Spin until the main thread is in its waiting state before we signal it.
     pthread_mutex_lock(&ctx->pool->completeWorkMutex);
     while ( !ctx->pool->mainThreadWaiting )
     {
-        //If we are here it is our turn to talk to the main thread!
-        ctx->pool->mainThreadWaiting = 0;
         pthread_mutex_unlock(&ctx->pool->completeWorkMutex);
-
-        //Should this usleep be removed (?)
-        usleep(SPIN_SLEEP_TIME_MICROSECONDS); //Make this spin slower..
-
+        usleep(SPIN_SLEEP_TIME_MICROSECONDS);
         pthread_mutex_lock(&ctx->pool->completeWorkMutex);
-        break;
     }
     //--------------------------------------------------
 
     //We are officially no longer an active worker!
     ctx->pool->activeWorkers -=1;
-    ctx->pool->completedWorkNumber = ctx->threadID;
 
     //We are done communicating with Coordinator on our completed work
     pthread_mutex_unlock(&ctx->pool->completeWorkMutex);
@@ -409,7 +347,6 @@ static int threadpoolWorkerLoopEnd(struct threadContext * ctx)
     return 1;
 }
 
-
 /**
  * @brief Function for preparing work for worker threads by the main thread.
  * @param pool Pointer to the worker pool.
@@ -426,7 +363,6 @@ static int threadpoolMainThreadPrepareWorkForWorkers(struct workerPool * pool)
     }
     return 0;
 }
-
 
 /**
  * @brief Function for waiting worker for threads to finish their task by the main thread.
@@ -473,36 +409,23 @@ static int threadpoolMainThreadWaitForWorkersToFinishTimeoutSeconds(struct worke
 
         while (pool->activeWorkers>0)
         {
-
-            // Before entering a waiting state, set "MainThreadWaiting" to "TRUE" while we still have a lock on the "CompleteMutex".
-            // Worker threads will be waiting for this condition to be met before sending "CompleteCondition" signals.
+            // Keep mainThreadWaiting set so workers can proceed past their spin.
             pool->mainThreadWaiting = 1;
 
-            // This is where partial work on the batch data coordination will happen.
-            // All of the worker threads will have to finish before we can start the next batch.
+            // pthread_cond_wait atomically releases completeWorkMutex and sleeps,
+            // so no completion signal can be lost between the activeWorkers check and the wait.
             if (timeoutSeconds!=0)
             {
-             //we wait for a signal up to the deadline time, if we timeout we will abort!
              int ret = pthread_cond_timedwait(&pool->completeWorkCondition, &pool->completeWorkMutex, &ts);
              if (ret == ETIMEDOUT)
                      {
                         fprintf(stderr, "\n\npthreadWorkerPool: Timeout (%u sec) occurred @ %u of %u, threads are stuck.\n", timeoutSeconds, pool->activeWorkers, pool->numberOfThreads);
-                        // Handle the stuck thread (e.g., attempt to cancel or exit).
-                        abort();// We just abort to make sure this becomes a visible failure
+                        abort();
                      }
             } else
             {
              pthread_cond_wait(&pool->completeWorkCondition, &pool->completeWorkMutex);
-             //Waiting forever :S..
             }
-          //fprintf(stderr,"Done Waiting!\n");
-          pthread_mutex_unlock(&pool->completeWorkMutex);
-
-          //Give time to worker threads to lock common variables
-          usleep(SPIN_SLEEP_TIME_MICROSECONDS);
-
-          //Signal that we can start and wait for finish...
-          pthread_mutex_lock(&pool->completeWorkMutex);      //Make sure worker threads wont fall through after completion
         }
 
         //We finished waiting..
@@ -510,13 +433,11 @@ static int threadpoolMainThreadWaitForWorkersToFinishTimeoutSeconds(struct worke
 
         pthread_mutex_unlock(&pool->completeWorkMutex);
 
-
         //--------------------------------------------------
         return 1;
     }
     return 0;
 }
-
 
 /**
  * @brief Function for waiting worker for threads to finish their task by the main thread. This function will wait forever if something goes wrong with workers
@@ -527,7 +448,6 @@ static int threadpoolMainThreadWaitForWorkersToFinish(struct workerPool * pool)
 {
   return threadpoolMainThreadWaitForWorkersToFinishTimeoutSeconds(pool,0);
 }
-
 
 /**
  * @brief Function for creating a worker pool.
@@ -608,27 +528,24 @@ static int threadpoolCreate(struct workerPool * pool,unsigned int numberOfThread
         threadsCreated += (result == 0);
     }
 
-    //Sleep while threads wake up..
-    //If this sleep time is not enough a deadlock might occur, need to fix that
+    //Wait for all threads to signal that they are initialized
     fprintf(stderr,"Waiting for threads to start : ");
+    pthread_mutex_lock(&pool->completeWorkMutex);
     while (1)
     {
-      //nanoSleepT(1000);
-      usleep(SPIN_SLEEP_TIME_MICROSECONDS);
       unsigned int threadsThatAreReady=0;
-      for (unsigned int i=0; i<threadsCreated; i++)
+      for (unsigned int i=0; i<(unsigned int)threadsCreated; i++)
       {
           threadsThatAreReady+=pool->workerPoolContext[i].threadInitialized;
       }
 
-      if (threadsThatAreReady==threadsCreated)
+      if (threadsThatAreReady==(unsigned int)threadsCreated)
       {
           break;
-      } else
-      {
-         fprintf(stderr,".");
       }
+      pthread_cond_wait(&pool->completeWorkCondition, &pool->completeWorkMutex);
     }
+    pthread_mutex_unlock(&pool->completeWorkMutex);
     fprintf(stderr," done \n");
 
     pool->numberOfThreads = threadsCreated;
@@ -671,6 +588,7 @@ static int threadpoolDestroy(struct workerPool *pool)
     pool->workerPoolContext=0;
     free(pool->workerPoolIDs);
     pool->workerPoolIDs=0;
+    pool->initialized=0;
     return 1;
     }
 

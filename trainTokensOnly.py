@@ -388,7 +388,7 @@ if __name__ == '__main__':
              #model.compile(optimizer=optimizer,  loss=weighted_token_loss, metrics=[ 'accuracy', tf.keras.metrics.TopKCategoricalAccuracy(k=3)]) 
 
              print("Now retrieving token weights!")
-             weight_array = dbTrain.get_token_fequencies()
+             weight_array = dbTrain.get_token_frequencies()
              class_weight_dict = {i: float(weight) for i, weight in enumerate(weight_array)}
                        
              #-------------------------------------------------------------------------------------
@@ -518,7 +518,7 @@ if __name__ == '__main__':
    print("Total number of validation black listed keys : ",len(dbValidation.tokenblacklistkeys))
 
    print("Now retrieve token weights!")
-   weight_array = dbTrain.get_token_fequencies()
+   weight_array = dbTrain.get_token_frequencies()
 
    # Convert the weight_array into a dictionary
    class_weight_dict = {i: float(weight) for i, weight in enumerate(weight_array)}
@@ -629,7 +629,7 @@ if __name__ == '__main__':
 
    #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
    if (not onlyTrainingData):
-     weight_val_array = dbValidation.get_token_fequencies()
+     weight_val_array = dbValidation.get_token_frequencies()
      extract_validation_losses(model, validation_generator, dbValidation)
      dbValidation.dump_sample_report("2d_pose_estimation/sample_report_validation_tokens.json")
      print("Done Dumping Validation Samples ")

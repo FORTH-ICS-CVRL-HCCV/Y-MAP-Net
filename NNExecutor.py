@@ -12,7 +12,7 @@ class TFLiteExecutor():
   #tflite_convert --saved_model_dir=2d_pose_estimation --output_file=2d_pose_estimation/model.tflite
   def __init__(
                self,
-               modelPath:str   = "2d_pose_estimation/model.tflite",
+               modelPath:str   = "2d_pose_estimation/model_fp16.tflite",
                inputWidth      = 220,
                inputHeight     = 220,
                targetWidth     = 96,
@@ -20,37 +20,73 @@ class TFLiteExecutor():
                outputChannels  = 18,
                numberOfThreads = 4,
               ):
-               #Tensorflow attempt to be reasonable
-               #------------------------------------------
                print("Using TF-Lite Runtime")
                import tensorflow as tf
-               # Initialize the TFLite interpreter
-               self.interpreter = tf.lite.Interpreter(model_path=modelPath,num_threads=numberOfThreads)
+               self.interpreter = tf.lite.Interpreter(model_path=modelPath, num_threads=numberOfThreads)
                self.interpreter.allocate_tensors()
-
-               #tensor_details   = self.interpreter.get_tensor_details()
-               #for tensor in tensor_details:
-               #    print(f"Tensor Name: {tensor['name']}")
-               #    print(f"Shape: {tensor['shape']}")
-               #    print(f"Quantization Parameters: {tensor['quantization']}")
-
                self.input_details  = self.interpreter.get_input_details()
                self.output_details = self.interpreter.get_output_details()
                #------------------------------------------
-               self.input_size        = (inputWidth,inputHeight)
-               self.output_size       = (targetWidth,targetHeight)
-               self.numberOfHeatmaps  = outputChannels
-               self.description       = None
-               self.activity          = None
+               self.input_size          = (inputWidth, inputHeight)
+               self.output_size         = (targetWidth, targetHeight)
+               self.numberOfHeatmaps    = outputChannels
+               self.heatmaps            = None
+               self.heatmaps_16b        = None
+               self.description         = None
+               self.multihot_description= None
+               self.activity            = None
                #------------------------------------------
 #-----------------------------------------------------------------------------------------------------
-  def predict(self,image):
-        image_batch = np.expand_dims(image, axis=0).astype(np.float32)
+  def _run(self, image_batch):
+        """Run the TFLite interpreter and return all outputs as a list of numpy arrays."""
         self.interpreter.set_tensor(self.input_details[0]['index'], image_batch)
         self.interpreter.invoke()
-        predictions = [self.interpreter.get_tensor(self.output_details[i]['index']) for i in range(len(self.output_details))]
-        #print("Prediction : ",predictions[0].shape)
-        return predictions[0][0]
+        return [self.interpreter.get_tensor(self.output_details[i]['index'])
+                for i in range(len(self.output_details))]
+#-----------------------------------------------------------------------------------------------------
+  def predict(self, image):
+        if image.ndim == 3:
+            image_batch = np.expand_dims(image, axis=0).astype(np.float32)
+        elif image.ndim == 4:
+            image_batch = image.astype(np.float32)
+        else:
+            print("Unexpected dimensions", image.ndim)
+            return None
+
+        predictions = self._run(image_batch)
+
+        if len(predictions) == 1:
+            self.heatmaps = predictions[0]
+            return self.heatmaps[0]
+
+        hm, hm16, desc, mh = _parse_predictions(predictions)
+        # Strip batch dim from heatmap outputs; description/multihot already match TFExecutor shape
+        self.heatmaps             = hm[0]   if hm   is not None else None
+        self.heatmaps_16b         = hm16[0] if hm16 is not None else None
+        self.description          = desc
+        self.multihot_description = mh
+
+        return self.heatmaps
+#-----------------------------------------------------------------------------------------------------
+  def predict_multi(self, image):
+        if image.ndim == 3:
+            image_batch = np.expand_dims(image, axis=0).astype(np.float32)
+        elif image.ndim == 4:
+            image_batch = image.astype(np.float32)
+        else:
+            print("Unexpected dimensions", image.ndim)
+            return None
+
+        predictions = self._run(image_batch)
+
+        if len(predictions) == 1:
+            self.heatmaps = predictions[0]
+            return self.heatmaps
+
+        self.heatmaps, self.heatmaps_16b, self.description, self.multihot_description = \
+            _parse_predictions(predictions)
+
+        return self.heatmaps
 #-----------------------------------------------------------------------------------------------------
 
 
@@ -60,12 +96,53 @@ def to_float32(tensor):
 
 
 #-----------------------------------------------------------------------------------------------------
+def _parse_predictions(predictions):
+    """Identify and separate named outputs from a list of batched prediction arrays.
+
+    Heuristics (matching TFExecutor behaviour):
+      - 4-D, channels == 1  → 16-bit heatmap
+      - 4-D, channels  > 1  → main heatmaps
+      - 2-D, width == 300   → GloVe token embedding
+      - 2-D, other width    → multi-hot classification vector
+
+    Returns (heatmaps, heatmaps_16b, description, multihot_description).
+    All arrays retain the batch dimension; callers strip [0] for single-image use.
+    """
+    heatmap_idx     = None
+    heatmap_16b_idx = None
+    multihot_idx    = None
+    token_indices   = []
+
+    for i, pred in enumerate(predictions):
+        if pred.ndim == 4:
+            if pred.shape[3] == 1:
+                heatmap_16b_idx = i
+            else:
+                heatmap_idx = i
+        elif pred.ndim == 2:
+            if pred.shape[1] == 300:
+                token_indices.append(i)
+            else:
+                multihot_idx = i
+
+    # Heatmap outputs keep the batch dimension so callers can choose to strip it.
+    heatmaps             = predictions[heatmap_idx]     if heatmap_idx     is not None else None
+    heatmaps_16b         = predictions[heatmap_16b_idx] if heatmap_16b_idx is not None else None
+    # Multihot: keep batch dimension (matches TFExecutor behaviour)
+    multihot_description = predictions[multihot_idx]    if multihot_idx    is not None else None
+    # Tokens: strip batch dim per token before stacking → shape (N_tokens, 300)
+    description          = np.vstack([predictions[i][0] for i in token_indices]) if token_indices else None
+
+    return heatmaps, heatmaps_16b, description, multihot_description
+
+
+#-----------------------------------------------------------------------------------------------------
 class TFExecutor():
   def __init__(
                self,
                modelPath:str  = "2d_pose_estimation/model.keras",
-               inputWidth     = 220,
-               inputHeight    = 220,
+               inputWidth     = 256,
+               inputHeight    = 256,
                targetWidth    = 96,
                targetHeight   = 96,
                outputChannels = 18,
@@ -168,6 +245,14 @@ class TFExecutor():
                
                #self.model.export("2d_pose_estimation", "tf_saved_model")    #Debug models
 
+               # ── tf.function graph compilation ────────────────────────────
+               # Wraps the model call in a compiled graph, avoiding the per-call
+               # Python overhead of model.predict() while keeping TF's kernel
+               # fusion. To disable: comment out the next two lines.
+               self._predict_fn = tf.function(self.model, reduce_retracing=True)
+               print("tf.function graph compilation enabled")
+               # ─────────────────────────────────────────────────────────────
+
                if (fp16):
                   print("Policy:", mixed_precision.global_policy())
                   print("Compute dtype:", self.model.compute_dtype)
@@ -255,22 +340,17 @@ class TFExecutor():
         if (self.profiling):
             print(type(self.model))
             predictions = self.model.predict(image_batch,callbacks = [self.tensorboard])
+        elif hasattr(self, '_predict_fn'):
+            # tf.function compiled path — to disable, remove the _predict_fn
+            # assignment in __init__ and this branch falls through to model.predict()
+            raw = self._predict_fn(image_batch)
+            if isinstance(raw, (list, tuple)):
+                predictions = [p.numpy() for p in raw]
+            else:
+                predictions = raw.numpy()
         else:
             predictions = self.model.predict(image_batch,verbose=0)
-            #predictions = self.model(image_batch, training=False) 
-
-
-
-        #Do FP16 -> FP32 conversions if needed
-        #if isinstance(predictions, list):
-        #   predictions = [to_float32(p) for p in predictions]
-        #else:
-        #   predictions = to_float32(predictions)
-
-
-        #print("predictions count = ",len(predictions))
-        #Printout for all outputs to make sure they are correctly handled
-        #self.print_all_available_prediction_types(predictions)
+            #predictions = self.model(image_batch, training=False)
 
         if type(predictions) is list:
             pass
@@ -337,12 +417,18 @@ class TFExecutor():
         if (self.profiling):
             print(type(self.model))
             predictions = self.model.predict(image_batch,callbacks = [self.tensorboard])
+        elif hasattr(self, '_predict_fn'):
+            # tf.function compiled path — to disable, remove the _predict_fn
+            # assignment in __init__ and this branch falls through to model.predict()
+            raw = self._predict_fn(image_batch)
+            if isinstance(raw, (list, tuple)):
+                predictions = [p.numpy() for p in raw]
+            else:
+                predictions = raw.numpy()
         else:
             predictions = self.model.predict(image_batch,verbose=0)
-            #predictions = self.model(image_batch, training=False) 
+            #predictions = self.model(image_batch, training=False)
 
-        #print("predictions count = ",len(predictions))
- 
         if type(predictions) is list:
             pass
         else:
@@ -393,49 +479,85 @@ class ONNXExecutor():
                inputHeight    = 220,
                targetWidth    = 96,
                targetHeight   = 96,
-               outputChannels = 18
-              ): 
-               print("Using ONNX Runtime") 
+               outputChannels = 18,
+               numberOfThreads= 4,
+              ):
+               print("Using ONNX Runtime")
                import onnxruntime as ort
                import onnx
-               self.input_size        = (inputWidth,inputHeight)
-               self.output_size       = (targetWidth,targetHeight)
-               self.numberOfHeatmaps  = outputChannels
-               self.heatmaps          = None 
-               self.multihot_description = None
-               self.description       = None
-               self.activity          = None
+               self.input_size          = (inputWidth, inputHeight)
+               self.output_size         = (targetWidth, targetHeight)
+               self.numberOfHeatmaps    = outputChannels
+               self.heatmaps            = None
+               self.heatmaps_16b        = None
+               self.multihot_description= None
+               self.description         = None
+               self.activity            = None
                #------------------------------------------
-               self.sess_options = ort.SessionOptions()
-               self.sess_options.log_severity_level = 3 #<- log_level
-               self.sess_options.intra_op_num_threads = 4
-               #self.sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-               self.sess_options.execution_mode = ort.ExecutionMode.ORT_PARALLEL
-               self.sess_options.inter_op_num_threads = 4
-               self.sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+               sess_options = ort.SessionOptions()
+               sess_options.log_severity_level       = 3
+               sess_options.intra_op_num_threads     = numberOfThreads
+               sess_options.inter_op_num_threads     = numberOfThreads
+               sess_options.execution_mode           = ort.ExecutionMode.ORT_PARALLEL
+               sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
                #------------------------------------------
-               onnxModelForCheck  = onnx.load(modelPath)
-               onnx.checker.check_model(onnxModelForCheck)
-               print("ONNX devices available : ", ort.get_device()) 
-               providers               = ['CPUExecutionProvider']
-               #providers               = ['CUDAExecutionProvider']
-               self.options = ort.SessionOptions()
-               self.model              = ort.InferenceSession(modelPath, providers=providers, sess_options=self.options)
-               for i in range(0,len(self.model.get_inputs())): 
-                  print("ONNX INPUTS ",self.model.get_inputs()[i].name)
-                  self.inputName = self.model.get_inputs()[i].name
-               self.model_input_name   = self.model.get_inputs()
+               onnx.checker.check_model(onnx.load(modelPath))
+               print("ONNX devices available :", ort.get_device())
+               providers  = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+               self.model = ort.InferenceSession(modelPath, providers=providers, sess_options=sess_options)
+               self.output_names = [o.name for o in self.model.get_outputs()]
+               self.input_name   = self.model.get_inputs()[0].name
+               print("ONNX input  :", self.input_name)
+               print("ONNX outputs:", self.output_names)
                #------------------------------------------
 #-----------------------------------------------------------------------------------------------------
-  def predict(self,image):
-        imageONNX = np.expand_dims(image, axis=0)
-        #------------------------------------------------------------------- 
-        thisInputONNX = { self.inputName : imageONNX.astype('float32')}
-        #Run input through MocapNET
-        output_names_onnx = [otp.name for otp in self.model.get_outputs()]
-        predictions = self.model.run(output_names_onnx,thisInputONNX)[0]
-        #print("Prediction : ",predictions[0].shape)
-        return predictions[0]
+  def _run(self, image_batch):
+        """Run an ONNX inference pass and return all outputs as a list of numpy arrays."""
+        return self.model.run(self.output_names, {self.input_name: image_batch.astype(np.float32)})
+#-----------------------------------------------------------------------------------------------------
+  def predict(self, image):
+        if image.ndim == 3:
+            image_batch = np.expand_dims(image, axis=0)
+        elif image.ndim == 4:
+            image_batch = image
+        else:
+            print("Unexpected dimensions", image.ndim)
+            return None
+
+        predictions = self._run(image_batch)
+
+        if len(predictions) == 1:
+            self.heatmaps = predictions[0]
+            return self.heatmaps[0]
+
+        hm, hm16, desc, mh = _parse_predictions(predictions)
+        # Strip batch dim from heatmap outputs; description/multihot already match TFExecutor shape
+        self.heatmaps             = hm[0]   if hm   is not None else None
+        self.heatmaps_16b         = hm16[0] if hm16 is not None else None
+        self.description          = desc
+        self.multihot_description = mh
+
+        return self.heatmaps
+#-----------------------------------------------------------------------------------------------------
+  def predict_multi(self, image):
+        if image.ndim == 3:
+            image_batch = np.expand_dims(image, axis=0)
+        elif image.ndim == 4:
+            image_batch = image
+        else:
+            print("Unexpected dimensions", image.ndim)
+            return None
+
+        predictions = self._run(image_batch)
+
+        if len(predictions) == 1:
+            self.heatmaps = predictions[0]
+            return self.heatmaps
+
+        self.heatmaps, self.heatmaps_16b, self.description, self.multihot_description = \
+            _parse_predictions(predictions)
+
+        return self.heatmaps
 #-----------------------------------------------------------------------------------------------------
 
 
@@ -453,18 +575,30 @@ class NNExecutor():
                targetWidth    = 96,
                targetHeight   = 96,
                outputChannels = 18,
+               numberOfThreads= 4,
                profiling      = False,
                pruneTokens    = False
               ):
-                defaultModelPath = "2d_pose_estimation/"
+                defaultModelDir  = "2d_pose_estimation/"
                 self.hz    = 0.0
                 self.model = None
                 print ("NNExecutor for ",engine)
                 print ("Asked to load from: ",modelPath)
 
+                def _resolve(directory, *candidates):
+                    """Return the first existing candidate file under directory, or the first one (with a warning)."""
+                    import os
+                    for name in candidates:
+                        path = os.path.join(directory, name)
+                        if os.path.isfile(path):
+                            return path
+                    chosen = os.path.join(directory, candidates[0])
+                    print(f"WARNING: none of {candidates} found in {directory}, trying {chosen}")
+                    return chosen
+
                 if (engine=="tensorflow")  or (engine=="tf"):
-                        if (modelPath==defaultModelPath):
-                            modelPath="%s/model.keras"%modelPath
+                        if (modelPath==defaultModelDir):
+                            modelPath = _resolve(modelPath, "model.keras")
                         self.model = TFExecutor(
                                                 modelPath      = modelPath,
                                                 profiling      = profiling,
@@ -476,26 +610,28 @@ class NNExecutor():
                                                 pruneTokens    = pruneTokens
                                                 )
                 elif (engine=="tf-lite") or (engine=="tflite"):
-                        if (modelPath==defaultModelPath):
-                            modelPath="%s/model.tflite"%modelPath
+                        if (modelPath==defaultModelDir):
+                            modelPath = _resolve(modelPath, "model_fp16.tflite", "model.tflite", "model_int8.tflite")
                         self.model = TFLiteExecutor(
-                                                    modelPath      = modelPath,
-                                                    inputWidth     = inputWidth,
-                                                    inputHeight    = inputHeight,
-                                                    targetWidth    = targetWidth,
-                                                    targetHeight   = targetHeight,
-                                                    outputChannels = outputChannels
+                                                    modelPath       = modelPath,
+                                                    inputWidth      = inputWidth,
+                                                    inputHeight     = inputHeight,
+                                                    targetWidth     = targetWidth,
+                                                    targetHeight    = targetHeight,
+                                                    outputChannels  = outputChannels,
+                                                    numberOfThreads = numberOfThreads
                                                     )
                 elif (engine=="onnx"):
-                        if (modelPath==defaultModelPath):
-                            modelPath="%s/model.onnx"%modelPath
+                        if (modelPath==defaultModelDir):
+                            modelPath = _resolve(modelPath, "model.onnx", "model_fp16.onnx")
                         self.model = ONNXExecutor(
                                                   modelPath      = modelPath,
                                                   inputWidth     = inputWidth,
                                                   inputHeight    = inputHeight,
-                                                  targetWidth    = targetWidth,
-                                                  targetHeight   = targetHeight,
-                                                  outputChannels = outputChannels
+                                                  targetWidth     = targetWidth,
+                                                  targetHeight    = targetHeight,
+                                                  outputChannels  = outputChannels,
+                                                  numberOfThreads = numberOfThreads
                                                  )
                #------------------------------------------
 #-----------------------------------------------------------------------------------------------------

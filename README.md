@@ -38,6 +38,12 @@ To run use :
 ./runYMAPNet.sh
 ```
 
+To disable any CPU post processing (run as fast as possible) use :
+```
+./runYMAPNet.sh --fast
+```
+
+
 To perform vehicle counting use:
 ```
 wget http://ammar.gr/datasets/car.mp4

@@ -49,10 +49,12 @@ cp "$SOURCE/datasets/calculateNormalsFromDepthmap.py" ./
 cp "$SOURCE/folderStream.py" ./
 cp "$SOURCE/gradioClient.py" ./
 cp "$SOURCE/gradioServer.py" ./
+cp "$SOURCE/gradioShared.py" ./
 cp "$SOURCE/illustrate.py" ./
 cp "$SOURCE/imageProcessing.py" ./
 cp "$SOURCE/license.txt" ./
 cp "$SOURCE/resolveJointHierarchy.py" ./
+cp "$SOURCE/YMAPNet.py" ./
 cp "$SOURCE/runYMAPNet.py" ./
 cp "$SOURCE/screenStream.py" ./
 cp "$SOURCE/tools.py" ./

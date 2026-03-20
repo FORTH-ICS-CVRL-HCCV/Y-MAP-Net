@@ -209,13 +209,12 @@ void db_shuffle_indices(struct ImageDatabase * db)
       {
        checkCanary("Shuffle check A",db->canaryA.shouldRemainUntouched,CANARY_SIZE);
        checkCanary("Shuffle check B",db->canaryB.shouldRemainUntouched,CANARY_SIZE);
-       checkCanary("Shuffle check C",db->canaryB.shouldRemainUntouched,CANARY_SIZE);
+       checkCanary("Shuffle check C",db->canaryC.shouldRemainUntouched,CANARY_SIZE);
 
        unsigned long i,j;
-       for (i=0; i<db->numberOfSamples; i++)
+       for (i=db->numberOfSamples-1; i>0; i--)
         {
-          //Old shuffler j = rand() % i; // Generate a random index from 1 to i
-          j = (unsigned long) rand() % db->numberOfSamples; // Generate a random index in all the range of samples
+          j = (unsigned long) rand() % (i+1); // Fisher-Yates: uniform random index in [0, i]
           swapULong(&db->indices[i], &db->indices[j]); // Swap the elements at i and j
         }
       } else
@@ -382,7 +381,7 @@ void db_update_sample_loss_range(struct ImageDatabase *db,unsigned long sampleSt
 //----------------------------------------------------------------------------------------------------
 int db_get_filename_of_sample(struct ImageDatabase *db,unsigned long sampleID,char* buffer, size_t buffer_size)
 {
-  if ( (db!=0) && (db->losses!=0) && (sampleID<db->numberOfSamples) )
+  if ( (db!=0) && (db->indices!=0) && (sampleID<db->numberOfSamples) )
     {
         SampleNumber sID = db->indices[sampleID];
 
@@ -391,8 +390,8 @@ int db_get_filename_of_sample(struct ImageDatabase *db,unsigned long sampleID,ch
         const char * filenameString = db->pdb->sample[sID].imagePath;
         const char * pathString     = db->dbSources->source[sourceID].pathToCOCOImages;
 
-        if (strlen(filenameString) + 1 <= buffer_size)
-        { // Check if buffer is large enough
+        if (strlen(pathString) + 1 + strlen(filenameString) + 1 <= buffer_size)
+        { // Check if buffer is large enough for full path + '/' + filename + '\0'
           snprintf(buffer,buffer_size,"%s/%s",pathString,filenameString);
 
           return 1;
@@ -597,7 +596,7 @@ signed short * db_get_out16bit(struct ImageDatabase *db,unsigned long startSampl
 {
     if (db!=0)
       {
-        return (signed short *) db->out16bit.pixels + (startSample * db->out16bit.width * db->out16bit.height * db->out16bit.channels * sizeof(signed short));
+        return (signed short *) db->out16bit.pixels + (startSample * db->out16bit.width * db->out16bit.height * db->out16bit.channels);
       }
 
     return 0;
@@ -812,6 +811,18 @@ int db_allocate_token_blacklist(struct ImageDatabase *db, unsigned int numberOfT
   {
       if (db->pdb!=0)
       {
+          // Allocate the blacklist struct on first use
+          if (db->pdb->tokenBlackList==0)
+          {
+              db->pdb->tokenBlackList = (struct DescriptionTokenBlacklist *) malloc(sizeof(struct DescriptionTokenBlacklist));
+              if (db->pdb->tokenBlackList!=0)
+              {
+                  memset(db->pdb->tokenBlackList,0,sizeof(struct DescriptionTokenBlacklist));
+                  db->pdb->tokenBlackList->blackListSize = 0;
+                  db->pdb->tokenBlackList->blackListCurrentTokens = 0;
+              }
+          }
+
           if (db->pdb->tokenBlackList!=0)
           {
               if (db->pdb->tokenBlackList->blackListedTokens!=0)
@@ -836,13 +847,6 @@ int db_allocate_token_blacklist(struct ImageDatabase *db, unsigned int numberOfT
           }
       }
   }
-      db->pdb->tokenBlackList = (struct DescriptionTokenBlacklist *) malloc(sizeof(struct DescriptionTokenBlacklist));
-      if (db->pdb->tokenBlackList!=0)
-      {
-          memset(db->pdb->tokenBlackList,0,sizeof(struct DescriptionTokenBlacklist)); // <- clean up
-          db->pdb->tokenBlackList->blackListSize = 0;//explicit cleanup
-          db->pdb->tokenBlackList->blackListCurrentTokens = 0;//explicit cleanup
-      }
   return 0;
 }
 //----------------------------------------------------------------------------------------------------
@@ -881,7 +885,7 @@ int db_compile_added_token_blacklist(struct ImageDatabase *db)
   {
     if (db->pdb!=0)
       {
-          if (db->pdb->tokenBlackList->blackListedTokens!=0)
+          if ( (db->pdb->tokenBlackList!=0) && (db->pdb->tokenBlackList->blackListedTokens!=0) )
               {
                 if (db->pdb->tokenBlackList->blackListCurrentTokens>0)
                   {
@@ -1129,7 +1133,8 @@ void removeDuplicateTokens(unsigned short *tokens, unsigned char *numberOfTokens
     }
 
     // Create a boolean array to track if a token has been seen
-    unsigned char seen[65535] = {0}; // USHRT_MAX Assuming tokens are unsigned short ( see  unsigned short descriptionTokens[MAX_DESCRIPTION_TOKENS]; )
+    unsigned char * seen = (unsigned char *) calloc(65535, sizeof(unsigned char)); // USHRT_MAX
+    if (seen == NULL) { return; }
 
     unsigned char initialNumberOfTokens = *numberOfTokens;
 
@@ -1156,6 +1161,8 @@ void removeDuplicateTokens(unsigned short *tokens, unsigned char *numberOfTokens
     // Update the number of tokens to reflect the unique tokens only
     // This writes back to the pointer pointing to the DB for immediate update
     *numberOfTokens = (unsigned char) writeIndex;
+
+    free(seen);
 }
 //----------------------------------------------------------------------------------------------------
 // Function to iterate over all descriptions and remove duplicate tokens
@@ -1214,7 +1221,7 @@ float * db_count_description_token_weight(struct ImageDatabase *db, unsigned int
                     for (int i=0; i<db->pdb->tokenBlackList->blackListCurrentTokens; i++)
                             {
                                 unsigned short erasedID = db->pdb->tokenBlackList->blackListedTokens[i];
-                                if (i<numberOfTokens)
+                                if (erasedID<numberOfTokens)
                                 {
                                   counts[erasedID] = 0;
                                 }
@@ -1630,7 +1637,7 @@ void db_print_readSpeed(struct ImageDatabase * db)
 void db_print_batch_joint_stats(struct ImageDatabase *db, unsigned long batchSize)
 {
     fprintf(stderr, RED "db_print_batch_joint_stats is not properly implemented\n" NORMAL);
-    exit(0);
+    //exit(0);
 
     if (db == NULL || db->pdb == NULL || batchSize == 0) {
         fprintf(stderr, RED "Invalid database or batch size\n" NORMAL);
@@ -1761,7 +1768,7 @@ void db_print_stats(struct ImageDatabase * db)
        } else
        {
          unsigned long avgBkgWidth  = (unsigned long) 10 * ((unsigned long) totalWidthWithBackground/totalSamplesWithBackgrounds);
-         unsigned long avgBkgHeight = (unsigned long) 10 * ((unsigned long) totalHeightWithSkeletons/totalSamplesWithBackgrounds);
+         unsigned long avgBkgHeight = (unsigned long) 10 * ((unsigned long) totalHeightWithBackground/totalSamplesWithBackgrounds);
          fprintf(stderr,"Average sample dimension with background   : %lu x %lu \n",avgBkgWidth,avgBkgHeight);
        }
 
@@ -1848,7 +1855,7 @@ void * db_create(struct DatabaseList* dbSources,
   fprintf(stderr,"Asked for %lu samples\n",numberOfSamples);
   fprintf(stderr,"In  : %ux%u:%u\n",widthIn,heightIn,channelsIn);
   fprintf(stderr,"8-Bit Out  : %ux%u:%u\n",widthOut,heightOut,channelsOut8Bit);
-  fprintf(stderr,"16-Bit Out : %ux%u:%u\n",widthOut,heightOut,channelsOut8Bit);
+  fprintf(stderr,"16-Bit Out : %ux%u:%u\n",widthOut,heightOut,channelsOut16Bit);
 
 
    #if PROFILE_THREAD_ACTIVITY

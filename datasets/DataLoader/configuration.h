@@ -293,7 +293,7 @@ hm  0       depth 16 bit
 #define FLIP_PAF_GRADIENTS_FOR_LEFT_JOINTS 1
 
 //Switch dumping 16 bit heatmaps when using test
-#define TEST_16BIT_HEATMAPS 0
+#define TEST_16BIT_HEATMAPS 1
 
 
 

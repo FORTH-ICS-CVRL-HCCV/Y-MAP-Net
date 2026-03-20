@@ -399,9 +399,9 @@ class DataLoader:
         return self.libDataLoader.db_get_sample_train_passes(self.db,sample)
 
     def get_filename_of_sample(self,sample):
-        buffer_size = 100
+        buffer_size = 1024
         buffer = ctypes.create_string_buffer(buffer_size)
-        self.libDataLoader.db_get_filename_of_sample.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        self.libDataLoader.db_get_filename_of_sample.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_char_p, ctypes.c_size_t]
         self.libDataLoader.db_get_filename_of_sample.restype  = ctypes.c_ulong
         if ( self.libDataLoader.db_get_filename_of_sample(self.db,sample,buffer,buffer_size) ):
            return buffer.value.decode('utf-8')
@@ -425,21 +425,21 @@ class DataLoader:
         self.lastStartSample = startSample
         self.lastEndSample   = endSample
         #print("update(",startSample," , ",endSample,")")
-        self.libDataLoader.db_update.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int, ctypes.c_int]
+        self.libDataLoader.db_update.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_int]
         self.libDataLoader.db_update.restype  = ctypes.c_int
         return self.libDataLoader.db_update(self.db, startSample, endSample, self.numberOfThreads, self.gradientSize, self.PAFSize)
 
     def startUpdate(self,startSample,endSample):
         self.lastStartSample = startSample
         self.lastEndSample   = endSample
-        self.libDataLoader.db_StartUpdate.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int, ctypes.c_int]
+        self.libDataLoader.db_StartUpdate.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_int]
         self.libDataLoader.db_StartUpdate.restype  = ctypes.c_int
         return self.libDataLoader.db_StartUpdate(self.db, startSample, endSample, self.numberOfThreads, self.gradientSize, self.PAFSize)
 
     def collectUpdate(self,startSample,endSample):
         self.lastStartSample = startSample
         self.lastEndSample   = endSample
-        self.libDataLoader.db_CollectUpdate.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int, ctypes.c_int]
+        self.libDataLoader.db_CollectUpdate.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_int]
         self.libDataLoader.db_CollectUpdate.restype  = ctypes.c_int
         return self.libDataLoader.db_CollectUpdate(self.db, startSample, endSample, self.numberOfThreads, self.gradientSize, self.PAFSize)
 
@@ -630,7 +630,7 @@ class DataLoader:
 
         return tokenCountNP
 
-    def get_token_fequencies(self):
+    def get_token_frequencies(self):
         MAX_TOKEN_VALUE = self.get_max_token_value()
         print("MAX_TOKEN_VALUE ",MAX_TOKEN_VALUE)
         
@@ -873,8 +873,8 @@ class DataLoader:
 
     #---------------------------------------
     def save_image(self,filename,sampleNumber):
-        self.libDataLoader.db_save_heatmap.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_ulong] 
-        path = filename.encode('utf-8')  
+        self.libDataLoader.db_save_image.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_ulong]
+        path = filename.encode('utf-8')
         self.libDataLoader.db_save_image(self.db,path,sampleNumber)
 
     def save_heatmap(self,filename,sampleNumber,heatmapNumber):
@@ -969,7 +969,7 @@ if __name__ == "__main__":
       print("Number of Samples :", db.get_number_of_samples(db.db))
       print("Number of Images  :", db.get_number_of_images(db.db))
 
-      db.get_token_fequencies()
+      db.get_token_frequencies()
       #sys.exit(0)
 
       print("Shuffling")

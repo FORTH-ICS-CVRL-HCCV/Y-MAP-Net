@@ -111,6 +111,7 @@ for i in range(startAt, len(files)):
     print(result)
 
     # Output the result
+    # result[0] is chat history: [(label, caption)]
     response = result[0][0][1]
     print(f"Processing {1+i}/{len(files)} | {hz:.2f} Hz / remaining {remaining/60:.2f} minutes")
     print("Image:", image_path, "\nResponse:", response)
@@ -118,30 +119,25 @@ for i in range(startAt, len(files)):
     # Store each path as the key pointing to each description
     results[image_path] = response
 
+    # Fixed outputs (indices 1-8) — order matches describe_image return value
+    FIXED_OUTPUT_NAMES = [
+        "input_image",        # result[1]
+        "rgb_pose",           # result[2]
+        "union_joints",       # result[3]
+        "union_pafs",         # result[4]
+        "union_segms",        # result[5]
+        "normals",            # result[6]
+        "depth",              # result[7]
+        "depth_improved",     # result[8]
+    ]
 
-    # Save each returned image
-    output_image_paths = { 
-        "rgb_raw": image_path,
-        "rgb_input": result[1],
-        "rgb_output": result[1+1], 
-        "joints_output": result[2+1],
-        "pafs_output": result[3+1],
-        "segms_output": result[4+1],
-        "normal_output": result[2+3+1],
-        "depth_output": result[3+3+1],
-        "depth_improved_output": result[3+3+1+1],
-        "text_segment_output": result[4+3+1+1],
-        "person": result[5+3+1+1],
-        "vehicle": result[6+3+1+1],
-        "animal": result[7+3+1+1],
-        "object": result[8+3+1+1],
-        "furniture": result[9+3+1+1],
-        "appliance": result[10+3+1+1],
-        "material": result[11+3+1+1],
-        "obstacle": result[12+3+1+1],
-        "building": result[13+3+1+1],
-        "nature": result[14+3+1+1]
-    }
+    output_image_paths = {"rgb_raw": image_path}
+    for idx, name in enumerate(FIXED_OUTPUT_NAMES):
+        output_image_paths[name] = result[1 + idx]
+
+    # Dynamic segmentation outputs — result[9] onwards, one per SEG_CHANNELS entry
+    for seg_idx, seg_result in enumerate(result[9:]):
+        output_image_paths[f"seg_{seg_idx:02d}"] = seg_result
 
     image_path = "%05u" % i
 

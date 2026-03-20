@@ -87,6 +87,8 @@ def createSelectedModel(cfg,testModel=True):
                                           pixelwiseChannels  = cfg['pixelwiseChannels'],
                                           encoderRepetitions = cfg['encoderRepetitions'],
                                           decoderRepetitions = cfg['decoderRepetitions'],
+                                          encoderGrowthBase  = cfg.get('encoderGrowthBase', 1.4),
+                                          decoderGrowthBase  = cfg.get('decoderGrowthBase', 2.0),
                                           midSectionRepetitions = cfg['midSectionRepetitions'],
                                           gloveLayers        = cfg['gloveLayers'],
                                           multihotLayers     = cfg['multihotLayers'],
@@ -549,7 +551,7 @@ if __name__ == '__main__':
         #Compile a model with the requested loss
         if ("outputTokens" in cfg) and (cfg["outputTokens"]):
              print("Now retrieving token weights!")
-             weight_array = dbTrain.get_token_fequencies()
+             weight_array = dbTrain.get_token_frequencies()
              class_weight_dict = {i: float(weight) for i, weight in enumerate(weight_array)}
                        
              #-------------------------------------------------------------------------------------
@@ -767,7 +769,7 @@ if __name__ == '__main__':
 
    #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
    if (not onlyTrainingData):
-       weight_val_array = dbValidation.get_token_fequencies()
+       weight_val_array = dbValidation.get_token_frequencies()
        extract_validation_losses(model, validation_generator, dbValidation)
        dbValidation.dump_sample_report("2d_pose_estimation/sample_report_validation.json")
        print("Done Dumping Validation Samples ")

@@ -96,7 +96,7 @@ def load_keypoints_model(model_path):
     print("Output Shape is ", output_size)
 
     return model,input_size,output_size,numberOfHeatmaps
-#-------------------------------------------------------------------------------
+#------------------------------------------------------------------------------- 
 def load_pictorial_only_ymapnet(
     model_path,
     *,
@@ -334,9 +334,8 @@ def add_token_output(bridge_output, input_layer, numTokens, activation='leaky_re
         if (thisTokenDropout>0.01):
           x_token = layers.Dropout(thisTokenDropout)(x_token) #Staggered dropout that gets lower as we progress to next tokens
 
-        # Residual connection: add the previous token's output to the current one
+        # Residual connection: blend current token features with previous token features
         x_token_residual = x_token
-        #Residual connection makes all tokens repeat the same thing 
         if prev_output is not None:
 
         # Learnable residual mixing
@@ -346,14 +345,13 @@ def add_token_output(bridge_output, input_layer, numTokens, activation='leaky_re
                 x_token_residual     = layers.Multiply()([x_token_residual, residual_factor_x])
                 prev_output          = layers.Multiply()([prev_output, residual_factor_prev])
             elif i > 0 and use_learnable_residuals==False:
-                x_token_residual = keras.layers.Rescaling(1.0-nextTokenStrength, offset=0.0, name="Y_resrescale_t%u"%i)(x_token_residual) #<- Scale down importance of previous value
-                prev_output      = keras.layers.Rescaling(nextTokenStrength,     offset=0.0, name="Y_rescale_t%u"%i)(prev_output) #<- Scale down importance of previous value
-            #--------------------------------------------------------------------------------------------------------------------------------------------------------------------
-            x_token_residual = layers.Dense(layer_width, activation=activation, name="Y_l2X_t%u"%i)(prev_output)
-            x_token_residual = layers.LayerNormalization()(x_token_residual)
-            #x_token_residual = layers.Dropout(dropoutRate)(x_token) #<- make it noisy ?
-            #x_token_residual = layers.Dropout(dropoutRate)(x_token_residual) #<- make it noisy ?
-            x_token_residual = layers.Add()([x_token, x_token_residual])
+                x_token_residual = keras.layers.Rescaling(1.0-nextTokenStrength, offset=0.0, name="Y_resrescale_t%u"%i)(x_token_residual) #<- Scale down current token
+                prev_output      = keras.layers.Rescaling(nextTokenStrength,     offset=0.0, name="Y_rescale_t%u"%i)(prev_output)          #<- Scale down previous token
+            # Transform previous token features then add to the (already scaled) current token.
+            # Using a separate variable avoids overwriting x_token_residual before the Add.
+            prev_transformed = layers.Dense(layer_width, activation=activation, name="Y_l2X_t%u"%i)(prev_output)
+            prev_transformed = layers.LayerNormalization()(prev_transformed)
+            x_token_residual = layers.Add()([x_token_residual, prev_transformed])
         else:
             #Also add the residual part for the first token(!)
             x_token_residual = layers.Dense(layer_width, activation=activation, name="Y_l2F_t%u"%i)(x_token)
@@ -567,25 +565,28 @@ class AddGaussianNoise(tf.keras.layers.Layer):
 #-------------------------------------------------------------------------------
 def convnext_block(input, name, num_filters, activation='gelu', dropoutRate=0.0):
     shortcut = input
-    
+
     # Depthwise convolution (like in ConvNeXt)
     x = DepthwiseConv2D(kernel_size=7, padding='same', name=f"dwconv_{name}_{num_filters}")(input)
     x = layers.LayerNormalization()(x)
-    
+
     # Pointwise convolution (1x1) for feature transformation
     x = Conv2D(4 * num_filters, kernel_size=1, padding='same', name=f"pwconv1_{name}_{num_filters}")(x)
     x = Activation(activation)(x)
-    
+
     # Another 1x1 convolution to bring it back to original num_filters
     x = Conv2D(num_filters, kernel_size=1, padding='same', name=f"pwconv2_{name}_{num_filters}")(x)
-    
-    # Residual connection
+
+    # Residual connection: project shortcut to num_filters if channel count differs
+    if shortcut.shape[-1] != num_filters:
+        shortcut = Conv2D(num_filters, kernel_size=1, padding='same',
+                          name=f"shortcut_proj_{name}_{num_filters}")(shortcut)
     x = Add(name=f"residual_{name}_{num_filters}")([shortcut, x])
-    
+
     # Optional dropout
     if dropoutRate > 0.0:
         x = Dropout(dropoutRate, name=f"dropout_{name}_{num_filters}")(x)
-    
+
     return x
 #-------------------------------------------------------------------------------
 def conv_block(input, name, num_filters, activation='leaky_relu', dropoutRate=0.0):
@@ -625,9 +626,13 @@ def encoder_block(input, num_filters, activation, dropoutRate=0.0,depth=None):
     p = AveragePooling2D((2, 2))(x)  # Use AveragePooling2D
     return x, p
 #-------------------------------------------------------------------------------
-def decoder_block(input, skip_features, num_filters, activation, namePrefix="decoder"):
+def decoder_block(input, skip_features, num_filters, activation, namePrefix="decoder", level=0):
+    # Include level in every name so clamped filter counts (numKeypoints floor)
+    # on multiple levels don't produce duplicate layer names.
+    tag = "%s_L%u_%u" % (namePrefix, level, num_filters)
+
     # Transposed convolution (upsampling)
-    x = Conv2DTranspose(num_filters, (2, 2), strides=2, padding="same", name="conv2DT_%s_%u_%s" % (namePrefix, num_filters, activation))(input)
+    x = Conv2DTranspose(num_filters, (2, 2), strides=2, padding="same", name="conv2DT_%s" % tag)(input)
 
     # Check if spatial dimensions mismatch
     if (skip_features.shape[1] != x.shape[1]) or (skip_features.shape[2] != x.shape[2]):
@@ -641,29 +646,32 @@ def decoder_block(input, skip_features, num_filters, activation, namePrefix="dec
                                                 (crop_width // 2, crop_width - (crop_width // 2))))(skip_features)
 
     # Concatenate upsampled input with cropped skip features
-    x_concat = Concatenate(name="concat_%s_%u_%s" % (namePrefix, num_filters, activation))([x, skip_features])
+    x_concat = Concatenate(name="concat_%s" % tag)([x, skip_features])
 
     # Pass through the convolution block after concatenation
-    x_conv = conv_block(x_concat, "decoder", num_filters, activation=activation)
+    x_conv = conv_block(x_concat, tag, num_filters, activation=activation)
 
     # Add residual connection (input `x` before conv_block) back to the output of the conv_block
-    x_residual = Add(name="residual_%s_%u_%s" % (namePrefix, num_filters, activation))([x, x_conv])
+    x_residual = Add(name="residual_%s" % tag)([x, x_conv])
 
     return x_residual
 #-------------------------------------------------------------------------------
 #A more powerful block in the bridge, such as dilated convolutions or even an atrous spatial pyramid pooling (ASPP) module, which can capture multi-scale context better.
 def bridge_block(input, num_filters, activation, layers = 3):
-    
-    x = Conv2D(num_filters, 3, padding="same", dilation_rate=1, activation=activation, name="BridgeStart")(input)
+    # Conv → BN → Activation order matches conv_block (activation must come after BN)
+    x = Conv2D(num_filters, 3, padding="same", dilation_rate=1, name="BridgeStart")(input)
     x = BatchNormalization()(x)
-    
+    x = Activation(activation)(x)
+
     if (layers>=2):
-      x = Conv2D(num_filters, 3, padding="same", dilation_rate=2, activation=activation, name="BridgeMid")(x)
+      x = Conv2D(num_filters, 3, padding="same", dilation_rate=2, name="BridgeMid")(x)
       x = BatchNormalization()(x)
+      x = Activation(activation)(x)
 
     if (layers>=3):
-      x = Conv2D(num_filters, 3, padding="same", dilation_rate=4, activation=activation, name="BridgeFinish")(x)
+      x = Conv2D(num_filters, 3, padding="same", dilation_rate=4, name="BridgeFinish")(x)
       x = BatchNormalization()(x)
+      x = Activation(activation)(x)
 
     return x
 #-------------------------------------------------------------------------------
@@ -678,7 +686,8 @@ def build_unet(inputHeight,
                numClasses = 2037,
                minHeatmapValue=-120,
                maxHeatmapValue= 120,
-               growthBase=1.4,#2 default
+               encoderGrowthBase=1.4,
+               decoderGrowthBase=2.0,
                baseChannels=64,
                pixelwiseChannels=0,
                encoderRepetitions=7,
@@ -717,29 +726,29 @@ def build_unet(inputHeight,
     encoder_layers = []
     p = after_input
     for i in range(encoderRepetitions):
-        thisLayerFilters = int(baseChannels * (growthBase**i))
+        thisLayerFilters = int(baseChannels * (encoderGrowthBase**i))
         if (thisLayerFilters<numKeypoints):
               thisLayerFilters = numKeypoints #Always have at least the number of outputs to not strangle them
         s, p = encoder_block(p, thisLayerFilters, activation, dropoutRate=dropoutRate, depth=i)
         encoder_layers.append(s)
 
     # UNET Bridge layer
-    #b = conv_block(p, "bridge", int(bridgeRatio * baseChannels * (growthBase**encoderRepetitions)), activation=activation) #<- Standard one layer bridge
+    #b = conv_block(p, "bridge", int(bridgeRatio * baseChannels * (encoderGrowthBase**encoderRepetitions)), activation=activation) #<- Standard one layer bridge
     if (forceBridgeSize==0):
-          forceBridgeSize = int(bridgeRatio * baseChannels * (growthBase**encoderRepetitions))
+          forceBridgeSize = int(bridgeRatio * baseChannels * (encoderGrowthBase**encoderRepetitions))
     b = bridge_block(p, forceBridgeSize, activation=activation, layers=midSectionRepetitions)           #<- CHANGE More complex bridge
 
 
     if (useDescriptors):
        descriptor_outputs = append_descriptor_layer(bridge_layer=b, layer_width = 768) 
 
-    # Decoder blocks
+    # Decoder blocks — intentionally use base-2 growth (wider than encoder) for richer reconstruction.
     decoder_layers = [b]
     for i in range(decoderRepetitions):
-        thisLayerFilters = int(baseChannels * 2**(encoderRepetitions-i-1))
+        thisLayerFilters = int(baseChannels * (decoderGrowthBase**(encoderRepetitions-i-1)))
         if (thisLayerFilters<numKeypoints):
               thisLayerFilters = numKeypoints #Always have at least the number of outputs to not strangle them
-        d = decoder_block(decoder_layers[-1], encoder_layers[-(i+1)], thisLayerFilters, activation)
+        d = decoder_block(decoder_layers[-1], encoder_layers[-(i+1)], thisLayerFilters, activation, level=i)
         decoder_layers.append(d)
 
     #Final layer calculations 

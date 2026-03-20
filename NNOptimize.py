@@ -161,26 +161,85 @@ def convertToTensorRT(model,trainIn=0,precision="fp32"):
 #--------------------------------------------------------------
 #--------------------------------------------------------------
 #--------------------------------------------------------------
-if __name__ == '__main__':
-    jsonPath = '2d_pose_estimation/configuration.json'
-    model_path = "2d_pose_estimation/model.keras"
-    formats = ["keras","tf","tflite","onnx"]
+def loadRepresentativeData(cfg, num_samples=200):
+    import sys
+    import numpy as np
+    sys.path.append('datasets/DataLoader')
+    from DataLoader import DataLoader
+    from NNTraining import TrainingDataGenerator
 
-    print("DNNOptimize.py will now convert the model to all compatible formats (",formats,") ")
+    db = DataLoader(
+        (cfg['inputHeight'], cfg['inputWidth'], cfg['inputChannels']),
+        (cfg['outputHeight'], cfg['outputWidth'], cfg['outputChannels']),
+        output16BitChannels    = cfg['output16BitChannels'],
+        streamData             = 1,
+        batchSize              = cfg['batchSize'],
+        numberOfThreads        = 1,
+        gradientSize           = cfg['heatmapGradientSizeMinimum'],
+        PAFSize                = cfg['heatmapPAFSizeMinimum'],
+        doAugmentations        = 0,
+        addPAFs                = int(cfg['heatmapAddPAFs']),
+        addBackground          = int(cfg['heatmapGenerateSkeletonBkg']),
+        addDepthMap            = int(cfg['heatmapAddDepthmap']),
+        addDepthLevelsHeatmaps = int(cfg['heatmapAddDepthLevels']),
+        addNormals             = int(cfg['heatmapAddNormals']),
+        addSegmentation        = int(cfg['heatmapAddSegmentation']),
+        datasets               = cfg["TrainingDataset"],
+        libraryPath            = "datasets/DataLoader/libDataLoader.so"
+    )
+
+    gen = TrainingDataGenerator(
+        cfg=cfg, db=db, batch_size=cfg['batchSize'],
+        numberOfTokens=cfg["tokensOut"], numberOfClasses=cfg["tokensClasses"],
+        workers=1, use_multiprocessing=False, max_queue_size=1
+    )
+
+    images = []
+    collected = 0
+    for i in range(len(gen)):
+        batch_in, _ = gen[i]
+        images.append(batch_in)
+        collected += batch_in.shape[0]
+        if collected >= num_samples:
+            break
+
+    return np.concatenate(images, axis=0)[:num_samples]
+#--------------------------------------------------------------
+#--------------------------------------------------------------
+#--------------------------------------------------------------
+if __name__ == '__main__':
+    import sys
+    jsonPath   = '2d_pose_estimation/configuration.json'
+    model_path = "2d_pose_estimation/model.keras"
+
+    precision = None
+    for arg in sys.argv[1:]:
+        if arg == '--fp16':
+            precision = 'fp16'
+        elif arg == '--int8':
+            precision = 'int8'
 
     from createJSONConfiguration import loadJSONConfiguration
     cfg = loadJSONConfiguration(jsonPath)
 
     from NNModel import load_keypoints_model
-    from NNConverter import saveNNModel
-    model,input_size,output_size,numHeatmaps = load_keypoints_model(model_path)
+    model, input_size, output_size, numHeatmaps = load_keypoints_model(model_path)
 
-    if (cfg['pruneModel']): 
-        model = pruneModel(model,cfg,trainingDataset)
+    if precision in ('fp16', 'int8'):
+        from NNConverter import saveNNFP16Model, saveNNINT8Model
+        if precision == 'fp16':
+            saveNNFP16Model(model)
+        else:
+            saveNNINT8Model(model)
+    else:
+        formats = ["keras", "tf", "tflite", "onnx"]
+        print("DNNOptimize.py will now convert the model to all compatible formats (", formats, ") ")
+        from NNConverter import saveNNModel
 
-    if (cfg['clusterModel']): 
-        model = clusterModel(model,cfg,trainingDataset)
+        if (cfg['pruneModel']):
+            model = pruneModel(model, cfg, trainingDataset)
 
-    saveNNModel("2d_pose_estimation",model,formats=formats) #Only use keras format to save space! 
+        if (cfg['clusterModel']):
+            model = clusterModel(model, cfg, trainingDataset)
 
-
+        saveNNModel("2d_pose_estimation", model, formats=formats)

@@ -108,14 +108,14 @@ int ReadPNGMem(const char *mem, unsigned int memSize, struct Image *pic, char re
 
     int rowbytes = png_get_rowbytes(png_ptr, info_ptr);
 
-    png_byte * image_data = malloc(rowbytes * temp_height + 15);
+    png_byte * image_data = (png_byte *) malloc(rowbytes * temp_height + 15);
     if (!image_data) {
         fprintf(stderr, "error: could not allocate memory for PNG image data\n");
         png_destroy_read_struct(&png_ptr, &info_ptr, &end_info);
         return 0;
     }
 
-    png_bytep * row_pointers = malloc(temp_height * sizeof(png_bytep));
+    png_bytep * row_pointers = (png_bytep *) malloc(temp_height * sizeof(png_bytep));
     if (!row_pointers) {
         fprintf(stderr, "error: could not allocate memory for PNG row pointers\n");
         free(image_data);
@@ -232,7 +232,7 @@ int ReadPNG(const char *filename,struct Image * pic,char read_only_header)
 
     // Allocate the image_data as a big block, to be given to opengl
     png_byte * image_data;
-    image_data = malloc(rowbytes * temp_height * sizeof(png_byte)+15);
+    image_data = (png_byte *) malloc(rowbytes * temp_height * sizeof(png_byte)+15);
     if (image_data == NULL)
     {
         fprintf(stderr, "error: could not allocate memory for PNG image data\n");
@@ -242,7 +242,7 @@ int ReadPNG(const char *filename,struct Image * pic,char read_only_header)
     }
 
     // row_pointers is for pointing to image_data for reading the png with libpng
-    png_bytep * row_pointers = malloc(temp_height * sizeof(png_bytep));
+    png_bytep * row_pointers = (png_bytep *) malloc(temp_height * sizeof(png_bytep));
     if (row_pointers == NULL)
     {
         fprintf(stderr, "error: could not allocate memory for PNG row pointers\n");
