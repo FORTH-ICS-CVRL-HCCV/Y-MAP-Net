@@ -365,7 +365,8 @@ def main_pose_estimation(args):
         estimator.setup_threshold_control_window()
 
     failedFrames = 0
-    while True:
+    try:
+     while True:
         ret, frame = cap.read()
         if not ret:
             print("Failed to capture frame")
@@ -435,6 +436,9 @@ def main_pose_estimation(args):
 
             if save and show:
                 screenshot(estimator.frameNumber)
+
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
 
     print("Average Framerate :", np.average(estimator.keypoints_model.hz), "Hz")
     cap.release()
