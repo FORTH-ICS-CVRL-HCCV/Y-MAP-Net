@@ -321,7 +321,11 @@ def main_pose_estimation(args):
     window_arrangement = [(int(x), int(y), label) for x, y, label in args.win]
     monitor = []
     for hm, x, y, label in args.monitor:
-        monitor.append((int(hm), int(x), int(y), label))
+        try:
+            hm_spec = int(hm)           # numeric index
+        except ValueError:
+            hm_spec = hm                # label string — resolved in YMAPNet.__init__
+        monitor.append((hm_spec, int(x), int(y), label))
         print(f"Added a monitor @ {x},{y} for {hm}")
 
     print("Keypoint Threshold :", keypoint_threshold)

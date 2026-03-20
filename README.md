@@ -47,7 +47,7 @@ To disable any CPU post processing (run as fast as possible) use :
 To perform vehicle counting use:
 ```
 wget http://ammar.gr/datasets/car.mp4
-./runYMAPNet.sh --from car.mp4 --monitor 35 100 128 right --monitor 35 190 128 left
+./runYMAPNet.sh --from car.mp4 --monitor Vehicle 100 128 right --monitor Vehicle 190 128 left
 ```
 
 ## Training

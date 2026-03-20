@@ -490,145 +490,68 @@ def drawSinglePlotValueList(valueListRAW,color,itemName,image,x,y,w,h,minimumVal
 
     org = (1+int(x+len(valueList)), 1+calculateRelativeValue(y,h,valueList[len(valueList)-1],minimumValue,maximumValue) ) 
     image = cv2.putText(image, message , org, font, fontScale, color, thickness, cv2.LINE_AA)
+# Default heatmap name list used when cfg["heatmaps"] is absent (legacy configs).
+DEFAULT_HEATMAP_NAMES = [
+    "nose",               #0
+    "left_eye",           #1
+    "right_eye",          #2
+    "left_ear",           #3
+    "right_ear",          #4
+    "left_shoulder",      #5
+    "right_shoulder",     #6
+    "left_elbow",         #7
+    "right_elbow",        #8
+    "left_wrist",         #9
+    "right_wrist",        #10
+    "left_hip",           #11
+    "right_hip",          #12
+    "left_knee",          #13
+    "right_knee",         #14
+    "left_ankle",         #15
+    "right_ankle",        #16
+    #------------------------
+    "rhand->relbow",      #17
+    "relbow->rshoulder",  #18
+    "rshoulder->head",    #19
+    "rfoot->rknee",       #20
+    "rknee->rhip",        #21
+    "rhip->head",         #22
+    "lfoot->lknee",       #23
+    "lknee->lhip",        #24
+    "lhip->head",         #25
+    "lhand->lelbow",      #26
+    "lelbow->lshoulder",  #27
+    "lshoulder->head",    #28
+    #------------------------
+    "depthmap",           #29
+    "normalX",            #30
+    "normalY",            #31
+    "normalZ",            #32
+    "text",               #33
+    "Person",             #34
+    "Vehicle",            #35
+    "Animal",             #36
+    "Object",             #37
+    "Furniture",          #38
+    "Appliance",          #39
+    "Material",           #40
+    "Obstacle",           #41
+    "Building",           #42
+    "Nature",             #43
+    "depthmap>128",       #44
+    "Denosing R",         #45
+    "Denosing G",         #46
+    "Denosing B",         #47
+    "left/right pattern", #48
+]
+
 #----------------------------------------------------------------------------------------
-def label_heatmap(cfg,heatmapID,keypoint_names,instanceLabels):
-
-        heatmapNames = [
-        "nose",               #0
-        "left_eye",           #1
-        "right_eye",          #2
-        "left_ear",           #3
-        "right_ear",          #4
-        "left_shoulder",      #5
-        "right_shoulder",     #6
-        "left_elbow",         #7
-        "right_elbow",        #8
-        "left_wrist",         #9
-        "right_wrist",        #10
-        "left_hip",           #11
-        "right_hip",          #12
-        "left_knee",          #13
-        "right_knee",         #14
-        "left_ankle",         #15
-        "right_ankle",        #16
-        #------------------------
-        "rhand->relbow",      #17
-        "relbow->rshoulder",  #18
-        "rshoulder->head",    #19
-        "rfoot->rknee",       #20
-        "rknee->rhip",        #21
-        "rhip->head",         #22
-        "lfoot->lknee",       #23
-        "lknee->lhip",        #24
-        "lhip->head",         #25
-        "lhand->lelbow",      #26
-        "lelbow->lshoulder",  #27
-        "lshoulder->head",    #28
-        #------------------------
-        "depthmap",           #29
-        "normalX",            #30
-        "normalY",            #31
-        "normalZ",            #32
-        "text",               #33
-        "Person",             #34
-        "Vehicle",            #35
-        "Animal",             #36
-        "Object",             #37
-        "Furniture",          #38
-        "Appliance",          #39
-        "Material",           #40
-        "Obstacle",           #41
-        "Building",           #42
-        "Nature",             #43
-        "depthmap>128",       #44
-        "Denosing R",         #45
-        "Denosing G",         #46
-        "Denosing B",         #47
-        "left/right pattern"  #48
-        ]
-
-        if ('heatmaps' in cfg):
-             heatmapNames = cfg['heatmaps']           
-
+def label_heatmap(cfg, heatmapID, keypoint_names=None, instanceLabels=None):
+        heatmapNames = cfg.get('heatmaps', DEFAULT_HEATMAP_NAMES)
         title = "#%u" % heatmapID
-
-        if (heatmapID<len(heatmapNames)):
+        if heatmapID < len(heatmapNames):
             title = heatmapNames[heatmapID]
         return title
-
-
-        """
-        if (heatmapID<len(keypoint_names)):
-            title = keypoint_names[heatmapID]
-
-        elif (heatmapID==17): 
-             title = "rhand->relbow"
-        elif (heatmapID==18): 
-             title = "relbow->rshoulder"
-        elif (heatmapID==19): 
-             title = "rshoulder->head"
-        elif (heatmapID==20): 
-             title = "rfoot->rknee"
-        elif (heatmapID==21): 
-             title = "rknee->rhip"
-        elif (heatmapID==22): 
-             title = "rhip->head"
-        elif (heatmapID==23): 
-             title = "lfoot->lknee"
-        elif (heatmapID==24): 
-             title = "lknee->lhip"
-        elif (heatmapID==25): 
-             title = "lhip->head"
-        elif (heatmapID==26): 
-             title = "lhand->lelbow"
-        elif (heatmapID==27): 
-             title = "lelbow->lshoulder"
-        elif (heatmapID==28): 
-             title = "lshoulder->head"
-        elif (heatmapID==29): 
-             title = "Depthmap"
-        elif (heatmapID==30): 
-             title = "Normals X"
-        elif (heatmapID==31): 
-             title = "Normals Y"
-        elif (heatmapID==32): 
-             title = "Normals Z"
-        elif (heatmapID==33): 
-             title = "Text"
-        elif (heatmapID==34): 
-             title = "Person" 
-        elif (heatmapID==35): 
-             title = "Vehicle" 
-        elif (heatmapID==36): 
-             title = "Animal" 
-        elif (heatmapID==37): 
-             title = "Object" 
-        elif (heatmapID==38): 
-             title = "Furniture" 
-        elif (heatmapID==39): 
-             title = "Appliance" 
-        elif (heatmapID==40): 
-             title = "Material"  
-        elif (heatmapID==41): 
-             title = "Obstacle"  
-        elif (heatmapID==42): 
-             title = "Building"  
-        elif (heatmapID==43): 
-             title = "Nature" 
-        elif (heatmapID==44): 
-             title = "Very Close" 
-        elif (heatmapID==45): 
-             title = "NoiseR" 
-        elif (heatmapID==46): 
-             title = "NoiseG" 
-        elif (heatmapID==47): 
-             title = "NoiseB" 
-        elif (heatmapID==45): 
-             title = "Empty / Unlabeled" 
-        #if (heatmapID>22):
-        #     title = " %s "% get_key_from_index(instanceLabels,heatmapID-22)
-        return title
-        """
 #----------------------------------------------------------------------------------------
 def retrieveHeatmapIndex(heatmapNames, name):
     """
@@ -1267,10 +1190,22 @@ class YMAPNet:
         self.keypointXOffset     = 0
         self.keypointYOffset     = 0
         #---------------------------------------------------------------------
-        self.monitor            = monitor
+        # Resolve string heatmap labels to indices using cfg["heatmaps"],
+        # falling back to DEFAULT_HEATMAP_NAMES for legacy configs without the key.
+        heatmap_labels = self.cfg.get('heatmaps', DEFAULT_HEATMAP_NAMES)
+        resolved_monitor = []
+        for hm, x, y, lbl in monitor:
+            if isinstance(hm, str):
+                if hm in heatmap_labels:
+                    hm = heatmap_labels.index(hm)
+                else:
+                    print(f"Warning: heatmap label '{hm}' not found in cfg['heatmaps'], skipping monitor entry")
+                    continue
+            resolved_monitor.append((hm, x, y, lbl))
+        self.monitor            = resolved_monitor
         self.monitorValues      = list()
-        if (len(monitor)>0):
-                for i in range(len(monitor)):
+        if (len(self.monitor)>0):
+                for i in range(len(self.monitor)):
                     self.monitorValues.append(list())
         #---------------------------------------------------------------------
         if ("outputTokens" in self.cfg) and (self.cfg["outputTokens"]):
@@ -1890,40 +1825,53 @@ class YMAPNet:
                     _pro("Text",                self.heatmapsOut[self.chanText])
 
                 # ── pack and apply ────────────────────────────────────────────
-                # Monitor 1: fixed layout optimised for 1920×1080.
-                # Any named window absent from this dict is auto-placed on monitors 2+3.
-                MONITOR1_FIXED = {
-                    "Overlay":                  (1,    1),
-                    "Description":              (0,    930),
-                    "Person IDs":               (0,    650),
-                    "Threshold Controls":       (0,    650),
-                    "Depthmap":                 (480,  0),
-                    "Improved Depth":           (480,  350),
-                    "Combined Normals":         (480,  650),
-                    "Class segmentation Union": (820,  0),
-                    "Joint Heatmap Union":      (830,  350),
-                    "PAFs Union":               (830,  650),
-                    "Normals X":                (1180, 0),
-                    "Normals Y":                (1180, 350),
-                    "Normals Z":                (1180, 650),
-                    "Very Close":               (1550, 0),
-                    "Person":                   (1550, 270),
-                    "Text":                     (1550, 530),
-                }
-                layout = dict(MONITOR1_FIXED)   # copy; only entries whose windows exist matter
+                is_compact = self.cfg.get('outputChannels', 73) < 45
 
-                # Overflow: windows not in the fixed layout go to monitors 2+3
-                placed = set(MONITOR1_FIXED)
-                overflow = [(n, w, h) for n, w, h in primary_specs + processed_specs
-                            if n not in placed]
-                if overflow:
-                    third = self.screen_w // 3
-                    layout.update(arrange_windows(
-                        overflow,
-                        screen_w=self.screen_w - third,
+                if is_compact:
+                    # Fewer output channels — all named windows fit on monitor 1.
+                    # Auto-pack everything rather than using the 3-monitor fixed grid.
+                    layout = arrange_windows(
+                        primary_specs + processed_specs,
+                        screen_w=mon1_w,
                         screen_h=self.screen_h,
-                        offset_x=third,
-                    ))
+                        offset_x=0,
+                    )
+                else:
+                    # Monitor 1: fixed layout optimised for 1920×1080.
+                    # Any named window absent from this dict is auto-placed on monitors 2+3.
+                    MONITOR1_FIXED = {
+                        "Overlay":                  (1,    1),
+                        "Description":              (0,    930),
+                        "Person IDs":               (0,    650),
+                        "Threshold Controls":       (0,    650),
+                        "Depthmap":                 (480,  0),
+                        "Improved Depth":           (480,  350),
+                        "Combined Normals":         (480,  650),
+                        "Class segmentation Union": (820,  0),
+                        "Joint Heatmap Union":      (830,  350),
+                        "PAFs Union":               (830,  650),
+                        "Normals X":                (1180, 0),
+                        "Normals Y":                (1180, 350),
+                        "Normals Z":                (1180, 650),
+                        "Very Close":               (1550, 0),
+                        "Person":                   (1550, 270),
+                        "Text":                     (1550, 530),
+                    }
+                    layout = dict(MONITOR1_FIXED)   # copy; only entries whose windows exist matter
+
+                    # Overflow: windows not in the fixed layout go to monitors 2+3
+                    placed = set(MONITOR1_FIXED)
+                    overflow = [(n, w, h) for n, w, h in primary_specs + processed_specs
+                                if n not in placed]
+                    if overflow:
+                        third = self.screen_w // 3
+                        layout.update(arrange_windows(
+                            overflow,
+                            screen_w=self.screen_w - third,
+                            screen_h=self.screen_h,
+                            offset_x=third,
+                        ))
+
                 apply_window_layout(layout)
 
                 # User-specified overrides are applied last and take precedence
