@@ -574,7 +574,9 @@ class JAXExecutor():
   #              (TensorFlow required at runtime)
   #   .mlirbc  — StableHLO bytecode produced by convertModelToJAX.py --stablehlo
   #              (TF-free; pure JAX/XLA execution)
-  #
+  # 
+  # pip install "jax[cuda12]" jaxlib orbax-checkpoint keras nvidia-cusparse-cu12
+  # echo 'export LD_LIBRARY_PATH=$(python3 -c "import nvidia.cusparse, os; print(os.path.join(os.path.dirname(nvidia.cusparse.__file__),\"lib\"))"  2>/dev/null):$LD_LIBRARY_PATH' >> venv_jax/bin/activate
   # Usage: --engine jax
   def __init__(
                self,
@@ -605,11 +607,10 @@ class JAXExecutor():
                    self._init_stablehlo(jax, jnp, modelPath)
                else:
                    # .keras or any Keras-loadable format
-                   self._init_keras(jax, jnp, modelPath)
+                   self._init_keras(modelPath)
 #-----------------------------------------------------------------------------------------------------
-  def _init_keras(self, jax, jnp, modelPath):
+  def _init_keras(self, modelPath):
                try:
-                   from jax.experimental import jax2tf
                    import tensorflow as tf
                except ImportError as e:
                    print(f'ERROR: {e}')
@@ -620,19 +621,19 @@ class JAXExecutor():
                model, self.input_size, self.output_size, self.numberOfHeatmaps = \
                    load_keypoints_model(modelPath)
 
-               # Bridge Keras model as a JAX-callable.  jit_compile=True lets TF
-               # emit XLA HLO; call_tf_graph=True embeds the TF graph in the JAX
-               # trace so jax.jit can compile the whole thing end-to-end.
-               tf_fn         = tf.function(lambda x: model(x, training=False), jit_compile=True)
-               jax_fn        = jax2tf.call_tf(tf_fn, call_tf_graph=True)
-               self._jit_fn  = jax.jit(jax_fn)
+               # For the .keras path there is no JAX-native JIT benefit: call_tf without
+               # jax.jit is pure eager TF dispatch, and call_tf under jax.jit fails when
+               # JAX has no GPU backend (DLPack device mismatch) or when model variables
+               # live on GPU (XLA traces from CPU).  Skip jax2tf entirely and call the
+               # TF model directly — identical execution to TFExecutor.
+               # True JAX-native execution requires the .mlirbc StableHLO path.
+               self._jit_fn = tf.function(lambda x: model(x, training=False))
 
-               # Warm up: trigger XLA compilation before the first real inference call.
+               # Warm up: trigger tf.function graph tracing before the first real call.
                W, H = self.input_size
-               dummy = jnp.zeros([1, H, W, 3], dtype=jnp.float32)
+               dummy = tf.zeros([1, H, W, 3], dtype=tf.float32)
                _ = self._jit_fn(dummy)
-               print(f'JAX: loaded {modelPath}  (jax2tf path, XLA compiled)')
-               print(f'JAX version: {jax.__version__}')
+               print(f'JAX: loaded {modelPath}  (tf.function path, use .mlirbc for JAX-native JIT)')
 #-----------------------------------------------------------------------------------------------------
   def _init_stablehlo(self, jax, jnp, modelPath):
                # Try public jax.export API (JAX >= 0.4.28), then the experimental
@@ -652,22 +653,40 @@ class JAXExecutor():
                        'jax.export.deserialize not found.  Requires JAX >= 0.4.14.\n'
                        'Install with:  pip install "jax[cuda]>=0.4.14"  or  pip install jax>=0.4.14')
 
+               # The .mlirbc artifact was produced via jax2tf.call_tf, which embeds a
+               # TF custom-call effect (CallTfEffect).  That effect type is only
+               # registered when jax2tf is imported — do it now so deserialize succeeds.
+               try:
+                   from jax.experimental import jax2tf as _jax2tf_reg  # noqa: registers CallTfEffect
+               except ImportError:
+                   pass
+
                with open(modelPath, 'rb') as f:
                    payload = f.read()
                self._exported = _deserialize(payload)
-               self._jit_fn   = jax.jit(lambda x: self._exported.call(x))
 
-               # Warm up
+               # The artifact is pinned to 1 device at export time (devices=[:1]).
+               # Put the input on a device that matches the platform the artifact
+               # was compiled for (e.g. 'cpu' when exported with --stablehlo).
+               _platforms = getattr(self._exported, 'platforms', None) or ('cpu',)
+               _platform  = _platforms[0].lower()   # e.g. 'cpu' or 'cuda'
+               try:
+                   _device = jax.devices(_platform)[0]
+               except RuntimeError:
+                   _device = jax.local_devices()[0]
+               self._jit_fn = lambda x: self._exported.call(
+                                   jax.device_put(jnp.asarray(x, dtype=jnp.float32), _device))
+
                W, H = self.input_size
                dummy = jnp.zeros([1, H, W, 3], dtype=jnp.float32)
                _ = self._jit_fn(dummy)
-               print(f'JAX: loaded {modelPath}  (StableHLO path, TF-free)')
+               print(f'JAX: loaded {modelPath}  (StableHLO + jax2tf, platforms={list(_platforms)}, device={_device})')
                print(f'JAX version: {jax.__version__}')
 #-----------------------------------------------------------------------------------------------------
   def _run(self, image_batch):
-        """Run JAX inference; return all outputs as a list of numpy arrays."""
-        x   = self._jnp.array(image_batch, dtype=self._jnp.float32)
-        raw = self._jit_fn(x)
+        """Run inference; return all outputs as a list of numpy arrays.
+        Works for both the tf.function path (.keras) and the StableHLO path (.mlirbc)."""
+        raw = self._jit_fn(image_batch.astype(np.float32))
         if isinstance(raw, (list, tuple)):
             return [np.array(r) for r in raw]
         return [np.array(raw)]

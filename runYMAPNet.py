@@ -54,6 +54,8 @@ def build_arg_parser():
     p.add_argument("--noise",        type=float, default=0.0, metavar="MAG",
                    help="Gaussian noise magnitude [0.0-1.0]")
     p.add_argument("--engine",       default="tensorflow", metavar="ENGINE")
+    p.add_argument("--model",        default="2d_pose_estimation", metavar="PATH",
+                   help="Model directory or file (default: 2d_pose_estimation)")
     p.add_argument("--save",         action="store_true")
     p.add_argument("--prune",        action="store_true", dest="pruneTokens")
     p.add_argument("--tile",         action="store_true")
@@ -300,7 +302,7 @@ def detect_screen_resolution():
 # =============================================================================
 
 def main_pose_estimation(args):
-    model_path          = '2d_pose_estimation'
+    model_path          = args.model
     videoWidth, videoHeight = args.size
     threshold           = int(args.threshold)
     keypoint_threshold  = args.threshold
