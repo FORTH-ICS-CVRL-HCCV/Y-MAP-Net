@@ -1,66 +1,51 @@
 # Y-MAP-Net
-Y-MAP-Net: Real-time depth, normals, segmentation, multi-label captioning and 2D human pose in RGB images , Internatonal Conference on Robotics and Automation (ICRA) 2026
 
-
-![Illustration](https://github.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/doc/illu.png?raw=true)
-
-This repository aims to provide a neural network that provides: 2D pose estimation, Depth, Normals, Segmentations and Token descriptions from RGB images in real-time using a webcam and a pre-trained Y-MAP-Net model. 
-It only depends on Keras/TensorFlow and OpenCV for model inference.
-
-
-One click deployment in Google Collab : [![Open Y-MAP-Net In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/scripts/y-map-net.ipynb)
+This repository aims to provide a 2D pose estimator in real-time using a webcam and a pre-trained 2D Pose Estimation model. It utilizes TensorFlow for model inference.
 
 ## Prerequisites
 
 - Python 3
-- TensorFlow >= 2.16.1
-- Keras >= 3 
+- TensorFlow 2.16.1+
+- Keras 3+
 - NumPy
 - OpenCV
 - wget (for downloading the model, optional)
 
-These can be installed by running [python3 scripts/setup.sh](https://github.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/scripts/setup.sh) which will also create a venv that can later be activated using source venv/bin/activate 
+These can be installed by running [python3 scripts/setup.sh](https://github.com/FORTH-ICS-CVRL-HCCV/RGBToPoseDetect2D/blob/main/scripts/setup.sh) which will also create a venv that can later be activated using source venv/bin/activate 
 
+To make a docker file and then mount it use :
+``` 
+docker/build_and_deploy.sh
+docker run rgbposedetect2d-container
+docker attach rgbposedetect2d-container
+cd workspace
+python3 scripts/setup.sh
+source venv/bin/activate
+```
 
-## Setup 
 
 Ensure that you have installed the required dependencies. You can install them using :
 ``` 
 scripts/setup.sh 
 ```
 
-## Running
-
-![Illustration2](https://github.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/doc/screenshot2.jpg?raw=true)
+To download a pre-trained model use :
+``` 
+scripts/downloadPretrained.sh
+```
 
 To run use :
-```
+``` 
 ./runYMAPNet.sh
+``` 
+
+
+To train use :
+``` 
+python3 createJSONConfiguration.py
+#Modify the 2d_pose_estimation/configuration.json
+datasets/DataLoader/makeLibrary.sh 
+python3 trainYMAPNet.py
 ```
-
-To disable any CPU post processing (run as fast as possible) use :
-```
-./runYMAPNet.sh --fast
-```
-
-
-To perform vehicle counting use:
-```
-wget http://ammar.gr/datasets/car.mp4
-./runYMAPNet.sh --from car.mp4 --monitor Vehicle 100 128 right --monitor Vehicle 190 128 left
-```
-
-## Training
- 
-Since preparing the involved datasets to train the project is very complicated..
-We need some time before the full training code is polished enough to be redistributed..
-Thank you for your patience!
-
-
-
-## More Information
-
-
-![Illustration](https://github.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/doc/Y-Net.png?raw=true)
 
 

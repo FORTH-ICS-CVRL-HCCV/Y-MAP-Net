@@ -91,7 +91,7 @@ port="8080"
 server_name="0.0.0.0"
 
 useStandaloneTokenEstimator  = True
-TOKEN_ESTIMATOR_SKIP_FRAMES  = 5   # run token estimator once every N frames
+TOKEN_ESTIMATOR_SKIP_FRAMES  = 1   # run token estimator once every N frames
 _token_frame_counter         = 0
 _token_caption_cache         = ""
 

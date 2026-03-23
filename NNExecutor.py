@@ -565,6 +565,277 @@ class ONNXExecutor():
 
 
 #-----------------------------------------------------------------------------------------------------
+class JAXExecutor():
+  # All jax / jax2tf / tensorflow imports are deferred to __init__ so the
+  # rest of the codebase works without JAX installed.
+  #
+  # Two model formats are supported:
+  #   .keras   — Keras model bridged via jax2tf.call_tf + jax.jit
+  #              (TensorFlow required at runtime)
+  #   .mlirbc  — StableHLO bytecode produced by convertModelToJAX.py --stablehlo
+  #              (TF-free; pure JAX/XLA execution)
+  #
+  # Usage: --engine jax
+  def __init__(
+               self,
+               modelPath:str  = "2d_pose_estimation/model_jax.mlirbc",
+               inputWidth     = 256,
+               inputHeight    = 256,
+               targetWidth    = 96,
+               targetHeight   = 96,
+               outputChannels = 18,
+              ):
+               print("Using JAX Runtime")
+               # ── deferred core import ──────────────────────────────────────
+               import jax
+               import jax.numpy as jnp
+               # ─────────────────────────────────────────────────────────────
+               self.input_size           = (inputWidth, inputHeight)
+               self.output_size          = (targetWidth, targetHeight)
+               self.numberOfHeatmaps     = outputChannels
+               self.heatmaps             = None
+               self.heatmaps_16b         = None
+               self.description          = None
+               self.multihot_description = None
+               self.activity             = None
+               self._jnp                 = jnp
+
+               ext = os.path.splitext(modelPath)[1].lower()
+               if ext == '.mlirbc':
+                   self._init_stablehlo(jax, jnp, modelPath)
+               else:
+                   # .keras or any Keras-loadable format
+                   self._init_keras(jax, jnp, modelPath)
+#-----------------------------------------------------------------------------------------------------
+  def _init_keras(self, jax, jnp, modelPath):
+               try:
+                   from jax.experimental import jax2tf
+                   import tensorflow as tf
+               except ImportError as e:
+                   print(f'ERROR: {e}')
+                   print('       Install with:  pip install jax jaxlib tensorflow')
+                   raise
+
+               from NNModel import load_keypoints_model
+               model, self.input_size, self.output_size, self.numberOfHeatmaps = \
+                   load_keypoints_model(modelPath)
+
+               # Bridge Keras model as a JAX-callable.  jit_compile=True lets TF
+               # emit XLA HLO; call_tf_graph=True embeds the TF graph in the JAX
+               # trace so jax.jit can compile the whole thing end-to-end.
+               tf_fn         = tf.function(lambda x: model(x, training=False), jit_compile=True)
+               jax_fn        = jax2tf.call_tf(tf_fn, call_tf_graph=True)
+               self._jit_fn  = jax.jit(jax_fn)
+
+               # Warm up: trigger XLA compilation before the first real inference call.
+               W, H = self.input_size
+               dummy = jnp.zeros([1, H, W, 3], dtype=jnp.float32)
+               _ = self._jit_fn(dummy)
+               print(f'JAX: loaded {modelPath}  (jax2tf path, XLA compiled)')
+               print(f'JAX version: {jax.__version__}')
+#-----------------------------------------------------------------------------------------------------
+  def _init_stablehlo(self, jax, jnp, modelPath):
+               # Try public jax.export API (JAX >= 0.4.28), then the experimental
+               # module (JAX 0.4.14–0.4.27) as a fallback.
+               _deserialize = None
+               for _mod_path in ('jax.export', 'jax.experimental.export'):
+                   try:
+                       import importlib
+                       _mod = importlib.import_module(_mod_path)
+                       _deserialize = _mod.deserialize
+                       break
+                   except (ImportError, AttributeError):
+                       continue
+
+               if _deserialize is None:
+                   raise ImportError(
+                       'jax.export.deserialize not found.  Requires JAX >= 0.4.14.\n'
+                       'Install with:  pip install "jax[cuda]>=0.4.14"  or  pip install jax>=0.4.14')
+
+               with open(modelPath, 'rb') as f:
+                   payload = f.read()
+               self._exported = _deserialize(payload)
+               self._jit_fn   = jax.jit(lambda x: self._exported.call(x))
+
+               # Warm up
+               W, H = self.input_size
+               dummy = jnp.zeros([1, H, W, 3], dtype=jnp.float32)
+               _ = self._jit_fn(dummy)
+               print(f'JAX: loaded {modelPath}  (StableHLO path, TF-free)')
+               print(f'JAX version: {jax.__version__}')
+#-----------------------------------------------------------------------------------------------------
+  def _run(self, image_batch):
+        """Run JAX inference; return all outputs as a list of numpy arrays."""
+        x   = self._jnp.array(image_batch, dtype=self._jnp.float32)
+        raw = self._jit_fn(x)
+        if isinstance(raw, (list, tuple)):
+            return [np.array(r) for r in raw]
+        return [np.array(raw)]
+#-----------------------------------------------------------------------------------------------------
+  def predict(self, image):
+        if image.ndim == 3:
+            image_batch = np.expand_dims(image, axis=0)
+        elif image.ndim == 4:
+            image_batch = image
+        else:
+            print("Unexpected dimensions", image.ndim)
+            return None
+
+        predictions = self._run(image_batch)
+
+        if len(predictions) == 1:
+            self.heatmaps = predictions[0][0]
+            return self.heatmaps
+
+        hm, hm16, desc, mh = _parse_predictions(predictions)
+        self.heatmaps             = hm[0]   if hm   is not None else None
+        self.heatmaps_16b         = hm16[0] if hm16 is not None else None
+        self.description          = desc
+        self.multihot_description = mh
+        return self.heatmaps
+#-----------------------------------------------------------------------------------------------------
+  def predict_multi(self, image):
+        if image.ndim == 3:
+            image_batch = np.expand_dims(image, axis=0)
+        elif image.ndim == 4:
+            image_batch = image
+        else:
+            print("Unexpected dimensions", image.ndim)
+            return None
+
+        predictions = self._run(image_batch)
+
+        if len(predictions) == 1:
+            self.heatmaps = predictions[0]
+            return self.heatmaps
+
+        self.heatmaps, self.heatmaps_16b, self.description, self.multihot_description = \
+            _parse_predictions(predictions)
+        return self.heatmaps
+#-----------------------------------------------------------------------------------------------------
+
+
+#-----------------------------------------------------------------------------------------------------
+class HAILOExecutor():
+  # All hailo_platform imports are deferred to __init__ so the rest of the
+  # codebase works without the Hailo runtime installed.
+  #
+  # Model file: 2d_pose_estimation/model_<arch>.hef  (produced by convertModelToHAILO.py)
+  # Usage:      --engine hailo
+  def __init__(
+               self,
+               modelPath:str  = "2d_pose_estimation/model_hailo8.hef",
+               inputWidth     = 256,
+               inputHeight    = 256,
+               targetWidth    = 96,
+               targetHeight   = 96,
+               outputChannels = 18,
+              ):
+               print("Using Hailo Runtime")
+               # ── deferred imports ──────────────────────────────────────────
+               from hailo_platform import (
+                   HEF, VDevice, HailoStreamInterface,
+                   ConfigureParams, InferVStreams,
+                   InputVStreamParams, OutputVStreamParams, FormatType,
+               )
+               # ─────────────────────────────────────────────────────────────
+               self.input_size           = (inputWidth, inputHeight)
+               self.output_size          = (targetWidth, targetHeight)
+               self.numberOfHeatmaps     = outputChannels
+               self.heatmaps             = None
+               self.heatmaps_16b         = None
+               self.description          = None
+               self.multihot_description = None
+               self.activity             = None
+               # ── open device and load HEF ──────────────────────────────────
+               self._target        = VDevice()
+               self._hef           = HEF(modelPath)
+               configure_params    = ConfigureParams.create_from_hef(
+                                         self._hef, interface=HailoStreamInterface.PCIe)
+               network_groups      = self._target.configure(self._hef, configure_params)
+               self._network_group = network_groups[0]
+               self._ng_params     = self._network_group.create_params()
+               # ── stream params (float32 in / float32 out) ──────────────────
+               input_vstream_params  = InputVStreamParams.make(
+                                           self._network_group, format_type=FormatType.FLOAT32)
+               output_vstream_params = OutputVStreamParams.make(
+                                           self._network_group, format_type=FormatType.FLOAT32)
+               self._input_name   = list(input_vstream_params.keys())[0]
+               self._output_names = list(output_vstream_params.keys())
+               # ── enter persistent inference contexts ───────────────────────
+               # Kept open for the lifetime of this object to avoid per-frame
+               # context-manager overhead at inference time.
+               self._infer_pipeline = InferVStreams(
+                   self._network_group, input_vstream_params, output_vstream_params)
+               self._infer_pipeline.__enter__()
+               self._ng_ctx = self._network_group.activate(self._ng_params)
+               self._ng_ctx.__enter__()
+               # ─────────────────────────────────────────────────────────────
+               print(f"Hailo: loaded {modelPath}")
+               print(f"  Input  stream : {self._input_name}")
+               print(f"  Output streams: {self._output_names}")
+#-----------------------------------------------------------------------------------------------------
+  def __del__(self):
+               try:
+                   self._ng_ctx.__exit__(None, None, None)
+                   self._infer_pipeline.__exit__(None, None, None)
+                   self._target.release()
+               except Exception:
+                   pass
+#-----------------------------------------------------------------------------------------------------
+  def _run(self, image_batch):
+        """Run one Hailo inference pass; return outputs as a list of numpy arrays."""
+        # Hailo expects NHWC float32 normalised to [0, 1]
+        data = image_batch.astype(np.float32)
+        if data.max() > 1.0:
+            data = data / 255.0
+        results = self._infer_pipeline.infer({self._input_name: data})
+        return [results[name] for name in self._output_names]
+#-----------------------------------------------------------------------------------------------------
+  def predict(self, image):
+        if image.ndim == 3:
+            image_batch = np.expand_dims(image, axis=0)
+        elif image.ndim == 4:
+            image_batch = image
+        else:
+            print("Unexpected dimensions", image.ndim)
+            return None
+
+        predictions = self._run(image_batch)
+
+        if len(predictions) == 1:
+            self.heatmaps = predictions[0][0]
+            return self.heatmaps
+
+        hm, hm16, desc, mh = _parse_predictions(predictions)
+        self.heatmaps             = hm[0]   if hm   is not None else None
+        self.heatmaps_16b         = hm16[0] if hm16 is not None else None
+        self.description          = desc
+        self.multihot_description = mh
+        return self.heatmaps
+#-----------------------------------------------------------------------------------------------------
+  def predict_multi(self, image):
+        if image.ndim == 3:
+            image_batch = np.expand_dims(image, axis=0)
+        elif image.ndim == 4:
+            image_batch = image
+        else:
+            print("Unexpected dimensions", image.ndim)
+            return None
+
+        predictions = self._run(image_batch)
+
+        if len(predictions) == 1:
+            self.heatmaps = predictions[0]
+            return self.heatmaps
+
+        self.heatmaps, self.heatmaps_16b, self.description, self.multihot_description = \
+            _parse_predictions(predictions)
+        return self.heatmaps
+#-----------------------------------------------------------------------------------------------------
+
+
+#-----------------------------------------------------------------------------------------------------
 class NNExecutor():
   def __init__(
                self,
@@ -633,6 +904,35 @@ class NNExecutor():
                                                   outputChannels  = outputChannels,
                                                   numberOfThreads = numberOfThreads
                                                  )
+                elif (engine=="jax"):
+                        if (modelPath==defaultModelDir):
+                            modelPath = _resolve(modelPath,
+                                                 "model_jax.mlirbc",
+                                                 "model.keras")
+                        self.model = JAXExecutor(
+                                                  modelPath      = modelPath,
+                                                  inputWidth     = inputWidth,
+                                                  inputHeight    = inputHeight,
+                                                  targetWidth    = targetWidth,
+                                                  targetHeight   = targetHeight,
+                                                  outputChannels = outputChannels,
+                                                 )
+                elif (engine=="hailo"):
+                        if (modelPath==defaultModelDir):
+                            modelPath = _resolve(modelPath,
+                                                 "model_hailo8.hef",
+                                                 "model_hailo8l.hef",
+                                                 "model_hailo8r.hef",
+                                                 "model_hailo15h.hef",
+                                                 "model.hef")
+                        self.model = HAILOExecutor(
+                                                   modelPath      = modelPath,
+                                                   inputWidth     = inputWidth,
+                                                   inputHeight    = inputHeight,
+                                                   targetWidth    = targetWidth,
+                                                   targetHeight   = targetHeight,
+                                                   outputChannels = outputChannels,
+                                                  )
                #------------------------------------------
 #-----------------------------------------------------------------------------------------------------
   def predict(self,image):
