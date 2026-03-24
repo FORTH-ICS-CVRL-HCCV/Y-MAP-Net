@@ -48,6 +48,15 @@ scripts/downloadPretrained.sh
 ./runYMAPNet.sh
 ```
 
+To perform vehicle counting (supplementary example) 
+
+```bash
+wget http://ammar.gr/datasets/car.mp4
+./runYMAPNet.sh --from car.mp4 --fast --monitor Vehicle 100 128 right --monitor Vehicle 190 128 left
+```
+
+
+
 This starts real-time pose estimation from your default webcam.
 
 ---
