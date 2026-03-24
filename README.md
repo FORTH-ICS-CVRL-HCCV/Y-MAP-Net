@@ -117,4 +117,4 @@ python3 scripts/setup.sh
 
 ## License
 
-FORTH License — see [LICENSE](LICENSE) for details.
+FORTH License — see [LICENSE](https://github.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/license.txt) for details.
