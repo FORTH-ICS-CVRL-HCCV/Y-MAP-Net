@@ -1,17 +1,17 @@
 # Y-MAP-Net
 
-A real-time **Depth, Normals, Pose, Segmentation and token captioning** system from monocular RGB webcams, video files, or other video sources. Built on TensorFlow/Keras, it supports multi-task outputs including pose keypoints, depth maps, surface normals, segmentation, and natural language embeddings.
+
+We present Y-MAP-Net, a Y-shaped neural network architecture designed for real-time multi-task learning on RGB images. Y-MAP-Net simultaneously predicts depth, surface normals, human pose, semantic segmentation, and generates multi-label captions in a single forward pass. To achieve this, we adopt a multi-teacher, single-student training paradigm, where task-specific foundation models supervise the learning of the network, allowing it to distill their capabilities into a unified real-time inference architecture. Y-MAP-Net exhibits strong generalization, architectural simplicity, and computational efficiency, making it well-suited for resource-constrained robotic platforms. By providing rich 3D, semantic, and contextual scene understanding from low-cost RGB cameras, Y-MAP-Net supports key robotic capabilities such as object manipulation and human–robot interaction.
+
 
 ---
 
 ## Features
 
-- **Real-time inference** from webcam, video files, image folders, screen capture, or ESP32 camera
+- **Real-time inference** from webcam, video files, image folders or screen capture
 - **Multi-task outputs**: 2D pose (17 COCO joints), depth, surface normals, segmentation, and text token embeddings
-- **Multiple backends**: TensorFlow, TFLite, and ONNX
-- **GPU and CPU support** with optional mixed-precision and model quantization
+- **Multiple backends**: TensorFlow, TFLite, JAX and ONNX
 - **Interactive web UI** via Gradio
-- **Full training pipeline** with data augmentation, early stopping, and loss weighting
 
 ---
 
