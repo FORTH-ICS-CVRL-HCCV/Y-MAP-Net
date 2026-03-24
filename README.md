@@ -1,51 +1,120 @@
 # Y-MAP-Net
 
-This repository aims to provide a 2D pose estimator in real-time using a webcam and a pre-trained 2D Pose Estimation model. It utilizes TensorFlow for model inference.
+A real-time **Depth, Normals, Pose, Segmentation and token captioning** system from monocular RGB webcams, video files, or other video sources. Built on TensorFlow/Keras, it supports multi-task outputs including pose keypoints, depth maps, surface normals, segmentation, and natural language embeddings.
 
-## Prerequisites
+---
 
-- Python 3
-- TensorFlow 2.16.1+
-- Keras 3+
-- NumPy
-- OpenCV
-- wget (for downloading the model, optional)
+## Features
 
-These can be installed by running [python3 scripts/setup.sh](https://github.com/FORTH-ICS-CVRL-HCCV/RGBToPoseDetect2D/blob/main/scripts/setup.sh) which will also create a venv that can later be activated using source venv/bin/activate 
+- **Real-time inference** from webcam, video files, image folders, screen capture, or ESP32 camera
+- **Multi-task outputs**: 2D pose (17 COCO joints), depth, surface normals, segmentation, and text token embeddings
+- **Multiple backends**: TensorFlow, TFLite, and ONNX
+- **GPU and CPU support** with optional mixed-precision and model quantization
+- **Interactive web UI** via Gradio
+- **Full training pipeline** with data augmentation, early stopping, and loss weighting
 
-To make a docker file and then mount it use :
-``` 
+---
+
+## Quick Start
+
+### 1. Setup
+
+```bash
+# Automated setup (creates a virtual environment and installs dependencies)
+scripts/setup.sh
+source venv/bin/activate
+```
+
+Or using Docker:
+
+```bash
 docker/build_and_deploy.sh
 docker run rgbposedetect2d-container
 docker attach rgbposedetect2d-container
 cd workspace
-python3 scripts/setup.sh
+scripts/setup.sh
 source venv/bin/activate
 ```
 
+### 2. Download a Pre-trained Model
 
-Ensure that you have installed the required dependencies. You can install them using :
-``` 
-scripts/setup.sh 
-```
-
-To download a pre-trained model use :
-``` 
+```bash
 scripts/downloadPretrained.sh
 ```
 
-To run use :
-``` 
+### 3. Run
+
+```bash
 ./runYMAPNet.sh
-``` 
+```
+
+This starts real-time pose estimation from your default webcam.
+
+---
+
+## Running Inference
+
+### Input Sources
+
+```bash
+# Webcam (default)
+./runYMAPNet.sh
+
+# Video file
+./runYMAPNet.sh --from /path/to/video.mp4
+
+# Image directory / sequence
+./runYMAPNet.sh --from /path/to/images/
+
+# Screen capture
+./runYMAPNet.sh --from screen
+
+# Specific video device
+./runYMAPNet.sh --from /dev/video0
+```
+
+### Common Options
+
+| Flag | Description |
+|------|-------------|
+| `--size W H` | Set input resolution (e.g. `--size 640 480`) |
+| `--cpu` | Force CPU-only inference (slower) |
+| `--fast` | Disable depth refinement, person ID, and skeleton resolution for speed |
+| `--save` | Save output frames to disk |
+| `--headless` | Run without any display window |
+| `--illustrate` | Enable enhanced visualization overlay |
+| `--collab` | Headless mode with save + illustrate (useful for Colab/remote) |
+| `--profiling` | Enable performance profiling |
+
+### Web Interface
+
+```bash
+python3 gradioServer.py
+# Open http://localhost:7860 in your browser
+```
+
+---
 
 
-To train use :
-``` 
-python3 createJSONConfiguration.py
-#Modify the 2d_pose_estimation/configuration.json
-datasets/DataLoader/makeLibrary.sh 
-python3 trainYMAPNet.py
+## Prerequisites
+
+- Python 3.x
+- TensorFlow 2.16.1+ (with CUDA 12.3+ and cuDNN 8.9.6+ for GPU support)
+- Keras 3+
+- NumPy, OpenCV
+- See `requirements.txt` for the full list
+
+Install all dependencies:
+
+```bash
+pip install -r requirements.txt
+# or run the setup script:
+python3 scripts/setup.sh
 ```
 
 
+---
+
+## License
+
+FORTH License — see [LICENSE](LICENSE) for details.
