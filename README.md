@@ -131,8 +131,21 @@ pip install -r requirements.txt
 python3 scripts/setup.sh
 ```
 
-
 ---
+
+## Citation
+
+If you find our work useful or use it in your projects please cite : 
+```
+@inproceedings{qammaz2026ymapnet,
+  author = {Qammaz, Ammar and Vasilikopoulos, Nikos and Oikonomidis, Iason and Argyros, Antonis A},
+  title = {Y-MAP-Net: Learning from Foundation Models for Real-Time, Multi-Task Scene Perception},
+  booktitle = {IEEE International Conference on Robotics and Automation (ICRA 2026), (to appear)},
+  year = {2026},
+  month = {June},
+  projects =  {MAGICIAN}
+}
+```
 
 ## License
 
