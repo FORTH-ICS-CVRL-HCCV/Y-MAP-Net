@@ -159,9 +159,6 @@ static void resizeImageWithBorders(struct Image *image, unsigned char *newPixels
         return;
     }
 
-    // Initialize with black border
-    memset(newPixels, 0, newWidth * newHeight * image->channels);
-
     // Calculate aspect ratios
     float aspect_ratio_original = (float)image->width / image->height;
     float aspect_ratio_target   = (float)newWidth / newHeight;
@@ -193,9 +190,37 @@ static void resizeImageWithBorders(struct Image *image, unsigned char *newPixels
     int max_x = offset_x + resizedWidth;
     int max_y = offset_y + resizedHeight;
 
+    // Zero only the border strips that won't be overwritten by the resize loop.
+    // Exactly one of offset_y (letterbox) or offset_x (pillarbox) is non-zero.
+    if (offset_y > 0)
+    {
+        // Letterbox: two contiguous horizontal strips at top and bottom.
+        memset(newPixels, 0, (size_t)offset_y * newWidth * image->channels);
+        memset(newPixels + (size_t)max_y * newWidth * image->channels, 0,
+               (size_t)(newHeight - max_y) * newWidth * image->channels);
+    }
+    else if (offset_x > 0)
+    {
+        // Pillarbox: left and right border columns cleared per row.
+        size_t row_stride  = (size_t)newWidth * image->channels;
+        size_t left_bytes  = (size_t)offset_x * image->channels;
+        size_t right_bytes = (size_t)(newWidth - (unsigned int)max_x) * image->channels;
+        unsigned char *row = newPixels;
+        for (unsigned int ry = 0; ry < newHeight; ry++, row += row_stride)
+        {
+            memset(row,                                        0, left_bytes);
+            memset(row + (size_t)max_x * image->channels,     0, right_bytes);
+        }
+    }
+    // If both offsets are 0 the resize fills every pixel; no clearing needed.
+
     // Determine valid loop bounds for source image
     int max_src_x = image->width - 2;  // Maximum value for min_src_x to ensure max_src_x is within bounds
     int max_src_y = image->height - 2; // Maximum value for min_src_y to ensure max_src_y is within bounds
+
+    // Precompute inverse multipliers: multiply is cheaper than divide per pixel
+    float inv_kx = 1.0f / *keypointXMultiplier;
+    float inv_ky = 1.0f / *keypointYMultiplier;
 
     unsigned long addr;
     unsigned int r_avg, g_avg, b_avg;
@@ -204,19 +229,21 @@ static void resizeImageWithBorders(struct Image *image, unsigned char *newPixels
     for (int y = offset_y; y < max_y; y++)
     {
         // Compute the source y-coordinate
-        float src_y = (float)(y - offset_y) / *keypointYMultiplier;
+        float src_y = (float)(y - offset_y) * inv_ky;
         if (src_y < 0 || src_y > max_src_y) continue;  // Skip out-of-bound src_y values
 
-        int min_src_y = (int)floor(src_y);
+        // src_y >= 0 here, so (int) truncation == floor()
+        int min_src_y = (int)src_y;
         int max_src_y = min_src_y + 1;
 
         for (int x = offset_x; x < max_x; x++)
         {
             // Compute the source x-coordinate
-            float src_x = (float)(x - offset_x) / *keypointXMultiplier;
+            float src_x = (float)(x - offset_x) * inv_kx;
             if (src_x < 0 || src_x > max_src_x) continue;  // Skip out-of-bound src_x values
 
-            int min_src_x = (int)floor(src_x);
+            // src_x >= 0 here, so (int) truncation == floor()
+            int min_src_x = (int)src_x;
             int max_src_x = min_src_x + 1;
 
             // Interpolate color values for each channel
@@ -578,20 +605,27 @@ static void resizeInstanceImageWithBorders1Channel(
     int max_src_x = image->width  - 1;
     int max_src_y = image->height - 1;
 
+    // Cache pointer targets and precompute inverse multipliers to avoid
+    // repeated pointer dereferences and per-pixel divisions in the inner loop.
+    float xoff   = *keypointXOffset;
+    float yoff   = *keypointYOffset;
+    float inv_kx = 1.0f / *keypointXMultiplier;
+    float inv_ky = 1.0f / *keypointYMultiplier;
+
     #if BRANCHLESS_SEGMENTATION_SEPERATION
       signed char rememberThisBecauseItWillGetOverwritten = newPixels[0];
     #endif // BRANCHLESS_SEGMENTATION_SEPERATION
 
     for (int y = start_y; y < end_y; y++)
     {
-        float src_y = (y - *keypointYOffset) / *keypointYMultiplier;
+        float src_y = (y - yoff) * inv_ky;
         int min_src_y = (int)src_y;
         if (min_src_y < 0) min_src_y = 0;
         if (min_src_y > max_src_y) min_src_y = max_src_y;
 
         for (int x = start_x; x < end_x; x++)
         {
-            float src_x = (x - *keypointXOffset) / *keypointXMultiplier;
+            float src_x = (x - xoff) * inv_kx;
             int min_src_x = (int)src_x;
             if (min_src_x < 0) min_src_x = 0;
             if (min_src_x > max_src_x) min_src_x = max_src_x;

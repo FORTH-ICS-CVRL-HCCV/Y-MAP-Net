@@ -166,6 +166,11 @@ static void sobelXY8Bit(struct Image *image, float *gradientX, float *gradientY,
         return ;
     }
 
+   #if INTEL_OPTIMIZATIONS
+    sobelXY8Bit_AVX2(image, gradientX, gradientY, channel);
+    return;
+   #endif
+
     signed int sumX,sumY;
 
     unsigned int horizontalLine = (width * channels);

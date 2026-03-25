@@ -127,7 +127,7 @@ void convertDepthPathToAllPath(const char *pathToCOCODepthMaps,char *pathToCombi
 
 
 //----------------------------------------------------------------------------------------------------
-int db_set_source_entry(struct DatabaseList* dbList,unsigned int sourceIDExt,const char * pathToDBFile,const char * pathToCOCOImages,const char * pathToCOCODepthMaps,const char * pathToCOCOSegmentations,int ignoreNoSkeletonSamples)
+int db_set_source_entry(struct DatabaseList* dbList,unsigned int sourceIDExt,const char * pathToDBFile,const char * pathToCOCOImages,const char * pathToCOCODepthMaps,const char * pathToCOCOSegmentations,const char * pathToCOCOAllDataCombined,int ignoreNoSkeletonSamples)
 {
   if (!fileExists(pathToDBFile))
   {
@@ -141,17 +141,23 @@ int db_set_source_entry(struct DatabaseList* dbList,unsigned int sourceIDExt,con
       return 0;
   }
 
-  if (!directoryExists(pathToCOCODepthMaps))
+
+  if (!directoryExists(pathToCOCOAllDataCombined))
   {
+   fprintf(stderr,RED "Combined Directory `%s` does not exist\n",pathToCOCOAllDataCombined);
+   if (!directoryExists(pathToCOCODepthMaps))
+   {
       fprintf(stderr,RED "Cannot create source without Depth files, Directory %s does not exist\n",pathToCOCODepthMaps);
       return 0;
-  }
+   }
 
-  if (!directoryExists(pathToCOCOSegmentations))
-  {
+   if (!directoryExists(pathToCOCOSegmentations))
+   {
       fprintf(stderr,RED "Cannot create source without Segmentation files, Directory %s does not exist\n",pathToCOCOSegmentations);
       return 0;
+   }
   }
+
 
   DatasetSourceID sourceID = sourceIDExt;
   if (dbList!=0)
@@ -164,9 +170,13 @@ int db_set_source_entry(struct DatabaseList* dbList,unsigned int sourceIDExt,con
      snprintf(dbl->source[sourceID].pathToCOCODepthMaps,MAX_PATH,"%s",pathToCOCODepthMaps);
      snprintf(dbl->source[sourceID].pathToCOCOSegmentations,MAX_PATH,"%s",pathToCOCOSegmentations);
 
-     //It is very hard to remake all the .db files, so just patch in the new combined meta data..
-     snprintf(dbl->source[sourceID].pathToCombinedMetaData,MAX_PATH,"%s",pathToCOCODepthMaps);
-     convertDepthPathToAllPath(dbl->source[sourceID].pathToCOCODepthMaps,dbl->source[sourceID].pathToCombinedMetaData,MAX_PATH);
+     if (pathToCOCOAllDataCombined && pathToCOCOAllDataCombined[0] != '\0') {
+       snprintf(dbl->source[sourceID].pathToCombinedMetaData,MAX_PATH,"%s",pathToCOCOAllDataCombined);
+     } else {
+       //It is very hard to remake all the .db files, so just patch in the new combined meta data..
+       snprintf(dbl->source[sourceID].pathToCombinedMetaData,MAX_PATH,"%s",pathToCOCODepthMaps);
+       convertDepthPathToAllPath(dbl->source[sourceID].pathToCOCODepthMaps,dbl->source[sourceID].pathToCombinedMetaData,MAX_PATH);
+     }
 
      dbl->source[sourceID].ignoreNoSkeletonSamples = (char) ignoreNoSkeletonSamples;
      dbl->source[sourceID].numberOfSamples = fastReadDatabaseNumberOfSamples(pathToDBFile);
@@ -214,7 +224,7 @@ void db_shuffle_indices(struct ImageDatabase * db)
        unsigned long i,j;
        for (i=db->numberOfSamples-1; i>0; i--)
         {
-          j = (unsigned long) rand() % (i+1); // Fisher-Yates: uniform random index in [0, i]
+          j = (unsigned long)(((uint64_t)rng_next32() * (uint64_t)(i + 1)) >> 32); // Fisher-Yates
           swapULong(&db->indices[i], &db->indices[j]); // Swap the elements at i and j
         }
       } else
@@ -365,11 +375,11 @@ void db_update_sample_loss_range(struct ImageDatabase *db,unsigned long sampleSt
              db->losses[sID]      += loss;
              db->trainPasses[sID] += 1;
 
-             //Keep loss float from ballooning
-             if (db->trainPasses[sID]>10)
+             //Keep loss float from ballooning — explicit reset for predictable decay period
+             if (db->trainPasses[sID] > 10)
              {
-                db->trainPasses[sID]/=2;
-                db->losses[sID]/=2.0;
+                db->trainPasses[sID] = 5;
+                db->losses[sID]     /= 2.0;
              }
          }
     } else
@@ -709,8 +719,6 @@ unsigned short * db_get_sample_description_tokens(struct ImageDatabase *db, unsi
     }
     return 0;
 }
-
-
 //----------------------------------------------------------------------------------------------------
 int db_get_descriptor_elements_number(struct ImageDatabase *db)
 {
@@ -1846,7 +1854,8 @@ void * db_create(struct DatabaseList* dbSources,
   instanceCounter+=1;
   fprintf(stderr,"Instance #%u\n",instanceCounter);
 
-  srand((unsigned int)time(NULL)); // Seed the random number generator
+  srand((unsigned int)time(NULL)); // Keep for any legacy rand() calls
+  rng_seed((uint64_t)time(NULL) ^ 0xDEADBEEFCAFEBABEULL); // Seed fast per-thread PRNG
 
   if (dbSources==NULL) { return 0; }
   struct DatabaseList * dbl = (struct DatabaseList*) dbSources;
@@ -2577,29 +2586,29 @@ int test(int argc, char *argv[])
    dbl = db_allocate_source_list(sourcesRemaining);
 
    //Comment all datasets underneath for little val test
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/coco14/cocoVal14.db",  "../../../ram/datasets/coco14/val2014", "../../../ram/datasets/coco14/depth_val2014", "../../../ram/datasets/coco14/segment_val2014", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/coco14/cocoVal14.db",  "../../../ram/datasets/coco14/val2014", "../../../ram/datasets/coco14/depth_val2014", "../../../ram/datasets/coco14/segment_val2014", "../../../ram/datasets/coco14/all_val2014", ignoreNoSkeletonSamples);
 
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/coco/cocoTrain.db",            "../../../ram/datasets/coco/cache/coco/train2017", "../../../ram/datasets/coco/cache/coco/depth_train2017", "../../../ram/datasets/coco/cache/coco/segment_train2017", ignoreNoSkeletonSamples);
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/coco14/cocoTrain14.db",        "../../../ram/datasets/coco14/train2014",          "../../../ram/datasets/coco14/depth_train2014",          "../../../ram/datasets/coco14/segment_train2014", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/coco/cocoTrain.db",            "../../../ram/datasets/coco/cache/coco/train2017", "../../../ram/datasets/coco/cache/coco/depth_train2017", "../../../ram/datasets/coco/cache/coco/segment_train2017", "../../../ram/datasets/coco/cache/coco/all_train2017", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/coco14/cocoTrain14.db",        "../../../ram/datasets/coco14/train2014",          "../../../ram/datasets/coco14/depth_train2014",          "../../../ram/datasets/coco14/segment_train2014", "../../../ram/datasets/coco14/all_train2014", ignoreNoSkeletonSamples);
 
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/300w/indoor.db",          "../../../ram/datasets/300w/indoor",            "../../../ram/datasets/300w/depth_indoor",            "../../../ram/datasets/300w/segment_indoor", ignoreNoSkeletonSamples);
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/300w/outdoor.db",         "../../../ram/datasets/300w/outdoor",           "../../../ram/datasets/300w/depth_outdoor",           "../../../ram/datasets/300w/segment_outdoor", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/300w/indoor.db",          "../../../ram/datasets/300w/indoor",            "../../../ram/datasets/300w/depth_indoor",            "../../../ram/datasets/300w/segment_indoor", "../../../ram/datasets/300w/all_indoor", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/300w/outdoor.db",         "../../../ram/datasets/300w/outdoor",           "../../../ram/datasets/300w/depth_outdoor",           "../../../ram/datasets/300w/segment_outdoor", "../../../ram/datasets/300w/all_outdoor", ignoreNoSkeletonSamples);
 
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/background/AM-2k.db",          "../../../ram/datasets/background/AM-2k/train",    "../../../ram/datasets/background/AM-2k/depth_train",    "../../../ram/datasets/background/AM-2k/segment_train", ignoreNoSkeletonSamples);
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/background/BG-20k.db",         "../../../ram/datasets/background/BG-20k/train",   "../../../ram/datasets/background/BG-20k/depth_train",   "../../../ram/datasets/background/BG-20k/segment_train", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/background/AM-2k.db",          "../../../ram/datasets/background/AM-2k/train",    "../../../ram/datasets/background/AM-2k/depth_train",    "../../../ram/datasets/background/AM-2k/segment_train", "../../../ram/datasets/background/AM-2k/all_train", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/background/BG-20k.db",         "../../../ram/datasets/background/BG-20k/train",   "../../../ram/datasets/background/BG-20k/depth_train",   "../../../ram/datasets/background/BG-20k/segment_train", "../../../ram/datasets/background/BG-20k/all_train", ignoreNoSkeletonSamples);
 
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/openpose/openposeTrain.db",    "../../../ram/datasets/openpose/data/train",       "../../../ram/datasets/openpose/data/depth_train",       "../../../ram/datasets/openpose/data/segment_train", ignoreNoSkeletonSamples);
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/openpose/openposeBKG.db",      "../../../ram/datasets/openpose/data/bkg",         "../../../ram/datasets/openpose/data/depth_bkg" ,        "../../../ram/datasets/openpose/data/segment_bkg", ignoreNoSkeletonSamples);
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/openpose/openposeFactory.db",  "../../../ram/datasets/openpose/data/factory",     "../../../ram/datasets/openpose/data/depth_factory" ,    "../../../ram/datasets/openpose/data/segment_factory", ignoreNoSkeletonSamples);
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/openpose/openposeFactory2.db", "../../../ram/datasets/openpose/data/factory2",    "../../../ram/datasets/openpose/data/depth_factory2" ,   "../../../ram/datasets/openpose/data/segment_factory2", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/openpose/openposeTrain.db",    "../../../ram/datasets/openpose/data/train",       "../../../ram/datasets/openpose/data/depth_train",       "../../../ram/datasets/openpose/data/segment_train", "../../../ram/datasets/openpose/data/all_train", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/openpose/openposeBKG.db",      "../../../ram/datasets/openpose/data/bkg",         "../../../ram/datasets/openpose/data/depth_bkg" ,        "../../../ram/datasets/openpose/data/segment_bkg", "../../../ram/datasets/openpose/data/all_bkg", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/openpose/openposeFactory.db",  "../../../ram/datasets/openpose/data/factory",     "../../../ram/datasets/openpose/data/depth_factory" ,    "../../../ram/datasets/openpose/data/segment_factory", "../../../ram/datasets/openpose/data/all_factory", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../../../ram/datasets/openpose/openposeFactory2.db", "../../../ram/datasets/openpose/data/factory2",    "../../../ram/datasets/openpose/data/depth_factory2" ,   "../../../ram/datasets/openpose/data/segment_factory2", "../../../ram/datasets/openpose/data/all_factory2", ignoreNoSkeletonSamples);
   } else
   if (useValidationData)
   {
     sourcesRemaining = 2;
     sourceCounter    = 0;
     dbl = db_allocate_source_list(sourcesRemaining);
-    sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco/cocoVal.db",            "../coco/cache/coco/val2017", "../coco/cache/coco/depth_val2017", "../coco/cache/coco/segment_val2017", ignoreNoSkeletonSamples);
-    sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco14/cocoVal14.db",        "../coco14/val2014",          "../coco14/depth_val2014",          "../coco14/segment_val2014", ignoreNoSkeletonSamples);
+    sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco/cocoVal.db",            "../coco/cache/coco/val2017", "../coco/cache/coco/depth_val2017", "../coco/cache/coco/segment_val2017", "../coco/cache/coco/all_val2017", ignoreNoSkeletonSamples);
+    sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco14/cocoVal14.db",        "../coco14/val2014",          "../coco14/depth_val2014",          "../coco14/segment_val2014", "../coco14/all_val2014", ignoreNoSkeletonSamples);
   } else
   #if ONLYVAL2017
   {
@@ -2607,7 +2616,7 @@ int test(int argc, char *argv[])
    sourcesRemaining = 1;
    sourceCounter    = 0;
    dbl = db_allocate_source_list(sourcesRemaining);
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco/cocoVal.db",          "../coco/cache/coco/val2017",            "../coco/cache/coco/depth_val2017",            "../coco/cache/coco/segment_val2017", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco/cocoVal.db",          "../coco/cache/coco/val2017",            "../coco/cache/coco/depth_val2017",            "../coco/cache/coco/segment_val2017", "../coco/cache/coco/all_val2017", ignoreNoSkeletonSamples);
   }
   #else
   {
@@ -2617,29 +2626,29 @@ int test(int argc, char *argv[])
    dbl = db_allocate_source_list(sourcesRemaining);
 
    //Uncomment for little val test
-   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco/cocoVal.db",          "../coco/cache/coco/val2017",            "/home/ammar/Documents/Programming/PZP/test/depth_val2017PZP",            "/home/ammar/Documents/Programming/PZP/test/segment_val2017PZP", ignoreNoSkeletonSamples);
-   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco/cocoVal.db",          "../coco/cache/coco/val2017",            "../coco/cache/coco/depth_val2017",            "../coco/cache/coco/segment_val2017", ignoreNoSkeletonSamples);
+   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco/cocoVal.db",          "../coco/cache/coco/val2017",            "/home/ammar/Documents/Programming/PZP/test/depth_val2017PZP",            "/home/ammar/Documents/Programming/PZP/test/segment_val2017PZP", "/home/ammar/Documents/Programming/PZP/test/all_val2017PZP", ignoreNoSkeletonSamples);
+   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco/cocoVal.db",          "../coco/cache/coco/val2017",            "../coco/cache/coco/depth_val2017",            "../coco/cache/coco/segment_val2017", "../coco/cache/coco/all_val2017", ignoreNoSkeletonSamples);
 
-   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../300w/indoor_jpg.db",          "../300w/indoor_jpg",            "../300w/depth_indoor",            "../300w/segment_indoor", ignoreNoSkeletonSamples);
-   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../300w/outdoor_jpg.db",         "../300w/outdoor_jpg",           "../300w/depth_outdoor",           "../300w/segment_outdoor", ignoreNoSkeletonSamples);
+   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../300w/indoor_jpg.db",          "../300w/indoor_jpg",            "../300w/depth_indoor",            "../300w/segment_indoor", "../300w/all_indoor", ignoreNoSkeletonSamples);
+   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../300w/outdoor_jpg.db",         "../300w/outdoor_jpg",           "../300w/depth_outdoor",           "../300w/segment_outdoor", "../300w/all_outdoor", ignoreNoSkeletonSamples);
 
    //Test PZP file encoding
-   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../300w/indoor_jpg.db",          "../300w/indoor_jpg",            "../300w/depth_indoor_pzp",            "../300w/segment_indoor_pzp", ignoreNoSkeletonSamples);
-   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../300w/outdoor_jpg.db",         "../300w/outdoor_jpg",           "../300w/depth_outdoor_pzp",           "../300w/segment_outdoor_pzp", ignoreNoSkeletonSamples);
+   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../300w/indoor_jpg.db",          "../300w/indoor_jpg",            "../300w/depth_indoor_pzp",            "../300w/segment_indoor_pzp", "../300w/all_indoor_pzp", ignoreNoSkeletonSamples);
+   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../300w/outdoor_jpg.db",         "../300w/outdoor_jpg",           "../300w/depth_outdoor_pzp",           "../300w/segment_outdoor_pzp", "../300w/all_outdoor_pzp", ignoreNoSkeletonSamples);
 
 
    //Comment all datasets underneath for little val test
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco14/cocoVal14.db",          "../coco14/val2014",            "../coco14/depth_val2014",            "../coco14/segment_val2014", ignoreNoSkeletonSamples);
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco/cocoTrain.db",            "../coco/cache/coco/train2017", "../coco/cache/coco/depth_train2017", "../coco/cache/coco/segment_train2017", ignoreNoSkeletonSamples);
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco14/cocoTrain14.db",        "../coco14/train2014",          "../coco14/depth_train2014",          "../coco14/segment_train2014", ignoreNoSkeletonSamples);
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../background/AM-2k.db",          "../background/AM-2k/train",    "../background/AM-2k/depth_train",    "../background/AM-2k/segment_train", ignoreNoSkeletonSamples);
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../background/BG-20k.db",         "../background/BG-20k/train",   "../background/BG-20k/depth_train",   "../background/BG-20k/segment_train", ignoreNoSkeletonSamples);
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../openpose/openposeTrain.db",    "../openpose/data/train",       "../openpose/data/depth_train",       "../openpose/data/segment_train", ignoreNoSkeletonSamples);
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../openpose/openposeBKG.db",      "../openpose/data/bkg",         "../openpose/data/depth_bkg" ,        "../openpose/data/segment_bkg", ignoreNoSkeletonSamples);
-   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../openpose/openposeFactory.db",  "../openpose/data/factory",     "../openpose/data/depth_factory" ,    "../openpose/data/segment_factory", ignoreNoSkeletonSamples);
-   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../openpose/openposeFactory2.db", "../openpose/data/factory2",    "../openpose/data/depth_factory2" ,   "../openpose/data/segment_factory2", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco14/cocoVal14.db",          "../coco14/val2014",            "../coco14/depth_val2014",            "../coco14/segment_val2014", "../coco14/all_val2014", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco/cocoTrain.db",            "../coco/cache/coco/train2017", "../coco/cache/coco/depth_train2017", "../coco/cache/coco/segment_train2017", "../coco/cache/coco/all_train2017", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../coco14/cocoTrain14.db",        "../coco14/train2014",          "../coco14/depth_train2014",          "../coco14/segment_train2014", "../coco14/all_train2014", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../background/AM-2k.db",          "../background/AM-2k/train",    "../background/AM-2k/depth_train",    "../background/AM-2k/segment_train", "../background/AM-2k/all_train", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../background/BG-20k.db",         "../background/BG-20k/train",   "../background/BG-20k/depth_train",   "../background/BG-20k/segment_train", "../background/BG-20k/all_train", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../openpose/openposeTrain.db",    "../openpose/data/train",       "../openpose/data/depth_train",       "../openpose/data/segment_train", "../openpose/data/all_train", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../openpose/openposeBKG.db",      "../openpose/data/bkg",         "../openpose/data/depth_bkg" ,        "../openpose/data/segment_bkg", "../openpose/data/all_bkg", ignoreNoSkeletonSamples);
+   sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../openpose/openposeFactory.db",  "../openpose/data/factory",     "../openpose/data/depth_factory" ,    "../openpose/data/segment_factory", "../openpose/data/all_factory", ignoreNoSkeletonSamples);
+   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../openpose/openposeFactory2.db", "../openpose/data/factory2",    "../openpose/data/depth_factory2" ,   "../openpose/data/segment_factory2", "../openpose/data/all_factory2", ignoreNoSkeletonSamples);
 
-   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../generated/generatedTrain.db",  "../generated/data/train",      "../generated/data/depth_train" ,   "../generated/data/segment_train",   ignoreNoSkeletonSamples);
+   //sourcesRemaining -= db_set_source_entry(dbl,sourceCounter++,"../generated/generatedTrain.db",  "../generated/data/train",      "../generated/data/depth_train" ,   "../generated/data/segment_train", "../generated/data/all_train",   ignoreNoSkeletonSamples);
   }
   #endif // ONLYVAL2017
 
@@ -2858,7 +2867,7 @@ int test(int argc, char *argv[])
         if (profilingRun)
            {
              totalBatches = 10;
-             fprintf(stderr,"Will now only go through %lu samples to profile code in valgrind\n",totalBatches);
+             fprintf(stderr,"Will now only go through %lu batches to profile code in valgrind\n",totalBatches);
            }// <- limit run for profiling
         else
            { fprintf(stderr,"Will now attempt to go through all %lu samples to identify bugs, this will take time in valgrind mode\n",db->numberOfSamples); }

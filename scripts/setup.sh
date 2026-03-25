@@ -64,6 +64,34 @@ else
   #sudo apt install nvidia-cudnn-cu12 
 fi
 
+read -r -p "Set up JAX venv (venv_jax) for JAX/GPU inference? [y/N] " jax_reply
+if [[ "$jax_reply" =~ ^[Yy]$ ]]; then
+  if [ ! -d venv_jax/ ]; then
+    echo "Creating venv_jax..."
+    python3 -m venv venv_jax
+  else
+    echo "Found existing venv_jax, updating packages..."
+  fi
+  source venv_jax/bin/activate
+  python3 -m pip install --upgrade pip
+  python3 -m pip install "jax[cuda12]" tensorflow[and-cuda] tf_keras numpy opencv-python orbax-checkpoint tf2onnx onnx
+  # Patch activate to expose all nvidia CUDA library dirs on LD_LIBRARY_PATH
+  if ! grep -q "site.getsitepackages" venv_jax/bin/activate; then
+    cat >> venv_jax/bin/activate << 'EOF'
+export LD_LIBRARY_PATH=$(python3 -c "
+import os, site
+sp = site.getsitepackages()[0]
+nvidia = os.path.join(sp, 'nvidia')
+if os.path.isdir(nvidia):
+    libs = [os.path.join(nvidia, d, 'lib') for d in os.listdir(nvidia) if os.path.isdir(os.path.join(nvidia, d, 'lib'))]
+    print(':'.join(libs))
+" 2>/dev/null):$LD_LIBRARY_PATH
+EOF
+  fi
+  deactivate
+  echo "venv_jax ready. Activate with: source venv_jax/bin/activate"
+fi
+
 if [ -d 2d_pose_estimation/ ]; then
   echo "Found model data."
 else

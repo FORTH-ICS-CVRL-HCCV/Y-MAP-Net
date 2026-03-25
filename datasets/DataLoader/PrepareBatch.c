@@ -8,6 +8,7 @@
 
 #include "codecs/codecs.h"
 #include "codecs/image.h"
+#include "codecs/pzp.h"
 
 #include "cache.h"
 
@@ -62,13 +63,16 @@ void initializeHeatmap16Bit(signed short* heatmapDestination16Bit, int width, in
 
 int cleanHeatmapsOfTargetSample(struct ImageDatabase * db ,unsigned long targetImageNumber)
 {
-  signed char*  heatmapDestination8Bit  = (signed char*)  db->out8bit.pixels  + (db->out8bit.width  * db->out8bit.height  * db->out8bit.channels  * targetImageNumber);
-  signed short* heatmapDestination16Bit = (signed short*) db->out16bit.pixels + (db->out16bit.width * db->out16bit.height * db->out16bit.channels * targetImageNumber);
+  signed char* heatmapDestination8Bit = (signed char*) db->out8bit.pixels + (db->out8bit.width * db->out8bit.height * db->out8bit.channels * targetImageNumber);
+  memset(heatmapDestination8Bit, (signed char) MINV, db->out8bit.width * db->out8bit.height * db->out8bit.channels * sizeof(signed char));
 
   //Nuke all 16bit heatmap data for our sample, memset doesn't work for 16bit data
-  initializeHeatmap16Bit(heatmapDestination16Bit, db->out16bit.width, db->out16bit.height, db->out16bit.channels);
+  if (db->out16bit.pixels != NULL)
+  {
+    signed short* heatmapDestination16Bit = (signed short*) db->out16bit.pixels + (db->out16bit.width * db->out16bit.height * db->out16bit.channels * targetImageNumber);
+    initializeHeatmap16Bit(heatmapDestination16Bit, db->out16bit.width, db->out16bit.height, db->out16bit.channels);
+  }
 
-  memset(heatmapDestination8Bit, (signed char) MINV,         db->out8bit.width  * db->out8bit.height  * db->out8bit.channels  * sizeof (signed char));
   return 1;
 }
 
@@ -326,6 +330,10 @@ void *workerThread(void * arg)
 
     threadpoolWorkerInitialWait(ptr);
 
+    // Seed the per-thread fast PRNG (splitmix64) so each worker has independent
+    // randomness without contending on glibc's global rand() lock.
+    rng_seed((uint64_t)time(NULL) ^ ((uint64_t)ptr->threadID * 0x9E3779B97F4A7C15ULL));
+
     //---------------------------------------------------
     //DEBUG BEHAVIOR OF DIFFERENT FUNCTIONS
     //DISABLE THEM TO CHECK THEM..
@@ -476,8 +484,12 @@ void *workerThread(void * arg)
             char filenameNoExtension[1024]={0};
             snprintf(filenameNoExtension,1024,"%s",db->pdb->sample[sampleNumber].imagePath);
             filenameNoExtension[strlen(filenameNoExtension)-4]=0;
-            snprintf(allFile,2048,"%.1023s/%.1000s.png",db->dbSources->source[sourceID].pathToCombinedMetaData,filenameNoExtension);
-            splitSegmentationAndDepthFromSingleFile(allFile,&segment,&dpth);
+            snprintf(allFile,2048,"%.1023s/%.1000s.pzp",db->dbSources->source[sourceID].pathToCombinedMetaData,filenameNoExtension);
+            if (!splitSegmentationAndDepthFromSingleFilePZP(allFile,&segment,&dpth))
+            { //Prioritize PZP, or fallback to .png
+             snprintf(allFile,2048,"%.1023s/%.1000s.png",db->dbSources->source[sourceID].pathToCombinedMetaData,filenameNoExtension);
+             splitSegmentationAndDepthFromSingleFilePNG(allFile,&segment,&dpth);
+            }
             depthAndSegAreMultiplexed = 1;
             logThreadProgress(thisThreadNumber,0,"combined_depth_segmentation_loading");
             //###############################################################
@@ -1026,6 +1038,8 @@ void *workerThread(void * arg)
     //if (inputRGBBuffer!=0)
     //   { free(inputRGBBuffer); }
     #endif
+
+    pzp_thread_cleanup();  // release per-thread ZSTD decompression context
 
     return 0;
 }

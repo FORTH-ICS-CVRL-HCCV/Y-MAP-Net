@@ -105,7 +105,7 @@ struct PoseDatabase* createPoseDatabase(unsigned long numberOfSamples,unsigned s
       }
 
       pdb->sample = (struct PoseEntry *)  malloc((numberOfSamples+1) * sizeof(struct PoseEntry));
-      if (pdb->joint!=0)
+      if (pdb->sample!=0)
       {
           memset(pdb->sample,0,(numberOfSamples+1) * sizeof(struct PoseEntry)); // <- clean up
       }
@@ -142,10 +142,8 @@ int parseDescriptionTokens(struct PoseDatabase * pdb,unsigned long sampleNumber,
 
   //Completely flush existing data (they should already be clean but be pedantic
   //in case there are multiple loads (?) in the same pose database.
-  for (unsigned int tokenID = 0; tokenID<MAX_DESCRIPTION_TOKENS; tokenID++)
-  {
-       pdb->sample[sampleNumber].descriptionTokens[tokenID] = 0;
-  }
+  memset(pdb->sample[sampleNumber].descriptionTokens, 0,
+         MAX_DESCRIPTION_TOKENS * sizeof(unsigned short));
 
   if (strcmp("000",line) == 0)
   {

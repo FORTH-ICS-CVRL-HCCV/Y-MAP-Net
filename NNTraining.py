@@ -247,17 +247,24 @@ def getLossFromCFG(cfg):
         return hmloss
 """
 #-------------------------------------------------------------------------------
-def getOptimizerFromCFG(cfg):
+def getOptimizerFromCFG(cfg, globalClipNorm=None):
    if not 'optimizer' in cfg:
       raise ValueError("Did not find a declaration for optimizer in json configuration")
 
+   # When globalClipNorm is set (multi-GPU), use global norm clipping instead of
+   # per-element clipvalue. With all-reduce, rare high-weight samples have
+   # num_gpus x more gradient impact than single-GPU (diluted by fewer replicas
+   # than samples); global_clipnorm bounds the total update size regardless.
+   clip_value  = None if globalClipNorm else 1.0
+   global_clip = globalClipNorm
+
    if (cfg['optimizer']=='adamwcautious'):
       from NNLosses import AdamWCautious
-      optimizer = AdamWCautious(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=1.0)
+      optimizer = AdamWCautious(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=clip_value)
    elif (cfg['optimizer']=='adam'):
-      optimizer = tf.keras.optimizers.Adam(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=1.0,global_clipnorm=None)
+      optimizer = tf.keras.optimizers.Adam(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=clip_value,global_clipnorm=global_clip)
    elif (cfg['optimizer']=='adamw'):
-      optimizer = tf.keras.optimizers.AdamW(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=1.0,global_clipnorm=None)
+      optimizer = tf.keras.optimizers.AdamW(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=clip_value,global_clipnorm=global_clip)
    else:
       raise ValueError("Unknown optimizer (",cfg['optimizer'],")")
    return optimizer

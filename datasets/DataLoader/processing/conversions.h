@@ -501,6 +501,14 @@ static void copy16BitHeatmapTo8BitHeatmapWithRemap(struct Heatmaps * heatmaps8Bi
     float range = (float)(max_val - min_val);
     if (range == 0.0f) range = 1.0f; // Avoid division by zero
 
+    // Precompute per-pass constants: fused scale+offset so the inner loop
+    // reduces to one fmul + one fadd instead of subtract + divide + fma.
+    // mapped = (val - min_val) / range * 240 - 120
+    //        = val * scale + bias
+    float inv_range = 1.0f / range;
+    float scale     = 240.0f * inv_range;
+    float bias      = -120.0f - (float)min_val * scale;
+
     // Second pass: map depth values to [-120, 120]
     for (int y = borderY; y < height - borderY; y++)
     {
@@ -519,20 +527,17 @@ static void copy16BitHeatmapTo8BitHeatmapWithRemap(struct Heatmaps * heatmaps8Bi
         } else
         {
           // Linear mapping: [min_val, max_val] -> [-120, 120]
-          float normalized = (float)(val - min_val) / range;
-          mapped = -120.0f + normalized * 240.0f;
+          // One fmul + one fadd; no per-pixel division.
+          mapped = (float)val * scale + bias;
 
           // Clamp to ensure values stay within [-120, 120]
           if (mapped < -120.0f) { mapped = -120.0f; } else
           if (mapped > 120.0f)  { mapped = 120.0f;  }
         }
 
-        // Round to nearest integer
-        signed char result;
-        if (mapped >= 0) { result = (signed char)(mapped + 0.5f); } else
-                         { result = (signed char)(mapped - 0.5f); }
-
-        *mem8B = result;
+        // Round half-away-from-zero: add ±0.5 then truncate.
+        // Written as a ternary so GCC emits blendvps/cvttss2si — no libm call.
+        *mem8B = (signed char)(mapped + (mapped >= 0.0f ? 0.5f : -0.5f));
         mem8B += channels8Bit;
       }
     }
@@ -586,11 +591,11 @@ static struct Image * allocateSingleChannelImage(unsigned int w, unsigned int h,
          depth_img = 16-bit depth image
     - Extracts the data into the new images
 */
-static int splitSegmentationAndDepthFromSingleFile(
-                                                   const char * filename,
-                                                   struct Image ** seg_img_out,
-                                                   struct Image ** depth_img_out
-                                                  )
+static int splitSegmentationAndDepthFromSingleFileGeneric(
+                                                          struct Image * img,
+                                                          struct Image ** seg_img_out,
+                                                          struct Image ** depth_img_out
+                                                         )
 {
     *seg_img_out   = 0;
     *depth_img_out = 0;
@@ -598,16 +603,15 @@ static int splitSegmentationAndDepthFromSingleFile(
     // -------------------------------------------------------
     // 1. Load the raw PNG using your own provided loader
     // -------------------------------------------------------
-    struct Image * img = readImage(filename, PNG_CODEC, 0);
     if (!img || !img->pixels)
     {
-        fprintf(stderr, "Failed to load PNG: %s\n", filename);
+        fprintf(stderr, "splitSegmentationAndDepthFromSingleFileGeneric failed to load\n");
         return 0;
     }
 
     if (img->channels < 3 || img->bitsperpixel != 8)
     {
-        fprintf(stderr, "ERROR: Expected 8-bit RGB PNG\n");
+        fprintf(stderr, "ERROR: Expected 8-bit RGB file\n");
         return 0;
     }
 
@@ -640,22 +644,122 @@ static int splitSegmentationAndDepthFromSingleFile(
     #define CHANNEL_G 2
     #define CHANNEL_B 1
 
-    for (unsigned int y = 0; y < H; y++)
+    unsigned int n = W * H;
+
+#if INTEL_OPTIMIZATIONS
+    // AVX2 / SSE4.1 stride-3 deinterleave — 16 pixels (48 bytes) per iteration.
+    //
+    // Pixel layout in memory: [R0,B0,G0, R1,B1,G1, ...]
+    //   CHANNEL_R=0 (position 0) → seg byte
+    //   CHANNEL_B=1 (position 1) → depth low byte
+    //   CHANNEL_G=2 (position 2) → depth high byte
+    //   depth[i] = (G[i] << 8) | B[i]
+    //
+    // We load three consecutive 16-byte blocks a/b/c covering pixels i..i+15:
+    //   a = src[0..15],  b = src[16..31],  c = src[32..47]
+    //
+    // Channel R at relative byte positions:  a:{0,3,6,9,12,15}  b:{2,5,8,11,14}  c:{1,4,7,10,13}
+    // Channel B at relative byte positions:  a:{1,4,7,10,13}    b:{0,3,6,9,12,15} c:{2,5,8,11,14}
+    // Channel G at relative byte positions:  a:{2,5,8,11,14}    b:{1,4,7,10,13}   c:{0,3,6,9,12,15}
+    //
+    // pshufb compacts each group to the low bytes of the result; two byte-shift-and-OR
+    // operations then stitch the three partial results into one contiguous 16-byte vector.
+
+    // pshufb masks stored as byte arrays (portable C99; -1 = 0xFF zeroes that output byte).
+    // R masks (position 0 per pixel):
+    //   a → 6 bytes at output[0..5];   pshufb indices: 0,3,6,9,12,15
+    //   b → 5 bytes at output[0..4];   pshufb indices: 2,5,8,11,14  (shift left 6 before OR)
+    //   c → 5 bytes at output[0..4];   pshufb indices: 1,4,7,10,13  (shift left 11 before OR)
+    static const signed char _mR_a[16] = { 0, 3, 6, 9,12,15,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    static const signed char _mR_b[16] = { 2, 5, 8,11,14,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    static const signed char _mR_c[16] = { 1, 4, 7,10,13,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    // B masks (position 1 per pixel):
+    //   a → 5 bytes;  b → 6 bytes (shift 5);  c → 5 bytes (shift 11)
+    static const signed char _mB_a[16] = { 1, 4, 7,10,13,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    static const signed char _mB_b[16] = { 0, 3, 6, 9,12,15,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    static const signed char _mB_c[16] = { 2, 5, 8,11,14,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    // G masks (position 2 per pixel):
+    //   a → 5 bytes;  b → 5 bytes (shift 5);  c → 6 bytes (shift 10)
+    static const signed char _mG_a[16] = { 2, 5, 8,11,14,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    static const signed char _mG_b[16] = { 1, 4, 7,10,13,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    static const signed char _mG_c[16] = { 0, 3, 6, 9,12,15,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+
+    // Load masks into registers once (compiler will keep them in regs across loop iterations)
+    __m128i shuf_R_a = _mm_loadu_si128((const __m128i*)_mR_a);
+    __m128i shuf_R_b = _mm_loadu_si128((const __m128i*)_mR_b);
+    __m128i shuf_R_c = _mm_loadu_si128((const __m128i*)_mR_c);
+    __m128i shuf_B_a = _mm_loadu_si128((const __m128i*)_mB_a);
+    __m128i shuf_B_b = _mm_loadu_si128((const __m128i*)_mB_b);
+    __m128i shuf_B_c = _mm_loadu_si128((const __m128i*)_mB_c);
+    __m128i shuf_G_a = _mm_loadu_si128((const __m128i*)_mG_a);
+    __m128i shuf_G_b = _mm_loadu_si128((const __m128i*)_mG_b);
+    __m128i shuf_G_c = _mm_loadu_si128((const __m128i*)_mG_c);
+
+    unsigned int i = 0;
+    for (; i + 16 <= n; i += 16)
     {
-        for (unsigned int x = 0; x < W; x++)
-        {
-            unsigned int idx = (y * W + x) * 3;
+        const unsigned char *s = src + i * 3;
 
-            unsigned char R = src[idx + CHANNEL_R];  // segmentation class
-            unsigned char G = src[idx + CHANNEL_G];  // depth high byte
-            unsigned char B = src[idx + CHANNEL_B];  // depth low byte
+        __m128i a = _mm_loadu_si128((const __m128i*)(s +  0));
+        __m128i b = _mm_loadu_si128((const __m128i*)(s + 16));
+        __m128i c = _mm_loadu_si128((const __m128i*)(s + 32));
 
-            unsigned short depth_value = ((unsigned short)G << 8) | (unsigned short)B;
+        // --- R (seg) channel: 6 from a, 5 from b, 5 from c ---
+        __m128i seg_16 =
+            _mm_or_si128(
+                _mm_or_si128(_mm_shuffle_epi8(a, shuf_R_a),
+                             _mm_slli_si128(_mm_shuffle_epi8(b, shuf_R_b), 6)),
+                             _mm_slli_si128(_mm_shuffle_epi8(c, shuf_R_c), 11));
 
-            seg_pixels[y*W + x]   = R;
-            depth_pixels[y*W + x] = depth_value;
-        }
+        // --- B channel (depth low byte): 5 from a, 6 from b, 5 from c ---
+        __m128i B_16 =
+            _mm_or_si128(
+                _mm_or_si128(_mm_shuffle_epi8(a, shuf_B_a),
+                             _mm_slli_si128(_mm_shuffle_epi8(b, shuf_B_b), 5)),
+                             _mm_slli_si128(_mm_shuffle_epi8(c, shuf_B_c), 11));
+
+        // --- G channel (depth high byte): 5 from a, 5 from b, 6 from c ---
+        __m128i G_16 =
+            _mm_or_si128(
+                _mm_or_si128(_mm_shuffle_epi8(a, shuf_G_a),
+                             _mm_slli_si128(_mm_shuffle_epi8(b, shuf_G_b), 5)),
+                             _mm_slli_si128(_mm_shuffle_epi8(c, shuf_G_c), 10));
+
+        // --- Write 16 seg bytes ---
+        _mm_storeu_si128((__m128i*)(seg_pixels + i), seg_16);
+
+        // --- Build depth: depth[j] = (G[j] << 8) | B[j] ---
+        // Low 8 pixels: zero-extend bytes 0-7 of G/B to uint16, combine
+        __m128i depth_lo = _mm_or_si128(
+            _mm_slli_epi16(_mm_cvtepu8_epi16(G_16), 8),
+                           _mm_cvtepu8_epi16(B_16));
+        _mm_storeu_si128((__m128i*)(depth_pixels + i),     depth_lo);
+
+        // High 8 pixels: shift G/B right by 8 bytes to bring bytes 8-15 to low end, then same
+        __m128i depth_hi = _mm_or_si128(
+            _mm_slli_epi16(_mm_cvtepu8_epi16(_mm_srli_si128(G_16, 8)), 8),
+                           _mm_cvtepu8_epi16(_mm_srli_si128(B_16, 8)));
+        _mm_storeu_si128((__m128i*)(depth_pixels + i + 8), depth_hi);
     }
+
+    // Scalar tail for the remaining < 16 pixels
+    for (; i < n; i++)
+    {
+        unsigned int idx = i * 3;
+        seg_pixels[i]   = src[idx + CHANNEL_R];
+        depth_pixels[i] = ((unsigned short)src[idx + CHANNEL_G] << 8)
+                        |  (unsigned short)src[idx + CHANNEL_B];
+    }
+#else
+    // Flat scalar loop
+    for (unsigned int i = 0; i < n; i++)
+    {
+        unsigned int idx = i * 3;
+        seg_pixels[i]   = src[idx + CHANNEL_R];
+        depth_pixels[i] = ((unsigned short)src[idx + CHANNEL_G] << 8)
+                        |  (unsigned short)src[idx + CHANNEL_B];
+    }
+#endif
 
     // -------------------------------------------------------
     // 4. Return both output images
@@ -667,6 +771,72 @@ static int splitSegmentationAndDepthFromSingleFile(
     return 1;
 }
 
+
+
+static int splitSegmentationAndDepthFromSingleFilePNG(
+                                                          const char * filename,
+                                                          struct Image ** seg_img_out,
+                                                          struct Image ** depth_img_out
+                                                        )
+{
+    *seg_img_out   = 0;
+    *depth_img_out = 0;
+
+    // -------------------------------------------------------
+    // 1. Load the raw PNG using your own provided loader
+    // -------------------------------------------------------
+    struct Image * img = readImage(filename, PNG_CODEC, 0);
+    if (!img || !img->pixels)
+    {
+        fprintf(stderr, "Failed to load PNG: %s\n", filename);
+        return 0;
+    }
+
+    if (img->channels < 3 || img->bitsperpixel != 8)
+    {
+        fprintf(stderr, "ERROR: Expected 8-bit RGB PNG\n");
+        return 0;
+    }
+
+
+   return splitSegmentationAndDepthFromSingleFileGeneric(img,seg_img_out,depth_img_out);
+
+}
+
+
+
+static int splitSegmentationAndDepthFromSingleFilePZP(
+                                                          const char * filename,
+                                                          struct Image ** seg_img_out,
+                                                          struct Image ** depth_img_out
+                                                        )
+{
+    *seg_img_out   = 0;
+    *depth_img_out = 0;
+
+    // -------------------------------------------------------
+    // 1. Load the raw PZP using your own provided loader
+    // -------------------------------------------------------
+    struct Image * img = readImage(filename, PZP_CODEC, 0);
+    if (!img || !img->pixels)
+    {
+        fprintf(stderr, "Failed to load PZP: %s\n", filename);
+        return 0;
+    }
+
+    if (img->channels < 3 || img->bitsperpixel != 24)
+    {
+        fprintf(stderr, "ERROR: Expected 24-bit RGB PZP\n");
+        fprintf(stderr, "We have %u channels \n",img->channels);
+        fprintf(stderr, "We have %u bitsperpixel \n",img->bitsperpixel);
+        return 0;
+    }
+
+   img->bitsperpixel = 8; // <- Recode bits per pixel how the next function expects it ..
+
+   return splitSegmentationAndDepthFromSingleFileGeneric(img,seg_img_out,depth_img_out);
+
+}
 
 
 #ifdef __cplusplus

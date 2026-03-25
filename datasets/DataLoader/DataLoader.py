@@ -43,6 +43,128 @@ def loadLibrary(filename, relativePath="", forceUpdate=False):
 
     return libDataLoader
 #-------------------------------------------------------------------------------
+def _setup_ctypes(lib):
+    """Set all argtypes and restypes for libDataLoader once at load time."""
+    vp = ctypes.c_void_p
+    ul = ctypes.c_ulong
+    ui = ctypes.c_uint
+    i  = ctypes.c_int
+    f  = ctypes.c_float
+    cp = ctypes.c_char_p
+    sz = ctypes.c_size_t
+    us = ctypes.c_ushort
+    b  = ctypes.c_byte
+    ub = ctypes.c_ubyte
+    sh = ctypes.c_short
+    P  = ctypes.POINTER
+
+    lib.test.argtypes                                          = [i, vp]
+    lib.test.restype                                           = i
+
+    lib.db_create.argtypes = [vp,          # struct DatabaseList* dbSources
+                              ul,          # unsigned long numberOfSamples
+                              i, i, i,     # streamData, batchSize, workerThreads
+                              i, i,        # gradientSize, PAFSize
+                              i, i, i,     # doAugmentations, addPAFs, addBackground
+                              i, i, i, i,  # addDepthMap, addDepthLevelsHeatmaps, addNormals, addSegmentation
+                              i,           # bytesPerDepthValue
+                              ui, ui, ui,  # widthIn, heightIn, channelsIn
+                              ui, ui, ui, ui]  # widthOut, heightOut, channelsOut8Bit, output16BitChannels
+    lib.db_create.restype                                      = vp
+
+    lib.db_destroy.argtypes                                    = [vp]
+    lib.db_destroy.restype                                     = i
+
+    lib.db_allocate_source_list.argtypes                       = [ui]
+    lib.db_allocate_source_list.restype                        = vp
+    lib.db_destroy_source_list.argtypes                        = [vp]
+    lib.db_set_source_entry.argtypes                           = [vp, ui, cp, cp, cp, cp, cp, i]
+    lib.db_set_source_entry.restype                            = vp
+
+    lib.db_get_number_of_samples.argtypes                      = [vp]
+    lib.db_get_number_of_samples.restype                       = ul
+    lib.db_get_number_of_images.argtypes                       = [vp]
+    lib.db_get_number_of_images.restype                        = ul
+
+    lib.db_get_sample_total_loss.argtypes                      = [vp, ul]
+    lib.db_get_sample_total_loss.restype                       = f
+    lib.db_get_sample_train_passes.argtypes                    = [vp, ul]
+    lib.db_get_sample_train_passes.restype                     = ul
+
+    lib.db_get_filename_of_sample.argtypes                     = [vp, ul, cp, sz]
+    lib.db_get_filename_of_sample.restype                      = ul
+
+    lib.db_disable_heatmap_output.argtypes                     = [vp]
+
+    lib.db_update.argtypes                                     = [vp, ul, ul, i, i, i]
+    lib.db_update.restype                                      = i
+    lib.db_StartUpdate.argtypes                                = [vp, ul, ul, i, i, i]
+    lib.db_StartUpdate.restype                                 = i
+    lib.db_CollectUpdate.argtypes                              = [vp, ul, ul, i, i, i]
+    lib.db_CollectUpdate.restype                               = i
+
+    lib.db_set_priority.argtypes                               = [i]
+    lib.db_set_priority.restype                                = i
+    lib.db_print_readSpeed.argtypes                            = [vp]
+
+    lib.db_get_in.argtypes                                     = [vp, ul]
+    lib.db_get_in.restype                                      = P(ub)
+    lib.db_get_out.argtypes                                    = [vp, ul]
+    lib.db_get_out.restype                                     = P(b)
+    lib.db_get_out16bit.argtypes                               = [vp, ul, ul]
+    lib.db_get_out16bit.restype                                = P(sh)
+
+    lib.db_save_image.argtypes                                 = [vp, cp, ul]
+    lib.db_save_heatmap8bit_as_jpg.argtypes                    = [vp, cp, ul, us]
+
+    lib.db_shuffle_indices.argtypes                            = [vp]
+    lib.db_shuffle_indices_via_loss.argtypes                   = [vp]
+    lib.db_change_joint_difficulty.argtypes                    = [vp, us, b]
+    lib.db_update_sample_loss_range.argtypes                   = [vp, ul, ul, f]
+    lib.db_update_sample_loss.argtypes                         = [vp, ul, f]
+
+    lib.db_sort_description_tokens.argtypes                    = [vp]
+    lib.db_sort_description_tokens_based_on_count.argtypes     = [vp, i, i]
+    lib.db_remove_duplicate_description_tokens.argtypes        = [vp]
+    lib.db_set_MAX_sample_description_token_value.argtypes     = [vp, i]
+    lib.db_set_MAX_sample_description_token_value.restype      = i
+
+    lib.db_get_valid_segmentations.argtypes                    = [vp]
+    lib.db_get_valid_segmentations.restype                     = i
+    lib.db_get_total_segmentation_classes.argtypes             = [vp]
+    lib.db_get_total_segmentation_classes.restype              = i
+
+    lib.db_get_MAX_sample_description_token_value.argtypes     = [vp]
+    lib.db_get_MAX_sample_description_token_value.restype      = i
+    lib.db_get_MAX_sample_description_tokens_number.argtypes   = [vp]
+    lib.db_get_MAX_sample_description_tokens_number.restype    = i
+    lib.db_get_descriptor_elements_number.argtypes             = [vp]
+    lib.db_get_descriptor_elements_number.restype              = i
+
+    lib.db_allocate_token_blacklist.argtypes                   = [vp, ui]
+    lib.db_allocate_token_blacklist.restype                    = i
+    lib.db_add_token_to_blacklist.argtypes                     = [vp, ui]
+    lib.db_add_token_to_blacklist.restype                      = i
+    lib.db_compile_added_token_blacklist.argtypes              = [vp]
+    lib.db_compile_added_token_blacklist.restype               = i
+
+    lib.db_count_description_tokens.argtypes                   = [vp, i]
+    lib.db_count_description_tokens.restype                    = P(ul)
+    lib.db_free_description_token_count.argtypes               = [vp]
+    lib.db_free_description_token_count.restype                = i
+    lib.db_count_description_token_weight.argtypes             = [vp, i]
+    lib.db_count_description_token_weight.restype              = P(f)
+
+    lib.db_get_sample_descriptors.argtypes                     = [vp, ul]
+    lib.db_get_sample_descriptors.restype                      = P(f)
+    lib.db_get_sample_description_tokens.argtypes              = [vp, ul]
+    lib.db_get_sample_description_tokens.restype               = P(us)
+    lib.db_get_sample_description_tokens_number.argtypes       = [vp, ul]
+    lib.db_get_sample_description_tokens_number.restype        = i
+    lib.db_get_sample_description_embeddings.argtypes          = [vp, ul, i]
+    lib.db_get_sample_description_embeddings.restype           = P(f)
+
+#-------------------------------------------------------------------------------
 def checkIfAnyValuesOutsideOfRange(arr, minV, maxV):
     for sample in range(arr.shape[0]):
       for x in range(arr.shape[1]):
@@ -239,6 +361,7 @@ class DataLoader:
 
         self.db = None
         self.libDataLoader = loadLibrary(libraryPath, forceUpdate=forceLibUpdate)
+        _setup_ctypes(self.libDataLoader)
 
         if (elevatePriority):
           self.setPriority(-20)
@@ -252,7 +375,7 @@ class DataLoader:
 
         datasetsEnabled=list() 
         for sourceEntry in datasets:
-              if len(sourceEntry)==5:
+              if len(sourceEntry)==6:
                   #new entry with use/dontuse first element
                   confStr = sourceEntry[0].lower()
                   if (confStr=="use" or confStr=="enable" or confStr=="enabled"  or confStr=="1" or confStr=="true"):
@@ -270,29 +393,10 @@ class DataLoader:
         self.dbListPtr = self.createSourceList(len(datasetsEnabled))
         sourceID = 0 
         for sourceEntry in datasetsEnabled:
-            self.addToSourceList(self.dbListPtr,sourceID,sourceEntry[0],sourceEntry[1],sourceEntry[2],sourceEntry[3],self.ignoreNoSkeletonSamples) 
+            self.addToSourceList(self.dbListPtr,sourceID,sourceEntry[0],sourceEntry[1],sourceEntry[2],sourceEntry[3],sourceEntry[4],self.ignoreNoSkeletonSamples)
             sourceID = sourceID + 1
         #-----------------------------------------------------------------------------  
 
-
-        self.libDataLoader.db_create.argtypes = [ctypes.c_void_p,   #struct DatabaseList* dbSources
-                                                 ctypes.c_ulong,    #unsigned long numberOfSamples
-                                                 ctypes.c_int,      #int streamData
-                                                 ctypes.c_int,      #int batchSize
-                                                 ctypes.c_int,      #int workerThreads
-                                                 ctypes.c_int,      #int gradientSize
-                                                 ctypes.c_int,      #int PAFSize
-                                                 ctypes.c_int,      #int doAugmentations
-                                                 ctypes.c_int,      #int addPAFs
-                                                 ctypes.c_int,      #int addBackground
-                                                 ctypes.c_int,      #int addDepthMap
-                                                 ctypes.c_int,      #int addDepthLevelsHeatmaps
-                                                 ctypes.c_int,      #int addNormals
-                                                 ctypes.c_int,      #int addSegmentation
-                                                 ctypes.c_int,      #int bytesPerDepthValue
-                                                 ctypes.c_uint, ctypes.c_uint, ctypes.c_uint, #unsigned int widthIn,  unsigned int heightIn,unsigned int channelsIn,
-                                                 ctypes.c_uint, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint] #unsigned int widthOut, unsigned int heightOut,unsigned int channelsOut8Bit,unsigned int output16BitChannels
-        self.libDataLoader.db_create.restype  = ctypes.c_void_p
 
         self.db = self.libDataLoader.db_create(self.dbListPtr,
                                                numberOfSamples, streamData, batchSize, self.numberOfThreads, self.gradientSize, self.PAFSize, doAugmentations, 
@@ -316,16 +420,12 @@ class DataLoader:
         self.update_token_blacklist(self.tokenblacklistkeys,lowThreshold=0)
 
 
-        self.libDataLoader.db_get_number_of_samples.argtypes = [ctypes.c_void_p]
-        self.libDataLoader.db_get_number_of_samples.restype  = ctypes.c_ulong
         self.numberOfSamples = self.libDataLoader.db_get_number_of_samples(self.db)
         print(bcolors.OKGREEN,"Created a database with ",self.numberOfSamples," samples ",bcolors.ENDC)
         #self.test()
  
 
     def test(self):
-        self.libDataLoader.test.argtypes = [ctypes.c_int,ctypes.c_void_p]
-        self.libDataLoader.test.restype  = ctypes.c_int
         res = self.libDataLoader.test(0,0)
         return res
 
@@ -353,56 +453,38 @@ class DataLoader:
         return jointNames
 
     def disableHeatmapOutput(self):
-        self.libDataLoader.db_disable_heatmap_output.argtypes = [ctypes.c_void_p]
         self.libDataLoader.db_disable_heatmap_output(self.db)
 
     def createSourceList(self,numberOfSources):
-        self.libDataLoader.db_allocate_source_list.argtypes = [ctypes.c_uint]
-        self.libDataLoader.db_allocate_source_list.restype  = ctypes.c_void_p
-
         print("Initializing ",numberOfSources," sources in C code")
         return self.libDataLoader.db_allocate_source_list(numberOfSources)
 
     def destroySourceList(self,sourceDB):
-        self.libDataLoader.db_destroy_source_list.argtypes = [ctypes.c_void_p]
         self.libDataLoader.db_destroy_source_list(sourceDB)
 
-    def addToSourceList(self,sourceDB,sourceID,pathToDB,pathToImages,pathToDepth,pathToSegmentation,ignoreNoSkeletonSamples):
-        path1 = pathToDB.encode('utf-8')  
-        path2 = pathToImages.encode('utf-8')  
-        path3 = pathToDepth.encode('utf-8')  
-        path4 = pathToSegmentation.encode('utf-8')  
-        self.libDataLoader.db_set_source_entry.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
-        self.libDataLoader.db_set_source_entry.restype  = ctypes.c_void_p
-        return self.libDataLoader.db_set_source_entry(sourceDB,sourceID,path1,path2,path3,path4,ignoreNoSkeletonSamples)
+    def addToSourceList(self,sourceDB,sourceID,pathToDB,pathToImages,pathToDepth,pathToSegmentation,pathToAllDataCombined,ignoreNoSkeletonSamples):
+        path1 = pathToDB.encode('utf-8')
+        path2 = pathToImages.encode('utf-8')
+        path3 = pathToDepth.encode('utf-8')
+        path4 = pathToSegmentation.encode('utf-8')
+        path5 = pathToAllDataCombined.encode('utf-8')
+        return self.libDataLoader.db_set_source_entry(sourceDB,sourceID,path1,path2,path3,path4,path5,ignoreNoSkeletonSamples)
 
     def get_number_of_samples(self,db):
-        #print("get_number_of_samples()")
-        self.libDataLoader.db_get_number_of_samples.argtypes = [ctypes.c_void_p]
-        self.libDataLoader.db_get_number_of_samples.restype  = ctypes.c_ulong
         return self.libDataLoader.db_get_number_of_samples(db)
 
     def get_number_of_images(self,db):
-        #print("get_number_of_images()")
-        self.libDataLoader.db_get_number_of_images.argtypes = [ctypes.c_void_p]
-        self.libDataLoader.db_get_number_of_images.restype  = ctypes.c_ulong
         return self.libDataLoader.db_get_number_of_images(db)
 
     def get_total_loss_of_sample(self,sample):
-        self.libDataLoader.db_get_sample_total_loss.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-        self.libDataLoader.db_get_sample_total_loss.restype  = ctypes.c_float
         return self.libDataLoader.db_get_sample_total_loss(self.db,sample)
 
     def get_train_passes_of_sample(self,sample):
-        self.libDataLoader.db_get_sample_train_passes.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-        self.libDataLoader.db_get_sample_train_passes.restype  = ctypes.c_ulong
         return self.libDataLoader.db_get_sample_train_passes(self.db,sample)
 
     def get_filename_of_sample(self,sample):
         buffer_size = 1024
         buffer = ctypes.create_string_buffer(buffer_size)
-        self.libDataLoader.db_get_filename_of_sample.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_char_p, ctypes.c_size_t]
-        self.libDataLoader.db_get_filename_of_sample.restype  = ctypes.c_ulong
         if ( self.libDataLoader.db_get_filename_of_sample(self.db,sample,buffer,buffer_size) ):
            return buffer.value.decode('utf-8')
         return ""
@@ -425,32 +507,23 @@ class DataLoader:
         self.lastStartSample = startSample
         self.lastEndSample   = endSample
         #print("update(",startSample," , ",endSample,")")
-        self.libDataLoader.db_update.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-        self.libDataLoader.db_update.restype  = ctypes.c_int
         return self.libDataLoader.db_update(self.db, startSample, endSample, self.numberOfThreads, self.gradientSize, self.PAFSize)
 
     def startUpdate(self,startSample,endSample):
         self.lastStartSample = startSample
         self.lastEndSample   = endSample
-        self.libDataLoader.db_StartUpdate.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-        self.libDataLoader.db_StartUpdate.restype  = ctypes.c_int
         return self.libDataLoader.db_StartUpdate(self.db, startSample, endSample, self.numberOfThreads, self.gradientSize, self.PAFSize)
 
     def collectUpdate(self,startSample,endSample):
         self.lastStartSample = startSample
         self.lastEndSample   = endSample
-        self.libDataLoader.db_CollectUpdate.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-        self.libDataLoader.db_CollectUpdate.restype  = ctypes.c_int
         return self.libDataLoader.db_CollectUpdate(self.db, startSample, endSample, self.numberOfThreads, self.gradientSize, self.PAFSize)
 
 
     def setPriority(self,newPriority):
-        self.libDataLoader.db_set_priority.argtypes = [ctypes.c_int]
-        self.libDataLoader.db_set_priority.restype  = ctypes.c_int
         return self.libDataLoader.db_set_priority(newPriority)
 
     def printReadSpeed(self):
-        self.libDataLoader.db_print_readSpeed.argtypes = [ctypes.c_void_p] 
         return self.libDataLoader.db_print_readSpeed(self.db)
 
     def get_partial_update_IO_array(self, startSample=0, endSample=0, produce16BitData=True):
@@ -463,13 +536,9 @@ class DataLoader:
         #if True: #<- Uncomment to test what happens assuming perfect zero time for getting a new
         if ( self.update(startSample,endSample) ): #<- regular one stage update..!
         #if ( self.collectUpdate(startSample,endSample) ): #<- multi stage update / needs .copy() / needs startUpdate in outside scope works worse :(
-           self.libDataLoader.db_get_in.argtypes = [ctypes.c_void_p,ctypes.c_ulong]
-           self.libDataLoader.db_get_in.restype  = POINTER(ctypes.c_ubyte)
            pixelsIn  = self.libDataLoader.db_get_in(self.db,0) #We always want to start at the first element
            npArrayIn = np.ctypeslib.as_array(pixelsIn, shape=(endSample-startSample, self.inHeight, self.inWidth, self.inChannels) ).copy()  #<- Copy should copy ~1MB not worth the thread safe risk to not copy
 
-           self.libDataLoader.db_get_out.argtypes = [ctypes.c_void_p,ctypes.c_ulong]
-           self.libDataLoader.db_get_out.restype  = POINTER(ctypes.c_byte)
            pixelsOut  = self.libDataLoader.db_get_out(self.db,0) #We always want to start at the first element
            npArrayOut = np.ctypeslib.as_array(pixelsOut, shape=(endSample-startSample, self.outHeight, self.outWidth, self.out8BitChannels) ).copy()  #<- Copy should copy ~3MB not worth the thread safe risk to not copy
  
@@ -485,8 +554,6 @@ class DataLoader:
            if (produce16BitData):
             if (self.output16BitChannels>0):
               numberOfImages = self.get_number_of_images(self.db)
-              self.libDataLoader.db_get_out16bit.argtypes = [ctypes.c_void_p,ctypes.c_ulong,ctypes.c_ulong]
-              self.libDataLoader.db_get_out16bit.restype  = POINTER(ctypes.c_short)  
               pixels16BitOut  = self.libDataLoader.db_get_out16bit(self.db,0,self.batchSize)
 
               npArray16BitOut =  np.ctypeslib.as_array(pixels16BitOut, shape=(numberOfImages, self.outHeight, self.outWidth, self.output16BitChannels)).astype(np.int16) #Just The Raw 16-bit value [-32767 .. 32767]
@@ -522,58 +589,34 @@ class DataLoader:
         return None, None
 
     def sortTokens(self):
-        self.libDataLoader.db_sort_description_tokens.argtypes = [ctypes.c_void_p]
         self.libDataLoader.db_sort_description_tokens(self.db)
 
     def sortTokensBasedOnFrequency(self,ascendingOrder=1):
         MAX_TOKEN_VALUE = self.get_max_token_value()
         if (MAX_TOKEN_VALUE==0):
             raise ValueError("MAX_TOKEN_VALUE is zero!")
-
-        self.libDataLoader.db_sort_description_tokens_based_on_count.argtypes = [ctypes.c_void_p,ctypes.c_int,ctypes.c_int]
         self.libDataLoader.db_sort_description_tokens_based_on_count(self.db,MAX_TOKEN_VALUE,int(ascendingOrder))
 
-    def removeDuplicateTokens(self): 
-        self.libDataLoader.db_remove_duplicate_description_tokens.argtypes = [ctypes.c_void_p]
+    def removeDuplicateTokens(self):
         self.libDataLoader.db_remove_duplicate_description_tokens(self.db)
- 
-    def set_max_token_value(self,newValue):
-        self.libDataLoader.db_set_MAX_sample_description_token_value.argtypes = [ctypes.c_void_p, ctypes.c_int]
-        self.libDataLoader.db_set_MAX_sample_description_token_value.restype  = ctypes.c_int
-        return  self.libDataLoader.db_set_MAX_sample_description_token_value(self.db,newValue)
 
+    def set_max_token_value(self,newValue):
+        return self.libDataLoader.db_set_MAX_sample_description_token_value(self.db,newValue)
 
     def get_valid_segmentations(self):
-        self.libDataLoader.db_get_valid_segmentations.argtypes = [ctypes.c_void_p]
-        self.libDataLoader.db_get_valid_segmentations.restype  = ctypes.c_int
-        VALID_SEGMENTATIONS = self.libDataLoader.db_get_valid_segmentations(self.db)
-        return VALID_SEGMENTATIONS
+        return self.libDataLoader.db_get_valid_segmentations(self.db)
 
     def get_total_segmentation_classes(self):
-        self.libDataLoader.db_get_total_segmentation_classes.argtypes = [ctypes.c_void_p]
-        self.libDataLoader.db_get_total_segmentation_classes.restype  = ctypes.c_int
-        TOTAL_SEGMENTATION_CLASSES = self.libDataLoader.db_get_total_segmentation_classes(self.db)
-        return TOTAL_SEGMENTATION_CLASSES
-
+        return self.libDataLoader.db_get_total_segmentation_classes(self.db)
 
     def get_max_token_value(self):
-        self.libDataLoader.db_get_MAX_sample_description_token_value.argtypes = [ctypes.c_void_p]
-        self.libDataLoader.db_get_MAX_sample_description_token_value.restype  = ctypes.c_int
-        MAX_TOKEN_VALUE = self.libDataLoader.db_get_MAX_sample_description_token_value(self.db)
-        return MAX_TOKEN_VALUE
+        return self.libDataLoader.db_get_MAX_sample_description_token_value(self.db)
 
     def get_token_number(self):
-        self.libDataLoader.db_get_MAX_sample_description_tokens_number.argtypes = [ctypes.c_void_p]
-        self.libDataLoader.db_get_MAX_sample_description_tokens_number.restype  = ctypes.c_int
-        MAX_TOKEN_NUMBER = self.libDataLoader.db_get_MAX_sample_description_tokens_number(self.db)
-        return MAX_TOKEN_NUMBER
-
+        return self.libDataLoader.db_get_MAX_sample_description_tokens_number(self.db)
 
     def get_descriptor_number_of_elements(self):
-        self.libDataLoader.db_get_descriptor_elements_number.argtypes = [ctypes.c_void_p]
-        self.libDataLoader.db_get_descriptor_elements_number.restype  = ctypes.c_int
-        NUMBER_OF_DESCRIPTOR_ELEMENTS = self.libDataLoader.db_get_descriptor_elements_number(self.db)
-        return NUMBER_OF_DESCRIPTOR_ELEMENTS
+        return self.libDataLoader.db_get_descriptor_elements_number(self.db)
 
     def update_token_blacklist(self, blacklisttokenIDs, lowThreshold=0):
 
@@ -584,19 +627,12 @@ class DataLoader:
            print("Overriding blacklist keys to also add those with a count < ",lowThreshold)
            self.tokenblacklistkeys = blacklisttokenIDs
 
-        self.libDataLoader.db_allocate_token_blacklist.argtypes = [ctypes.c_void_p,ctypes.c_uint]
-        self.libDataLoader.db_allocate_token_blacklist.restype  = ctypes.c_int
         response = self.libDataLoader.db_allocate_token_blacklist(self.db,len(blacklisttokenIDs))
 
         if (response):
-          self.libDataLoader.db_add_token_to_blacklist.argtypes = [ctypes.c_void_p,ctypes.c_uint]
-          self.libDataLoader.db_add_token_to_blacklist.restype  = ctypes.c_int
-
           for tID in blacklisttokenIDs:
            response = self.libDataLoader.db_add_token_to_blacklist(self.db,int(tID))
 
-        self.libDataLoader.db_compile_added_token_blacklist.argtypes = [ctypes.c_void_p]
-        self.libDataLoader.db_compile_added_token_blacklist.restype  = ctypes.c_int
         response = self.libDataLoader.db_compile_added_token_blacklist(self.db)
 
         return response
@@ -606,21 +642,16 @@ class DataLoader:
         MAX_TOKEN_VALUE = self.get_max_token_value()
         print("MAX_TOKEN_VALUE ",MAX_TOKEN_VALUE)
 
-        self.libDataLoader.db_count_description_tokens.argtypes = [ctypes.c_void_p,ctypes.c_int]
-        self.libDataLoader.db_count_description_tokens.restype  = POINTER(ctypes.c_ulong)
         tokenCount = self.libDataLoader.db_count_description_tokens(self.db,MAX_TOKEN_VALUE)
 
         #Bring tokens from a C array to a numpy list
         tokenCountNP = []
         for tokenID in range(MAX_TOKEN_VALUE):
-
              thisVal = int(tokenCount[tokenID])
-             if (thisVal<threshold): 
+             if (thisVal<threshold):
                tokenCountNP.append(tokenID)
 
         print("Freeing memory in C side.. ")
-        self.libDataLoader.db_free_description_token_count.argtypes = [ctypes.c_void_p]
-        self.libDataLoader.db_free_description_token_count.restype  = ctypes.c_int
         self.libDataLoader.db_free_description_token_count(tokenCount)
 
         print("Tokens with counts lower than ",threshold,".. ")
@@ -645,8 +676,6 @@ class DataLoader:
           self.set_max_token_value(len(tokenDescriptions))
           MAX_TOKEN_VALUE = len(tokenDescriptions)
 
-        self.libDataLoader.db_count_description_token_weight.argtypes = [ctypes.c_void_p,ctypes.c_int]
-        self.libDataLoader.db_count_description_token_weight.restype  = POINTER(ctypes.c_float)
         tokenFrequency = self.libDataLoader.db_count_description_token_weight(self.db,MAX_TOKEN_VALUE)
 
         #Bring tokens from a C array to a numpy list
@@ -657,8 +686,6 @@ class DataLoader:
              tokenFrequencyNP[tokenID+1] = (float(tokenFrequency[tokenID]))
 
         print("Freeing memory in C side.. ")
-        self.libDataLoader.db_free_description_token_count.argtypes = [ctypes.c_void_p]
-        self.libDataLoader.db_free_description_token_count.restype  = ctypes.c_int
         self.libDataLoader.db_free_description_token_count(tokenFrequency)
  
         print("Reducing weights on black listed items.. ")
@@ -789,7 +816,6 @@ class DataLoader:
              self.libDataLoader.db_change_joint_difficulty(self.db,jID,listOfDifficulties[jID])
 
     def updateEpochResults(self, loss, startSample, endSample, epoch):
-        self.libDataLoader.db_update_sample_loss_range.argtypes = [ctypes.c_void_p,ctypes.c_ulong,ctypes.c_ulong,ctypes.c_float]
         self.libDataLoader.db_update_sample_loss_range(self.db, startSample, endSample, loss)
 
     """

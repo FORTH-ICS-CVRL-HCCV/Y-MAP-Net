@@ -499,7 +499,8 @@ int countSkeletonsJointsInHeatmaps(
                             float offsetX,
                             float offsetY,
                             float scaleX,
-                            float scaleY
+                            float scaleY,
+                            int *totalJointsOut   // may be NULL
                            )
 {
    int totalJoints = 0;
@@ -538,7 +539,9 @@ int countSkeletonsJointsInHeatmaps(
                 }
             }
         }
-    return jointCount;
+
+   if (totalJointsOut != NULL) { *totalJointsOut = totalJoints; }
+   return jointCount;
 }
 
 
@@ -560,52 +563,18 @@ int ensurePercentageOfJointsInHeatmap(
                                        float scaleY
                                       )
 {
-   int totalJoints = 0;
-   int jointCount  = 0;
+    int totalJoints = 0;
+    int jointCount  = countSkeletonsJointsInHeatmaps(
+                            db, sampleID,
+                            originalInputWidth, originalInputHeight,
+                            padX, padY,
+                            zoom_factor, pan_x, pan_y,
+                            offsetX, offsetY, scaleX, scaleY,
+                            &totalJoints);
 
-   float IORatioX = (float) db->out8bit.width  / db->in.width;
-   float IORatioY = (float) db->out8bit.height / db->in.height;
+    if (totalJoints == 0)  { return 1; }
 
-   float startX = 0.0 + (float) padX;
-   float startY = 0.0 + (float) padY;
-   float endX   = db->out8bit.width  - (float) padX;
-   float endY   = db->out8bit.height - (float) padY;
-
-   unsigned short skID, jID;
-   unsigned short x1, y1;
-   float xF,yF;
-   for (skID = 0; skID < db->pdb->sample[sampleID].numberOfSkeletons; skID++)
-        {
-          for (jID = 0; jID < db->pdb->keypointsForEachSample; jID++)
-            {
-                x1 = db->pdb->sample[sampleID].sk[skID].coords[jID * 3 + 0];
-                y1 = db->pdb->sample[sampleID].sk[skID].coords[jID * 3 + 1];
-                xF = (float) x1;
-                yF = (float) y1;
-
-                totalJoints = totalJoints + ((x1!=0) && (y1!=0));
-
-                transformCoordinatesPanAndZoom(&xF, &yF, (float) pan_x,(float) pan_y, zoom_factor, originalInputWidth, originalInputHeight);
-
-                xF =  (offsetX + (xF * scaleX)) * IORatioX;
-                yF =  (offsetY + (yF * scaleY)) * IORatioY;
-
-                if ( (startX<xF) && (xF<endX) && (startY<yF) && (yF<endY) )
-                {
-                   jointCount = jointCount + 1;
-                }
-            }
-        }
-
-    if (totalJoints==0)
-    {
-        return 1;
-    }
-
-    if ( ((float) jointCount/totalJoints) > percentage )
-    {
-        return 1;
-    }
+    if ( ((float) jointCount / totalJoints) > percentage )  { return 1; }
 
     return 0;
 }
@@ -999,28 +968,28 @@ int populateHeatmaps(
     {
     //WE do flips even if there are no humans (i.e. only background)
       #if FLIP_ODD_HEATMAPS
-        //Flip BKG heatmap
+        //Flip BKG heatmap — yG outer for row-major cache locality
         signed int xG, yG,hm;
-        for (xG=0; xG<db->out8bit.width; xG++)
+        for (yG=0; yG<db->out8bit.height; yG++)
                   {
-                    for (yG=0; yG<db->out8bit.height; yG++)
+                    for (xG=0; xG<db->out8bit.width; xG++)
                     {
                         for (hm=0; hm < db->backgroundHeatmapIndex; hm+=2)
                         {
-                         signed char * heatmapBKGPTR = heatmapPTR + ((yG * db->out8bit.width * db->out8bit.channels) + (xG* db->out8bit.channels) + hm); //<- TODO: 17 is fixed
+                         signed char * heatmapBKGPTR = heatmapPTR + ((yG * db->out8bit.width * db->out8bit.channels) + (xG* db->out8bit.channels) + hm);
                          signed int avoidOverflow    = (signed int) MAXV - (signed int) *heatmapBKGPTR;
                          *heatmapBKGPTR              = (signed char)  avoidOverflow;
                         }
                     }
                   }
        #else
-        //Flip only BKG heatmap
+        //Flip only BKG heatmap — yG outer for row-major cache locality
         signed int xG, yG;
-        for (xG=0; xG<db->out8bit.width; xG++)
+        for (yG=0; yG<db->out8bit.height; yG++)
                   {
-                    for (yG=0; yG<db->out8bit.height; yG++)
+                    for (xG=0; xG<db->out8bit.width; xG++)
                     {
-                        signed char * heatmapBKGPTR = heatmapPTR + ((yG * db->out8bit.width * db->out8bit.channels) + (xG* db->out8bit.channels) + db->backgroundHeatmapIndex); //<- TODO: 17 is fixed
+                        signed char * heatmapBKGPTR = heatmapPTR + ((yG * db->out8bit.width * db->out8bit.channels) + (xG* db->out8bit.channels) + db->backgroundHeatmapIndex);
                         signed int avoidOverflow    = (signed int) MAXV - (signed int) *heatmapBKGPTR;
                         *heatmapBKGPTR              = (signed char)  avoidOverflow;
                     }

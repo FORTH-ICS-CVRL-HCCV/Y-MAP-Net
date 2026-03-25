@@ -28,83 +28,150 @@ struct Embeddings
     struct EmbeddingVector *embeddings;
 };
 
-static int load_embeddings(const char *filename,struct  Embeddings *emb)
-{
-    //float offset  = -0.1662235361903037;
-    //float scaling =  0.27269877187819924;
+// Magic bytes stored at the start of the binary cache to detect corrupt/stale files.
+#define EMBEDDINGS_BIN_MAGIC 0x454D4200u
 
+static int _load_embeddings_alloc(struct Embeddings *emb)
+{
+    emb->embeddings = (struct EmbeddingVector *) malloc(emb->Classes * sizeof(struct EmbeddingVector));
+    if (!emb->embeddings) return 0;
+    memset(emb->embeddings, 0, emb->Classes * sizeof(struct EmbeddingVector));
+
+    emb->emptyVector = (float*) malloc(emb->D * sizeof(float));
+    if (!emb->emptyVector) { free(emb->embeddings); emb->embeddings = 0; return 0; }
+    memset(emb->emptyVector, 0, emb->D * sizeof(float));
+
+    for (int keyID = 0; keyID < emb->Classes; keyID++)
+    {
+        emb->embeddings[keyID].vector = (float*) malloc(emb->D * sizeof(float));
+        if (!emb->embeddings[keyID].vector) return 0;
+    }
+    return 1;
+}
+
+// Binary cache format:
+//   uint32  magic (EMBEDDINGS_BIN_MAGIC)
+//   int32   D
+//   int32   Classes
+//   float   offset
+//   float   scaling
+//   float[Classes * D]  pre-scaled embedding vectors (offset+scaling already applied)
+static int _load_embeddings_from_binary(const char *bin_path, struct Embeddings *emb)
+{
+    FILE *bf = fopen(bin_path, "rb");
+    if (!bf) return 0;
+
+    unsigned int magic = 0;
+    if (fread(&magic, sizeof(magic), 1, bf) != 1 || magic != EMBEDDINGS_BIN_MAGIC)
+        { fclose(bf); return 0; }
+
+    if (fread(&emb->D,       sizeof(int),   1, bf) != 1 ||
+        fread(&emb->Classes, sizeof(int),   1, bf) != 1 ||
+        fread(&emb->offset,  sizeof(float), 1, bf) != 1 ||
+        fread(&emb->scaling, sizeof(float), 1, bf) != 1)
+        { fclose(bf); return 0; }
+
+    fprintf(stderr, "D = %u / Classes = %u / Offset %f / Scaling %f (binary cache)\n",
+            emb->D, emb->Classes, emb->offset, emb->scaling);
+
+    if (!_load_embeddings_alloc(emb)) { fclose(bf); return 0; }
+
+    for (int keyID = 0; keyID < emb->Classes; keyID++)
+    {
+        // Vectors are stored already-scaled; load directly with no transform.
+        if (fread(emb->embeddings[keyID].vector, sizeof(float), emb->D, bf) != (size_t)emb->D)
+            { fclose(bf); return 0; }
+    }
+
+    fclose(bf);
+    printf("%u embeddings loaded from binary cache\n", emb->Classes);
+    return 1;
+}
+
+static void _save_embeddings_binary(const char *bin_path, const struct Embeddings *emb)
+{
+    FILE *bf = fopen(bin_path, "wb");
+    if (!bf) { fprintf(stderr, "Warning: could not write embeddings binary cache %s\n", bin_path); return; }
+
+    unsigned int magic = EMBEDDINGS_BIN_MAGIC;
+    fwrite(&magic,       sizeof(magic),    1, bf);
+    fwrite(&emb->D,      sizeof(int),      1, bf);
+    fwrite(&emb->Classes,sizeof(int),      1, bf);
+    fwrite(&emb->offset, sizeof(float),    1, bf);
+    fwrite(&emb->scaling,sizeof(float),    1, bf);
+
+    for (int keyID = 0; keyID < emb->Classes; keyID++)
+        fwrite(emb->embeddings[keyID].vector, sizeof(float), emb->D, bf);  // already scaled
+
+    fclose(bf);
+    fprintf(stderr, "Embeddings binary cache written to %s\n", bin_path);
+}
+
+static int load_embeddings(const char *filename, struct Embeddings *emb)
+{
+    // Build sidecar path:  "foo.embeddings" -> "foo.embeddings.bin"
+    char bin_path[512];
+    snprintf(bin_path, sizeof(bin_path), "%s.bin", filename);
+
+    if (_load_embeddings_from_binary(bin_path, emb))
+        return 1;
+
+    // Binary cache missing or stale — fall back to text parsing.
     FILE *file = fopen(filename, "r");
     if (!file)
     {
-        fprintf(stderr,"Fatal Error: Could not open embeddings file %s\n", filename);
+        fprintf(stderr, "Fatal Error: Could not open embeddings file %s\n", filename);
         return 0;
     }
 
-    int res = fscanf(file, "%d\n", &emb->D);   // Read number of dimensions (D)
-    res = fscanf(file, "%d\n", &emb->Classes);  // Read number of classes (keys)
-    res = fscanf(file, "%f\n", &emb->offset);  // Read number of classes (keys)
-    res = fscanf(file, "%f\n", &emb->scaling);  // Read number of classes (keys)
+    int res = fscanf(file, "%d\n", &emb->D);
+    res = fscanf(file, "%d\n", &emb->Classes);
+    res = fscanf(file, "%f\n", &emb->offset);
+    res = fscanf(file, "%f\n", &emb->scaling);
 
-    fprintf(stderr,"D = %u / Classes = %u / Offset %f / Scaling %f \n",emb->D,emb->Classes,emb->offset,emb->scaling);
+    fprintf(stderr, "D = %u / Classes = %u / Offset %f / Scaling %f \n",
+            emb->D, emb->Classes, emb->offset, emb->scaling);
 
-    char boundary[MAX_KEY_LENGTH]={0};
-    res = fscanf(file, "%s\n", boundary);  // Read and skip 'next_token'
-    if (strcmp("start",boundary)!=0)
-        {
-            fprintf(stderr,"Corrupted embeddings file (%s), could not start reading it\n",filename);
-            return 0;
-        }
-
-
-    // Allocate memory for the embeddings
-    emb->embeddings = (struct EmbeddingVector *) malloc(emb->Classes * sizeof(struct EmbeddingVector));
-    if (emb->embeddings!=0)
+    char boundary[MAX_KEY_LENGTH] = {0};
+    res = fscanf(file, "%s\n", boundary);
+    if (strcmp("start", boundary) != 0)
     {
-     memset(emb->embeddings,0,emb->Classes * sizeof(struct EmbeddingVector));
+        fprintf(stderr, "Corrupted embeddings file (%s), could not start reading it\n", filename);
+        fclose(file);
+        return 0;
+    }
 
-     emb->emptyVector = (float*) malloc(emb->D * sizeof(float));
-     memset(emb->emptyVector,0,emb->D * sizeof(float));
+    if (!_load_embeddings_alloc(emb)) { fclose(file); return 0; }
 
-     // Read the embeddings for each key
-     for (int keyID = 0; keyID < emb->Classes; keyID++)
-     {
-        char key[MAX_KEY_LENGTH]={0};
-        res = fscanf(file, "%s\n", key);  // Read the key (ignoring it because we use ID everywhere to simplify code)
+    for (int keyID = 0; keyID < emb->Classes; keyID++)
+    {
+        char key[MAX_KEY_LENGTH] = {0};
+        res = fscanf(file, "%s\n", key);
 
-        // Allocate memory for each embedding vector
-        emb->embeddings[keyID].vector = (float *)malloc(emb->D * sizeof(float));
-
-        if (emb->embeddings[keyID].vector!=0)
+        float *vec = emb->embeddings[keyID].vector;
+        for (int embeddingID = 0; embeddingID < emb->D; embeddingID++)
         {
-         memset(emb->embeddings[keyID].vector, 0, emb->D * sizeof(float)); // Explicitly empty memory!
-
-         for (int embeddingID=0; embeddingID<emb->D; embeddingID++)
-          {
-            res = fscanf(file, "%f\n", &emb->embeddings[keyID].vector[embeddingID]);  // Read embedding values
-
-            //Perform scaling
-            emb->embeddings[keyID].vector[embeddingID] += emb->offset;
-            emb->embeddings[keyID].vector[embeddingID] *= emb->scaling;
-          }
-        } else
-        {
-            fprintf(stderr,"Failed allocating memory for embedding key %s / ID %u",key,keyID);
-            return 0;
+            res = fscanf(file, "%f\n", &vec[embeddingID]);
+            vec[embeddingID] = (vec[embeddingID] + emb->offset) * emb->scaling;
         }
 
-        boundary[0]=0; //Taint previous boundary
-        boundary[1]=0;
-        res = fscanf(file, "%s\n", boundary);  // Read and skip 'next_token'
-        if (strcmp("next_token",boundary)!=0)
+        boundary[0] = 0;
+        boundary[1] = 0;
+        res = fscanf(file, "%s\n", boundary);
+        if (strcmp("next_token", boundary) != 0)
         {
-            fprintf(stderr,"Corrupted embeddings file (%s) @ key %s / ID %u",filename,key,keyID);
+            fprintf(stderr, "Corrupted embeddings file (%s) @ key %s / ID %u", filename, key, keyID);
+            fclose(file);
             return 0;
         }
-     }
     }
 
     fclose(file);
-    printf("%u embeddings loaded successfully\n",emb->Classes);
+    printf("%u embeddings loaded successfully\n", emb->Classes);
+
+    // Write binary cache for future runs.
+    _save_embeddings_binary(bin_path, emb);
+
     return 1;
 }
 

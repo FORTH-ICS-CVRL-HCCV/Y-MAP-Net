@@ -246,33 +246,28 @@ if __name__ == '__main__':
    #Shorthand for number of GPUs used
    numberOfGPUs = len(cfg['GPUsUsedForTraining'])
 
-   #https://colab.research.google.com/github/tensorflow/docs/blob/master/site/en/guide/distributed_training.ipynb#scrollTo=nbGleskCACv_
-   #https://stackoverflow.com/questions/75403101/how-do-i-distribute-datasets-between-multiple-gpus-in-tensorflow-2
-   #This causes : https://github.com/tensorflow/tensorflow/commit/4924ec6c0b68ba3fb8f73a6383881cd4194ed802
+   import contextlib
 
-   #Comment out start
-   """ #<------------  Comment out if you want to use multiple GPUs
-   if (numberOfGPUs>1):
-       print(bcolors.OKGREEN,"Using mirrored gpu strategy for ",numberOfGPUs," GPUs (",cfg['GPUsUsedForTraining'],")..",bcolors.ENDC)
-       batch_size =int( int(cfg["batchSize"]) * (numberOfGPUs) )#numberOfGPUs
-       #batch_size = batch_size - 3 *numberOfGPUs # Remove some things to make sure there is enough space for overheads
-       cfg["batchSize"] = batch_size #<= try 3x batch size since batch_size is global
-
-       if batch_size % numberOfGPUs != 0:
-         suggested = ((batch_size // numberOfGPUs) + 1)
-         raise ValueError(
-            f"Batch size {batch_size} is not divisible by {numberOfGPUs} GPUs.\n"
-            f"Suggested batch sizes: {numberOfGPUs}, {2*numberOfGPUs}, ..., or try {suggested}.")
+   # Strategy: MirroredStrategy only when >1 GPU is listed in configuration.
+   # OneDeviceStrategy is deliberately avoided — it adds Python dispatch
+   # overhead with no benefit over plain training on a single device.
+   use_strategy = (numberOfGPUs > 1)
+   strategy      = None
+   if use_strategy:
+       # Scale the global batch so each GPU still processes cfg['batchSize']
+       # samples per step. All DataLoaders are created AFTER this point so
+       # they inherit the updated value automatically.
+       cfg['batchSize'] = cfg['batchSize'] * numberOfGPUs
        strategy = tf.distribute.MirroredStrategy(devices=cfg['GPUsUsedForTraining'])
-   elif (numberOfGPUs==1):
-       strategy = tf.distribute.OneDeviceStrategy(device=cfg['GPUsUsedForTraining'][0])
+       print(bcolors.OKGREEN, f"MirroredStrategy: {numberOfGPUs} GPUs — "
+             f"global batch={cfg['batchSize']} "
+             f"({cfg['batchSize']//numberOfGPUs} per GPU)", bcolors.ENDC)
    else:
-       strategy = tf.distribute.OneDeviceStrategy()
+       device = cfg['GPUsUsedForTraining'][0] if numberOfGPUs == 1 else '/device:CPU:0'
+       print(bcolors.OKGREEN, f"Single-device training on {device} (no strategy overhead)", bcolors.ENDC)
 
-   with strategy.scope():
-        """
-   if (numberOfGPUs>0): 
-        #""" <------------ Uncomment If you want to use multiple GPUS
+   scope = strategy.scope() if use_strategy else contextlib.nullcontext()
+   with scope:
 
         #First of all create the Neural Network model
         #Don't load other data in vain if this step fails due to bad configuration..
@@ -515,7 +510,7 @@ if __name__ == '__main__':
         # Initialize the Adam Optimizer using configuration
         #optimizer = AdamWCautious(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=1.0)
         #optimizer = tf.keras.optimizers.Adam(learning_rate=cfg['learningRate'])
-        optimizer = getOptimizerFromCFG(cfg)
+        optimizer = getOptimizerFromCFG(cfg, globalClipNorm=1.0 if use_strategy else None)
 
         #Decide on heatmap loss based on configuration
         hmloss = None
@@ -754,6 +749,28 @@ if __name__ == '__main__':
    #   from NNConverter import saveNNTFLiteINT8Model, saveNNTFLiteFP16Model
    #   saveNNTFLiteINT8Model(model,dbValidation.get_in_array())
    #   saveNNTFLiteFP16Model(model,dbValidation.get_in_array())
+
+   # Run evaluation before packaging
+   # model and dbValidation are intentionally kept alive — they are still needed
+   # for extract_validation_losses() below.  Free only what is safe to drop
+   # (training DataLoader + generator) to reclaim RAM before the subprocess
+   # loads its own copy of the model and validation DataLoader.
+   #--------------------------------------------------------------------------------------------------------------------------------
+   try:
+       del dataset_generator
+   except Exception:
+       pass
+   if dbTrain is not None:
+       try:
+           del dbTrain
+           dbTrain = None
+       except Exception:
+           pass
+   import gc
+   gc.collect()
+   print(bcolors.OKGREEN, "Running post-training evaluation (evaluateYMAPNet.py)...", bcolors.ENDC)
+   os.system("python3 evaluateYMAPNet.py --output 2d_pose_estimation/evaluation.json")
+   #--------------------------------------------------------------------------------------------------------------------------------
 
    # Package output
    #--------------------------------------------------------------------------------------------------------------------------------

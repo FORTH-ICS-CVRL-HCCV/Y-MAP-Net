@@ -7,10 +7,19 @@ tf_keras
 numpy
 numba
 
+# TensorBoard
+tensorboard
+tensorboard-plugin-profile
+
 # Utilities
 etils
 importlib_resources
 wget
+
+# ONNX ecosystem
+tf2onnx
+onnx
+onnxruntime
 
 # Computer vision
 opencv-python

@@ -204,7 +204,8 @@ int countSkeletonsJointsInHeatmaps(
                             float offsetX,
                             float offsetY,
                             float scaleX,
-                            float scaleY
+                            float scaleY,
+                            int *totalJointsOut   // may be NULL
                            );
 
 
