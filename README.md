@@ -23,7 +23,7 @@ One click deployment in Google Collab : [![Open Y-MAP-Net In Colab](https://cola
 ## Quick Start
 
 [![YouTube Link](https://raw.githubusercontent.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/refs/heads/main/doc/ymapytb.png)](https://www.youtube.com/watch?v=n6P_nXLWz1A)
-
+Youtube Supplementary Video of Y-MAP-Net
 
 ### 1. Setup
 
