@@ -150,7 +150,11 @@ python3 scripts/setup.sh
 | ONNX FP16 | Lite | ~209 MB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_onnx_fp16.zip) | --engine onnx |
 | JAX (npz) | Lite | ~268 MB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_jax.zip) | --engine jax |
 
+To use a different engine you need to invoke it in the following way :
 
+```bash
+./runYMAPNet.sh --engine onnx
+```
 
 ---
 
