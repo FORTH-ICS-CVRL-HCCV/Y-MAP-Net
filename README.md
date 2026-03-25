@@ -137,6 +137,20 @@ pip install -r requirements.txt
 python3 scripts/setup.sh
 ```
 
+
+### Pre-trained lite model downloads (development snapshot)
+
+| Format | Size | Download |
+|--------|------|----------|
+| Keras (full training archive) | — | [2d_pose_estimation_v264.zip](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264.zip) |
+| TFLite FP32 | ~268 MB | [2d_pose_estimation_v264_tflite_fp32.zip](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_tflite_fp32.zip) |
+| TFLite FP16 | ~210 MB | [2d_pose_estimation_v264_tflite_fp16.zip](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_tflite_fp16.zip) |
+| ONNX FP32 | ~268 MB | [2d_pose_estimation_v264_onnx.zip](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_onnx.zip) |
+| ONNX FP16 | ~209 MB | [2d_pose_estimation_v264_onnx_fp16.zip](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_onnx_fp16.zip) |
+| JAX (npz) | ~268 MB | [2d_pose_estimation_v264_jax.zip](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_jax.zip) |
+
+
+
 ---
 
 ## Citation
