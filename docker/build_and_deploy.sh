@@ -12,7 +12,7 @@ REPOSITORY=`pwd`
 
 cd "$DIR"
 
-NAME="rgbposedetect2d"
+NAME="ymapnet"
 dockerfile_pth="$DIR"
 mount_pth="$REPOSITORY"
 

@@ -40,8 +40,8 @@ Or using Docker:
 
 ```bash
 docker/build_and_deploy.sh
-docker run rgbposedetect2d-container
-docker attach rgbposedetect2d-container
+docker run ymapnet-container
+docker attach ymapnet-container
 cd workspace
 scripts/setup.sh
 source venv/bin/activate
