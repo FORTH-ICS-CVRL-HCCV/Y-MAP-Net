@@ -140,15 +140,15 @@ python3 scripts/setup.sh
 
 ### Pre-trained lite model downloads (development snapshot)
 
-| Format | Model | Size | Download |
-|--------|------|------|----------|
-| Keras (ICRA26)| Full | 2.1GB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v180.zip) |
-| Keras (dev) | Full | 1.8GB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v263.zip) |
-| TFLite FP32 | Lite | ~268 MB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_tflite_fp32.zip) |
-| TFLite FP16 | Lite | ~210 MB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_tflite_fp16.zip) |
-| ONNX FP32 | Lite | ~268 MB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_onnx.zip) |
-| ONNX FP16 | Lite | ~209 MB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_onnx_fp16.zip) |
-| JAX (npz) | Lite | ~268 MB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_jax.zip) |
+| Format | Model | Size | Download | Engine |
+|--------|------|------|----------|----------|
+| Keras (ICRA26)| Full | 2.1GB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v180.zip) | --engine tf |
+| Keras (dev) | Full | 1.8GB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v263.zip) | --engine tf |
+| TFLite FP32 | Lite | ~268 MB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_tflite_fp32.zip) | --engine tflite |
+| TFLite FP16 | Lite | ~210 MB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_tflite_fp16.zip) | --engine tflite |
+| ONNX FP32 | Lite | ~268 MB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_onnx.zip) | --engine onnx |
+| ONNX FP16 | Lite | ~209 MB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_onnx_fp16.zip) | --engine onnx |
+| JAX (npz) | Lite | ~268 MB | [Link](http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_jax.zip) | --engine jax |
 
 
 
