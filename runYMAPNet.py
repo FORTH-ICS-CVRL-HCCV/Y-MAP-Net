@@ -92,11 +92,21 @@ def build_arg_parser():
 # =============================================================================
 
 def getCaptureDeviceFromPath(videoFilePath, videoWidth, videoHeight, videoFramerate=30):
-    def _open_v4l2(index):
-        cap = cv2.VideoCapture(index)
+    def _open_camera(index):
+        # On Windows the default MSMF backend frequently fails to open cameras;
+        # DirectShow (CAP_DSHOW) is far more reliable.
+        if sys.platform == 'win32':
+            cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        else:
+            cap = cv2.VideoCapture(index)
         cap.set(cv2.CAP_PROP_FPS, videoFramerate)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, videoWidth)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, videoHeight)
+        if not cap.isOpened():
+            print("ERROR: Could not open camera index %d." % index)
+            if sys.platform == 'win32':
+                print("       On Windows, also check: Settings -> Privacy & Security -> Camera")
+                print("       -> 'Let desktop apps access your camera' must be ON.")
         return cap
 
     if videoFilePath == "esp":
@@ -106,11 +116,14 @@ def getCaptureDeviceFromPath(videoFilePath, videoWidth, videoHeight, videoFramer
         from screenStream import ScreenGrabber
         return ScreenGrabber(region=(0, 0, videoWidth, videoHeight))
     elif videoFilePath == "webcam":
-        return _open_v4l2(0)
+        return _open_camera(0)
     else:
         m = re.fullmatch(r'/dev/video(\d+)', videoFilePath)
         if m:
-            return _open_v4l2(int(m.group(1)))
+            return _open_camera(int(m.group(1)))
+        # Allow bare integer index on Windows (e.g. --from 1 for second camera)
+        if videoFilePath.isdigit():
+            return _open_camera(int(videoFilePath))
         from tools import checkIfPathIsDirectory
         if checkIfPathIsDirectory(videoFilePath):
             from folderStream import FolderStreamer
