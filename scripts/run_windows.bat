@@ -66,17 +66,12 @@ echo        Installing packages from requirements.txt ...
 echo        (tensorflow will be installed as CPU-only on Windows)
 
 python -m pip install ^
-    tensorflow ^
-    tensorflow-model-optimization ^
     tf_keras ^
     numpy ^
     numba ^
-    tensorboard ^
-    tensorboard-plugin-profile ^
     etils ^
     importlib_resources ^
     wget ^
-    tf2onnx ^
     onnx ^
     onnxruntime ^
     opencv-python ^
