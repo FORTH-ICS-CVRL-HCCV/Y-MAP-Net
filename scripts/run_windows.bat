@@ -12,7 +12,7 @@ set REPO_DIR=%~dp0..
 set VENV_DIR=%REPO_DIR%\venv
 set MODEL_DIR=%REPO_DIR%\2d_pose_estimation
 set MODEL_ZIP=%REPO_DIR%\2d_pose_estimation.zip
-set MODEL_URL=http://ammar.gr/2d_pose_estimation.zip
+set MODEL_URL=http://ammar.gr/ymapnet/archive/2d_pose_estimation_v264_onnx.zip
 
 echo.
 echo ============================================================
@@ -128,7 +128,7 @@ echo          scripts\run_windows.bat --update   (re-download the model)
 echo.
 
 cd /d "%REPO_DIR%"
-python runYMAPNet.py %*
+python runYMAPNet.py --engine onnx %*
 
 goto :end
 
