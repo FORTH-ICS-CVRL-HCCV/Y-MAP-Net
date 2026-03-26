@@ -121,14 +121,20 @@ if exist "%MODEL_DIR%\configuration.json" (
 echo [5/5] Launching YMAPNet...
 echo.
 echo        Starting webcam inference. Press Q in the preview window to quit.
+echo.
+echo        NOTE: If the camera fails to open, check Windows camera privacy:
+echo          Settings -^> Privacy ^& Security -^> Camera
+echo          -^> "Let desktop apps access your camera" must be ON
+echo.
 echo        Other options:
 echo          scripts\run_windows.bat --from path\to\video.mp4
+echo          scripts\run_windows.bat --from 1        (second camera)
 echo          scripts\run_windows.bat --cpu
-echo          scripts\run_windows.bat --update   (re-download the model)
+echo          scripts\run_windows.bat --update        (re-download the model)
 echo.
 
 cd /d "%REPO_DIR%"
-python runYMAPNet.py --engine onnx %*
+python runYMAPNet.py --engine onnx --from webcam %*
 
 goto :end
 
