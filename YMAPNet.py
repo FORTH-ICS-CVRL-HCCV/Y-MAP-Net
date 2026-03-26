@@ -651,8 +651,14 @@ def arrange_windows(window_specs, screen_w=3840, screen_h=2400,
 def apply_window_layout(layout):
     """Call cv2.moveWindow for every entry in a layout dict, then waitKey(1)."""
     for name, (x, y) in layout.items():
-        cv2.moveWindow(name, x, y)
-    cv2.waitKey(1)
+        try:
+            cv2.moveWindow(name, x, y)
+        except Exception:
+            pass  # window may not exist yet (common on Windows before first imshow)
+    try:
+        cv2.waitKey(1)
+    except Exception:
+        pass
 
 
 #----------------------------------------------------------------------------------------
@@ -1877,8 +1883,14 @@ class YMAPNet:
                 # User-specified overrides are applied last and take precedence
                 if self.window_arrangement:
                     for command in self.window_arrangement:
-                        cv2.moveWindow(command[2], int(command[0]), int(command[1]))
-                    cv2.waitKey(1)
+                        try:
+                            cv2.moveWindow(command[2], int(command[0]), int(command[1]))
+                        except Exception:
+                            pass  # window may not exist yet (common on Windows before first imshow)
+                    try:
+                        cv2.waitKey(1)
+                    except Exception:
+                        pass
  
 #----------------------------------------------------------------------------------------
 class PoseEstimatorTiler:
