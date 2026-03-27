@@ -304,7 +304,15 @@ def add_token_output(bridge_output, input_layer, numTokens, activation='leaky_re
     - token_output: The final token output layer.
     """ 
     
-    nextTokenStrength = max(1.0,nextTokenStrength)
+    # BUG FIX: the original code used max(1.0, nextTokenStrength), which hard-clamped
+    # the value to 1.0 regardless of the configuration (e.g. nextTokenStrength=0.5).
+    # With nextTokenStrength=1.0, the rescaling at lines below would set the current
+    # token's contribution to 0.0 (scale = 1.0 - 1.0 = 0.0) and fully replace it
+    # with the previous token's output — making every token after t00 a pure copy of
+    # its predecessor.  This caused the observed cosine-similarity degradation from
+    # t00=0.33 down to t07=-0.01 as errors compounded along the autoregressive chain.
+    # Fix: clamp to [0.0, 1.0] so the configured blend ratio is actually respected.
+    nextTokenStrength = min(max(0.0, nextTokenStrength), 1.0)
 
     # Reshape only if the input is not already flattened
     if len(bridge_output.shape) > 2:  # Check if the output needs reshaping
@@ -411,7 +419,12 @@ def add_token_output(bridge_output, input_layer, numTokens, activation='leaky_re
     return glove_outputs
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
-def append_final_multihot_layer(glove_outputs, bridge_output=None, D=300, TokensOut=8 ,Classes=2037, layer_width = 2048, depth = 2, activation='leaky_relu', dropoutRate=0.2, use_attention=False):
+def append_final_multihot_layer(glove_outputs, bridge_output=None, D=300, TokensOut=8 ,Classes=2037, layer_width = 2048, multihot_layer_width=0, depth = 2, activation='leaky_relu', dropoutRate=0.2, use_attention=False):
+    # multihot_layer_width=0 means fall back to layer_width (bridge-derived dim_product).
+    # Set to a positive value (e.g. 1024) to decouple the classification head width
+    # from the bridge bottleneck, which is typically too narrow for 17K-class multi-label.
+    if multihot_layer_width > 0:
+        layer_width = multihot_layer_width
     # Concatenate all glove outputs into a single vector
     
     concatenated_output = layers.Concatenate()(glove_outputs)
@@ -468,10 +481,11 @@ def append_descriptor_layer(bridge_layer=None, layer_width = 768, activation='le
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
-def build_resnethybrid_cnn(input_shape, #num_classes, 
+def build_resnethybrid_cnn(input_shape, #num_classes,
                            activation='leaky_relu',
                            gloveLayers = 7,
                            multihotLayers = 2,
+                           multihotLayerWidth = 0,
                            bridgeLayerWidthCompatibility=0,
                            dropoutRate=0.3,
                            nextTokenStrength=0.3,
@@ -534,8 +548,14 @@ def build_resnethybrid_cnn(input_shape, #num_classes,
     glove_outputs = add_token_output(b, inputs, numTokens, activation=activation, dropoutRate=dropoutRate, nextTokenStrength=nextTokenStrength, layer_width=dim_product, depth=gloveLayers, use_learnable_residuals=use_learnable_residuals)
     number_of_glove_output_tokens = len(glove_outputs)  #This should be the same as numTokens but make sure
  
-    token_output = append_final_multihot_layer(glove_outputs,  bridge_output=b, D=300, TokensOut=number_of_glove_output_tokens ,Classes=numClasses, layer_width=dim_product, depth=multihotLayers)
-     
+    # bridge_output is set to None here intentionally.
+    # Passing the bridge tensor (bridge_output=b) was empirically found to hurt
+    # multihot performance: the spatial bridge has a large dim_product footprint
+    # that forces a huge adapter Dense layer whose parameters add noise rather than
+    # signal.  The GloVe outputs (8 × 300 = 2400-dim concat) already carry all the
+    # semantic information needed for the 17 977-class multihot head.
+    token_output = append_final_multihot_layer(glove_outputs,  bridge_output=None, D=300, TokensOut=number_of_glove_output_tokens ,Classes=numClasses, layer_width=dim_product, multihot_layer_width=multihotLayerWidth, depth=multihotLayers)
+
     #-------------------------------
     modelOutputs = list()
     if (useDescriptors):
@@ -695,6 +715,7 @@ def build_unet(inputHeight,
                midSectionRepetitions=3,
                gloveLayers = 7,
                multihotLayers = 2,
+               multihotLayerWidth = 0,
                use_learnable_residuals=True,
                bridgeRatio=1.0,
                forceBridgeSize=0,
@@ -833,7 +854,9 @@ def build_unet(inputHeight,
       modelOutputs  = list()
       glove_outputs = add_token_output(b, inputs, numTokens, activation=activation, dropoutRate=dropoutRate, nextTokenStrength=nextTokenStrength, layer_width=int(dim_product), depth=gloveLayers, use_learnable_residuals=use_learnable_residuals)
       number_of_glove_output_tokens = len(glove_outputs) #This should be the same as numTokens but make sure
-      token_output  = append_final_multihot_layer(glove_outputs, bridge_output=b,  D=300, TokensOut=number_of_glove_output_tokens ,Classes=numClasses, layer_width = int(dim_product), depth=multihotLayers) #  
+      # bridge_output=None: bridge skip disabled — see comment at the equivalent call
+      # site in build_resnethybrid_cnn for the full rationale.
+      token_output  = append_final_multihot_layer(glove_outputs, bridge_output=None, D=300, TokensOut=number_of_glove_output_tokens ,Classes=numClasses, layer_width = int(dim_product), multihot_layer_width=multihotLayerWidth, depth=multihotLayers)
       
       if (heatmaps_16bit_declared):
           modelOutputs.append(heatmap_output)

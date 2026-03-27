@@ -1498,17 +1498,21 @@ class YMAPNet:
             #Disabled for performance
             """
             if self.resolve_skeleton and ("keypoint_children" in self.cfg):
-              self.skeletons = resolveJointHierarchyNew(self.keypoints_predictions,
-                                                        #self.heatmapsOut[0:16],
-                                                        self.heatmapsOut[17:29], # 17..28 inclusive
+              # Convert uint8 heatmaps back to float [-120..120] to match resolveJointHierarchyNew expectations
+              _kp_hm  = np.stack(self.heatmapsOut[:17], axis=2).astype(np.float32) - 120.0
+              _paf_hm = [self.heatmapsOut[17 + j].astype(np.float32) - 120.0 for j in range(min(12, len(self.heatmapsOut) - 17))]
+              _debug_once = (self.frameNumber <= 1)   # print debug only on first frame
+              self.skeletons = resolveJointHierarchyNew(_kp_hm,
+                                                        _paf_hm,
                                                         self.depthmap,
                                                         self.cfg["keypoint_names"],
                                                         self.cfg["keypoint_parents"],
                                                         self.cfg["keypoint_children"],
-                                                        self.cfg["paf_parents"], 
-                                                        person_label_map=self.labeled_map,        # <<< NEW
-                                                        threshold=self.keypoint_threshold
-                                                       ) 
+                                                        self.cfg["paf_parents"],
+                                                        person_label_map=None,  # labeled_map coords don't align with joint heatmaps
+                                                        threshold=self.keypoint_threshold,
+                                                        debug=_debug_once
+                                                       )
 
 
             self.keypoint_in_nn_coordinate_image = keypoint_results

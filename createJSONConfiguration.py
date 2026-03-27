@@ -31,7 +31,8 @@ def makeJSONConfiguration():
            'outputHeight'  :384,
            'outputChannels':17, # 17 + 2
            'output16BitChannels':1, # 17 + 2
-           'outputTokens'  :False,
+           'outputTokens'      :False,
+           'outputDescriptors' :False,
            'heatmapLossImportanceRelativeToTokens' : 1.0,
            'model'         :'unet', #unet/conv
 
@@ -82,6 +83,7 @@ def makeJSONConfiguration():
            'lossWeightSegmentation'    :2.0,
            'lossWeightGloveTokens'     :1.0,
            'lossWeightMultihotTokens'  :0.001,
+           'lossWeightDescriptors'     :1.0,
 
            'streamDataset'     : True,
            'streamValidation'  : False,

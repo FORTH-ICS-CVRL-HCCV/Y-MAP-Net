@@ -92,6 +92,7 @@ def createSelectedModel(cfg,testModel=True):
                                           midSectionRepetitions = cfg['midSectionRepetitions'],
                                           gloveLayers        = cfg['gloveLayers'],
                                           multihotLayers     = cfg['multihotLayers'],
+                                          multihotLayerWidth = cfg.get('multihotLayerWidth', 0),
                                           use_learnable_residuals = cfg['learnableTokenResiduals'],
                                           bridgeRatio        = cfg['bridgeRatio'],
                                           forceBridgeSize    = cfg['forceBridgeSize'],
@@ -376,7 +377,7 @@ if __name__ == '__main__':
                                        (cfg['outputHeight'],cfg['outputWidth'],cfg['outputChannels']),
                                        output16BitChannels = cfg['output16BitChannels'] ,
                                        numberOfThreads = cfg['DatasetLoaderThreads'],
-                                       streamData      = int(cfg['streamValidation']), #0, <- set to 0 to keep it in memory and speed up validation 
+                                       streamData      = int(cfg['streamValidation']), #0, <- set to 0 to keep it in memory and speed up validation
                                        batchSize       = cfg['batchSize'],
                                        gradientSize    = cfg['heatmapGradientSizeMinimum'],# <- Use final size! cfg['heatmapGradientSize'],
                                        PAFSize         = cfg['heatmapPAFSizeMinimum'],     # <- Use final size! cfg['heatmapPAFSizeMinimum'],
@@ -388,6 +389,7 @@ if __name__ == '__main__':
                                        addNormals      = int(cfg['heatmapAddNormals']),
                                        addSegmentation = int(cfg['heatmapAddSegmentation']),
                                        datasets        = cfg["ValidationDataset"],
+                                       synonymPath     = cfg.get('synonymPath', None),
                                        elevatePriority = elevatePriority,
                                        libraryPath     = "datasets/DataLoader/libDataLoader.so")
              if (cfg['streamValidation']):
@@ -425,6 +427,7 @@ if __name__ == '__main__':
                                        addNormals      = int(cfg['heatmapAddNormals']),
                                        addSegmentation = int(cfg['heatmapAddSegmentation']),
                                        datasets        = cfg["TrainingDataset"],
+                                       synonymPath     = cfg.get('synonymPath', None),
                                        elevatePriority = elevatePriority,
                                        libraryPath     = "datasets/DataLoader/libDataLoader.so")
 
@@ -550,20 +553,53 @@ if __name__ == '__main__':
              class_weight_dict = {i: float(weight) for i, weight in enumerate(weight_array)}
                        
              #-------------------------------------------------------------------------------------
-             from NNLosses import GloVeMSELoss, MultiHotLoss, WeightedBinaryCrossEntropy, WeightedFocalLoss
+             # GloVeHybridLoss replaces GloVeMSELoss.
+             # GloVeMSELoss optimised L2 distance, which biases the network toward
+             # predicting a low-magnitude centroid — good MSE but poor directional
+             # alignment → cosine_sim ≈ 0.22.  GloVeHybridLoss splits the total
+             # per-token weight equally between an MSE term (anchors magnitude) and
+             # a cosine term (anchors direction), plus a small norm-regularization
+             # term (weight=0.01, built into the loss class) that keeps the
+             # predicted embedding norm close to the GT norm so the downstream
+             # tokens_multihot head receives consistently-scaled features.
+             from NNLosses import GloVeHybridLoss, MultiHotLoss, WeightedBinaryCrossEntropy, WeightedFocalLoss
              losses = dict()
              #for i in reversed(range(cfg["tokensOut"])): #<- Try reversing order(?)
              for i in range(cfg["tokensOut"]):
-                         #Applying a higher weight to the losses for earlier tokens during training. 
-                         #This should encourage the network to focus more on improving the accuracy of the earlier tokens by making their losses more prominent.
-                         #losses["t%02u"%i] = GloVeMSELoss(weight=10.0/((i+1) * (i+1)))
-                         losses["t%02u"%i] = GloVeMSELoss(weight=cfg["lossWeightGloveTokens"] / cfg["tokensOut"])
+                         # Each token receives half the total per-token budget as MSE weight
+                         # and half as cosine weight, keeping the total gradient magnitude
+                         # identical to the old GloVeMSELoss(weight=lossWeightGloveTokens/tokensOut).
+                         per_token_weight = cfg["lossWeightGloveTokens"] / cfg["tokensOut"]
+                         losses["t%02u"%i] = GloVeHybridLoss(
+                             mse_weight    = per_token_weight * 0.5,
+                             cosine_weight = per_token_weight * 0.5,
+                             # norm_reg_weight defaults to 0.01 inside GloVeHybridLoss
+                         )
+             # WeightedFocalLoss with gamma=4.0 and alpha=0.75 (both now default in
+             # the class; stated explicitly here so the intent is visible without
+             # opening NNLosses.py):
+             #   gamma=4.0 — stronger suppression of easy true-negatives.
+             #               The positive/negative class ratio is ≈1:1000 for 17 977
+             #               classes; gamma=2.0 left too much gradient on the trivial
+             #               all-zero prediction, keeping recall at 0.047.
+             #   alpha=0.75 — positive-class gradient is 3× negative-class gradient,
+             #               directly counteracting the imbalance to improve recall.
              #losses['tokens_multihot']  = WeightedBinaryCrossEntropy(weight_array, weight=cfg["lossWeightMultihotTokens"])  #MultiHotLoss()
-             losses['tokens_multihot']  = WeightedFocalLoss(weight_array, weight=cfg["lossWeightMultihotTokens"])  #<- Try focal loss
+             # alpha=0.5 (neutral): class_weights already encodes inverse-frequency per class,
+             # so adding alpha>0.5 double-counts the imbalance and makes the model predict almost
+             # everything as positive (observed: BinaryAccuracy dropped from 0.9996 to 0.028).
+             # gamma=4.0 is kept — it correctly suppresses easy true-negatives via focal modulation.
+             losses['tokens_multihot']  = WeightedFocalLoss(weight_array,
+                                                             gamma=4.0,
+                                                             alpha=0.5,
+                                                             weight=cfg["lossWeightMultihotTokens"])
              losses['hm']     = hmloss
              losses['hm_16b'] = hmloss16b
+             if cfg.get('outputDescriptors', False):
+                 from NNLosses import DescriptorLoss
+                 losses['descriptors'] = DescriptorLoss(weight=cfg.get('lossWeightDescriptors', 1.0))
              #-------------------------------------------------------------------------------------
-             #This is no longer used, instead of set to 1.0 we pass a None 
+             #This is no longer used, instead of set to 1.0 we pass a None
              loss_weights = None
              #loss_weights = dict()
              #for i in range(cfg["tokensOut"]):  
@@ -574,19 +610,27 @@ if __name__ == '__main__':
              from NNLosses import HeatmapDistanceMetric, HeatmapDistanceMetricPartial, NonZeroCorrectPixelMetric, CustomTopKCategoricalAccuracy
              metrics = dict()
 
-             from NNLosses import TopKAccuracyMetric,CosineSimilarityMetric
+             from NNLosses import TopKAccuracyMetric,CosineSimilarityMetric,MultiHotF1Metric
              #if (not cfg['mixedPrecision']): #Mixed precision nowadays may also have float32 dtype
              if (ourDType==tf.float32): #More relaxed check
                 for i in range(cfg["tokensOut"]):
                          #metrics["t%02u"%i] = keras.metrics.CosineSimilarity(name='cossim', dtype=ourDType, axis=1) #<- TODO: implement my own version at some point to fix float16 compat
                          metrics["t%02u"%i] = CosineSimilarityMetric(name='cossim', dtype=ourDType, axis=1) #<- TODO: implement my own version at some point to fix float16 compat
- 
-                metrics['tokens_multihot']   = [ 
-                                                 'accuracy', 
+               if cfg.get('outputDescriptors', False):
+                         metrics['descriptors'] = CosineSimilarityMetric(name='desc_cossim', dtype=ourDType, axis=1)
+
+                # NOTE: 'accuracy' resolves to BinaryAccuracy for sigmoid outputs.
+                # With alpha=0.75 focal loss the model tends to predict many positives,
+                # making BinaryAccuracy uninformative (driven by FP rate).
+                # MultiHotF1Metric gives an honest per-sample micro-F1 at two operating points:
+                #   f1_thr05   — hard threshold 0.5 (standard, but sensitive to sigmoid calibration)
+                #   f1_top20   — treats top-20 predicted classes as positive (threshold-free,
+                #                more robust early in training when output scale is still shifting)
+                metrics['tokens_multihot']   = [
+                                                 MultiHotF1Metric(name="f1_thr05",  threshold=0.5,  top_k=None, dtype=ourDType),
+                                                 MultiHotF1Metric(name="f1_top20",  threshold=None, top_k=20,   dtype=ourDType),
                                                  TopKAccuracyMetric(name="top3_accuracy",k=3, dtype=ourDType),   #<- Custom topk metric compatible with fp16
                                                  TopKAccuracyMetric(name="top5_accuracy",k=5, dtype=ourDType)    #<- Custom topk metric compatible with fp16
-                                                 #tf.keras.metrics.TopKCategoricalAccuracy(name="top3_accuracy",k=3, dtype=ourDType), 
-                                                 #tf.keras.metrics.TopKCategoricalAccuracy(name="top5_accuracy",k=5, dtype=ourDType)
                                                ]
              else:
                 print(bcolors.WARNING,"Disabling captioning metrics since they are not currently compatible with non float32 training :( ",bcolors.ENDC)

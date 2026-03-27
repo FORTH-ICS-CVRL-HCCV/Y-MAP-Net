@@ -426,6 +426,86 @@ class TopKAccuracyMetric(tf.keras.metrics.Metric):
         self.count.assign(0.0)
         self.total.assign(0.0)
 #-------------------------------------------------------------------------------
+class MultiHotF1Metric(tf.keras.metrics.Metric):
+    """Per-sample micro-F1 for multi-label (multi-hot) binary outputs.
+
+    Unlike BinaryAccuracy (which reaches 99.9% by predicting all-zeros because
+    true-negatives dominate 17977 classes) this metric is honest:
+
+        F1 = 2*TP / (2*TP + FP + FN)   computed per sample, then averaged.
+
+    Two thresholds are tracked simultaneously so you can choose which gives
+    better separation:
+        threshold      – hard decision boundary (default 0.5).
+        top_k          – if provided, treat the top-k scoring classes as
+                         positive predictions instead of using threshold.
+                         This decouples F1 from sigmoid calibration and is
+                         useful early in training when the head is still
+                         learning its output scale.
+
+    Pass top_k=None to use pure threshold mode (default).
+    Pass threshold=None to use pure top-k mode.
+    """
+
+    def __init__(self, threshold=0.5, top_k=None, name='multihot_f1', **kwargs):
+        super().__init__(name=name, **kwargs)
+        # Exactly one of threshold / top_k should be active.
+        if threshold is None and top_k is None:
+            raise ValueError('At least one of threshold or top_k must be set.')
+        self.threshold = threshold
+        self.top_k     = top_k
+        # Accumulators: sum of per-sample F1, number of samples.
+        self.f1_sum = self.add_weight(name='f1_sum', initializer='zeros')
+        self.count  = self.add_weight(name='count',  initializer='zeros')
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_pred = tf.cast(y_pred, tf.float32)
+        y_true = tf.cast(y_true, tf.float32)
+
+        if self.top_k is not None:
+            # Build a binary mask with 1 at the top-k predicted positions.
+            # tf.math.top_k returns sorted indices; scatter back to (B, C).
+            _, top_indices = tf.math.top_k(y_pred, k=self.top_k, sorted=False)
+            batch_size  = tf.shape(y_pred)[0]
+            num_classes = tf.shape(y_pred)[1]
+            # Build (B*K, 2) gather indices then scatter_nd into (B, C).
+            batch_idx = tf.repeat(tf.range(batch_size), self.top_k)
+            flat_idx  = tf.stack([batch_idx,
+                                  tf.reshape(top_indices, [-1])], axis=1)
+            pred_bin  = tf.cast(
+                tf.scatter_nd(flat_idx,
+                              tf.ones(batch_size * self.top_k),
+                              [batch_size, num_classes]),
+                tf.float32)
+        else:
+            pred_bin = tf.cast(y_pred >= self.threshold, tf.float32)
+
+        # Per-sample TP, FP, FN.
+        tp = tf.reduce_sum(y_true * pred_bin,          axis=-1)   # (B,)
+        fp = tf.reduce_sum((1 - y_true) * pred_bin,    axis=-1)
+        fn = tf.reduce_sum(y_true * (1 - pred_bin),    axis=-1)
+
+        # F1 per sample; define 0/0 = 0.
+        denom = 2.0 * tp + fp + fn
+        f1    = tf.math.divide_no_nan(2.0 * tp, denom)            # (B,)
+
+        if sample_weight is not None:
+            sample_weight = tf.cast(tf.reshape(sample_weight, [-1]), tf.float32)
+            f1 = f1 * sample_weight
+            n  = tf.reduce_sum(sample_weight)
+        else:
+            n = tf.cast(tf.shape(y_true)[0], tf.float32)
+
+        self.f1_sum.assign_add(tf.reduce_sum(f1))
+        self.count.assign_add(n)
+
+    def result(self):
+        return tf.math.divide_no_nan(self.f1_sum, self.count)
+
+    def reset_state(self):
+        self.f1_sum.assign(0.0)
+        self.count.assign(0.0)
+#-------------------------------------------------------------------------------
 #https://github.com/tensorflow/addons/blob/v0.20.0/tensorflow_addons/metrics/r_square.py
 class RSquaredMetric(Metric):
     def __init__(self, name='r_squared', **kwargs):
@@ -974,19 +1054,94 @@ class GloVeCosineLoss(keras.losses.Loss):
         return self.weight * cosine_distance
 #-------------------------------------------------------------------------------
 class GloVeHybridLoss(keras.losses.Loss):
-    def __init__(self, mse_weight=1.0, cosine_weight=1.0, **kwargs):
+    """Hybrid GloVe embedding loss combining MSE, cosine distance, and norm regularization.
+
+    Why three terms?
+
+    MSE alone (GloVeMSELoss):
+        Minimising L2 distance pushes the prediction toward the centroid of the
+        training distribution — a low-magnitude average vector.  The model learns
+        to predict a "safe" middle-of-the-road embedding that minimises squared
+        error but has poor directional alignment, explaining cosine_sim ≈ 0.22.
+
+    Cosine loss alone (GloVeCosineLoss):
+        Optimising only direction creates a degenerate solution: the network can
+        maximise cosine similarity by predicting any scaled version of the true
+        vector, including a near-zero vector whose direction is numerically
+        unstable.  It also gives no gradient when the predicted magnitude is
+        large but the direction is already close.
+
+    Hybrid (this class):
+        MSE anchors the magnitude, cosine loss anchors the direction.  Together
+        they force the prediction to match both the direction and the scale of
+        the ground-truth GloVe embedding.
+
+    norm_reg_weight (magnitude regularization):
+        New term: penalises |‖ŷ‖ − ‖y‖|² so the predicted embedding has the
+        same L2 norm as the ground-truth.  This is important because the
+        downstream tokens_multihot head uses the GloVe outputs directly as
+        input features; if predicted norms drift (e.g. collapse toward zero as
+        cosine loss alone would allow), the multihot head receives degraded
+        features.  Default weight 0.01 keeps this term small relative to the
+        main losses.
+    """
+
+    def __init__(self, mse_weight=1.0, cosine_weight=1.0, norm_reg_weight=0.01, **kwargs):
         super(GloVeHybridLoss, self).__init__(**kwargs)
-        self.mse_weight = mse_weight
-        self.cosine_weight = cosine_weight
+        self.mse_weight      = mse_weight
+        self.cosine_weight   = cosine_weight
+        # norm_reg_weight: controls how strongly we penalise predicted-vs-true
+        # norm mismatch.  Small by default (0.01) — just enough to prevent
+        # magnitude collapse without dominating the direction signal.
+        self.norm_reg_weight = norm_reg_weight
 
     def call(self, y_true, y_pred):
+        # --- MSE term: penalises element-wise distance (anchors magnitude) ---
         mse_loss = tf.reduce_mean(tf.square(y_true - y_pred), axis=-1)
 
+        # --- Cosine term: penalises directional misalignment ------------------
         y_true_norm = tf.nn.l2_normalize(y_true, axis=-1)
         y_pred_norm = tf.nn.l2_normalize(y_pred, axis=-1)
-        cosine_loss = 1 - tf.reduce_sum(y_true_norm * y_pred_norm, axis=-1)
+        cosine_loss = 1.0 - tf.reduce_sum(y_true_norm * y_pred_norm, axis=-1)
 
-        return self.mse_weight * mse_loss + self.cosine_weight * cosine_loss
+        # --- Norm regularization: penalises predicted-vs-true norm mismatch --
+        # Without this term, optimising cosine loss alone can let the predicted
+        # vector drift to any scale.  Keeping the norm close to the GT norm
+        # ensures the multihot head receives consistently-scaled features.
+        norm_pred = tf.norm(y_pred, axis=-1)
+        norm_true = tf.norm(y_true, axis=-1)
+        norm_reg  = tf.square(norm_pred - norm_true)
+
+        return (  self.mse_weight      * mse_loss
+                + self.cosine_weight   * cosine_loss
+                + self.norm_reg_weight * norm_reg   )
+#-------------------------------------------------------------------------------
+class DescriptorLoss(keras.losses.Loss):
+    """MSE + cosine loss for supervising the bridge descriptor head
+    against pre-computed DINOv2 embeddings (768-dim, L2-normalised).
+
+    DINOv2 vectors are L2-normalised at source, so directional alignment
+    (cosine) is as important as magnitude (MSE).  Equal weights by default.
+    norm_reg keeps predicted norms close to 1.0 so downstream layers
+    receive consistently-scaled features.
+    """
+    def __init__(self, weight=1.0, norm_reg_weight=0.01, **kwargs):
+        super(DescriptorLoss, self).__init__(**kwargs)
+        self.mse_weight      = weight * 0.5
+        self.cosine_weight   = weight * 0.5
+        self.norm_reg_weight = norm_reg_weight
+
+    def call(self, y_true, y_pred):
+        mse_loss    = tf.reduce_mean(tf.square(y_true - y_pred), axis=-1)
+        y_true_norm = tf.nn.l2_normalize(y_true, axis=-1)
+        y_pred_norm = tf.nn.l2_normalize(y_pred, axis=-1)
+        cosine_loss = 1.0 - tf.reduce_sum(y_true_norm * y_pred_norm, axis=-1)
+        norm_pred   = tf.norm(y_pred, axis=-1)
+        norm_true   = tf.norm(y_true, axis=-1)
+        norm_reg    = tf.square(norm_pred - norm_true)
+        return (  self.mse_weight      * mse_loss
+                + self.cosine_weight   * cosine_loss
+                + self.norm_reg_weight * norm_reg   )
 #-------------------------------------------------------------------------------
 class MultiHotLoss(keras.losses.Loss):
     def __init__(self, weight=1.0, **kwargs):
@@ -1079,10 +1234,43 @@ class WeightedBinaryCrossEntropy(keras.losses.Loss):
         return self.weight * tf.reduce_mean(weighted_bce_loss, axis=-1)  # Keep per-sample loss
 #-------------------------------------------------------------------------------
 class WeightedFocalLoss(keras.losses.Loss):
-    def __init__(self, class_weights, gamma=2.0, weight=1.0, name="weighted_focal_loss"):
+    """Focal loss with per-class frequency weights and per-class alpha balancing.
+
+    Two improvements over the original implementation:
+
+    gamma (focusing parameter):
+        Raised default from 2.0 → 4.0.  With 17 977 classes and typically only
+        5-20 active per sample the positive/negative ratio is ≈1:1000.  At
+        gamma=2.0 easy true-negatives (the overwhelming majority) are still
+        contributing meaningful gradient that drowns out the rare positives.
+        gamma=4.0 suppresses these easy negatives far more aggressively, which
+        pushes recall up from the observed 0.047 toward a more balanced regime.
+
+    alpha (per-class positive emphasis):
+        Standard focal-loss alpha term (Lin et al. 2017).  Applied as a
+        per-element weight:
+          • positive examples (y_true == 1) receive weight  alpha
+          • negative examples (y_true == 0) receive weight  1 - alpha
+        Default 0.5 (neutral): class_weights already encodes inverse-frequency
+        per class, so setting alpha > 0.5 double-counts the imbalance.
+        Empirically, alpha=0.75 caused the model to predict almost every class
+        as positive (tokens_multihot BinaryAccuracy dropped from 0.9996 → 0.028
+        because FP dominated), so alpha is reset to 0.5.
+        Increase alpha only if recall is still near zero after many epochs and
+        class_weights alone are insufficient.
+    """
+
+    def __init__(self, class_weights, gamma=4.0, alpha=0.5, weight=1.0, name="weighted_focal_loss"):
         super(WeightedFocalLoss, self).__init__(name=name)
         self.class_weights = tf.constant(class_weights, dtype=tf.float32)
-        self.gamma  = gamma  # Focusing parameter (γ)
+        # gamma: focal focusing exponent.  Higher = stronger suppression of easy
+        # negatives.  Default raised from 2.0 to 4.0 to handle the extreme
+        # positive/negative imbalance in the 17 977-class multihot setting.
+        self.gamma  = gamma
+        # alpha: positive-class balance weight ∈ [0, 1].
+        # Positive examples are weighted by alpha, negatives by (1 - alpha).
+        # Default 0.75 means positives get 3× the gradient weight of negatives.
+        self.alpha  = alpha
         self.weight = weight
 
     def call(self, y_true, y_pred):
@@ -1095,37 +1283,31 @@ class WeightedFocalLoss(keras.losses.Loss):
         # Prevent log(0) instability
         y_pred = tf.clip_by_value(y_pred, 1e-7, 1 - 1e-7)
 
-        """
-        #OLD calculation
-        # Compute binary cross-entropy (stable implementation)
-        bce_loss = tf.keras.backend.binary_crossentropy(y_true, y_pred)
-        
-        # Calculate probability of the true class (pt)
-        pt = y_true * y_pred + (1 - y_true) * (1 - y_pred)
-        
-        # Focal modulation factor: (1 - pt)^γ
-        focal_modulation = tf.pow(1.0 - pt, self.gamma)
-        """
-
-
         # Compute BCE loss
         bce_loss = tf.keras.backend.binary_crossentropy(y_true, y_pred)
 
         # Compute pt (probability of the true class)
         pt = tf.where(y_true == 1, y_pred, 1 - y_pred)
 
-        # Stable focal modulation
+        # Stable focal modulation: (1 - pt)^gamma computed via exp(gamma * log(...))
+        # to avoid pow() numerical issues near pt=1.
         focal_modulation = tf.exp(self.gamma * tf.math.log(1.0 - pt + 1e-7))
 
-
-        
         # Combine BCE loss with focal modulation
         focal_loss = bce_loss * focal_modulation
-        
-        # Apply class weights
+
+        # Alpha balancing: up-weight positive-class examples by self.alpha,
+        # down-weight negatives by (1 - self.alpha).  This is applied before the
+        # per-class frequency weights so the two are multiplicative.
+        alpha_weight = tf.where(y_true == 1,
+                                tf.ones_like(y_true) * self.alpha,
+                                tf.ones_like(y_true) * (1.0 - self.alpha))
+        focal_loss = focal_loss * alpha_weight
+
+        # Apply per-class frequency weights (inverse-frequency from the dataset)
         class_weights = tf.reshape(self.class_weights, [1, -1])  # (1, num_classes)
         weighted_focal_loss = focal_loss * class_weights
-        
+
         # Mean loss per sample (average over classes)
         return self.weight * tf.reduce_mean(weighted_focal_loss, axis=-1)
 #-------------------------------------------------------------------------------

@@ -218,10 +218,12 @@ def filter_joint_heatmaps_with_segmentation_and_pafs(
     H, W, K = keypoint_heatmaps.shape
     filtered = keypoint_heatmaps.copy()
 
+    BACKGROUND = np.float32(-120.0)   # deactivated value → falls below peak threshold
+
     # 1. Segmentation mask -------------------------------------
     if seg_required and person_label_map is not None:
         seg_mask = (person_label_map > 0)[..., None]   # HxWx1
-        filtered *= seg_mask   # zero all joints outside people
+        filtered = np.where(seg_mask, filtered, BACKGROUND)
 
     # 2. PAF threshold mask ------------------------------------
     paf_abs_threshold = paf_threshold * 127.0
@@ -249,7 +251,7 @@ def filter_joint_heatmaps_with_segmentation_and_pafs(
             paf_mask[:, :, jID] = np.any(np.stack(masks, axis=2), axis=2)
 
     # 3. Apply PAF filter ----------------------------------------
-    filtered *= paf_mask
+    filtered = np.where(paf_mask, filtered, BACKGROUND)
 
     return filtered
 
@@ -348,11 +350,69 @@ def assign_best_candidate_for_person(joint_candidates,
     return best
 
 
+# ---------------------------------------------------------------------------
+# Anatomical limb-length heuristics
+# ---------------------------------------------------------------------------
+
+# Expected limb length as a multiple of the body “scale” (the adaptive
+# avg_distance used in growSkeletons).  Tuned for COCO 17-joint topology
+# where nose is the root and connects directly to shoulders and hips.
+_LIMB_SCALE_FACTOR = {
+    'left_eye':       0.20,   # nose → left_eye   (very short)
+    'right_eye':      0.20,   # nose → right_eye
+    'left_ear':       0.28,   # left_eye  → left_ear
+    'right_ear':      0.28,   # right_eye → right_ear
+    'left_shoulder':  0.55,   # nose → left_shoulder
+    'right_shoulder': 0.55,   # nose → right_shoulder
+    'left_elbow':     0.70,   # left_shoulder  → left_elbow
+    'right_elbow':    0.70,   # right_shoulder → right_elbow
+    'left_wrist':     0.65,   # left_elbow  → left_wrist
+    'right_wrist':    0.65,   # right_elbow → right_wrist
+    'left_hip':       0.65,   # nose → left_hip
+    'right_hip':      0.65,   # nose → right_hip
+    'left_knee':      0.85,   # left_hip  → left_knee
+    'right_knee':     0.85,   # right_hip → right_knee
+    'left_ankle':     0.85,   # left_knee  → left_ankle
+    'right_ankle':    0.85,   # right_knee → right_ankle
+}
+
+# Symmetric counterpart for each joint (used to cross-check limb lengths).
+_SYMMETRIC_LIMB = {
+    'left_eye':       'right_eye',
+    'right_eye':      'left_eye',
+    'left_ear':       'right_ear',
+    'right_ear':      'left_ear',
+    'left_shoulder':  'right_shoulder',
+    'right_shoulder': 'left_shoulder',
+    'left_elbow':     'right_elbow',
+    'right_elbow':    'left_elbow',
+    'left_wrist':     'right_wrist',
+    'right_wrist':    'left_wrist',
+    'left_hip':       'right_hip',
+    'right_hip':      'left_hip',
+    'left_knee':      'right_knee',
+    'right_knee':     'left_knee',
+    'left_ankle':     'right_ankle',
+    'right_ankle':    'left_ankle',
+}
+
+# How much deviation from expected length is tolerated before a penalty kicks
+# in.  0.40 = ±40 % of expected length is free; beyond that cost rises linearly.
+_LIMB_LENGTH_TOLERANCE = 0.40
+
+
 def findClosestJoint(keypoint_candidates, skeleton, joint_index,
                      depth_map,
                      PAF_heatmaps=None, paf_index=None,
                      max_distance_threshold=0.35,
-                     paf_weight=50.0):
+                     paf_weight=50.0,
+                     depth_weight=0.1,
+                     confidence_weight=0.3,
+                     # Anatomical heuristics (optional)
+                     child_joint_index=None,
+                     keypoint_names=None,
+                     avg_body_scale=None,
+                     limb_length_weight=2.0):
     """
     Choose one candidate joint for a given anchor joint in a skeleton.
 
@@ -360,6 +420,9 @@ def findClosestJoint(keypoint_candidates, skeleton, joint_index,
     - Depth penalty is based on depth variation along the segment.
     - PAF reward is based on average |PAF| along the segment for the
       appropriate limb channel (paf_index).
+    - Limb-length penalty: penalises candidates whose proposed bone length
+      deviates too far from the expected length (estimated from the symmetric
+      established limb, or from _LIMB_SCALE_FACTOR × avg_body_scale).
     """
     min_cost = float('inf')
     best_candidate = None
@@ -374,21 +437,69 @@ def findClosestJoint(keypoint_candidates, skeleton, joint_index,
     H = depth_map.shape[0] if depth_map is not None else 0
     W = depth_map.shape[1] if depth_map is not None else 0
 
+    # ------------------------------------------------------------------
+    # Estimate expected limb length from anatomical heuristics
+    # ------------------------------------------------------------------
+    child_name   = (keypoint_names[child_joint_index]
+                    if child_joint_index is not None and keypoint_names is not None
+                       and child_joint_index < len(keypoint_names)
+                    else None)
+    anchor_name  = (keypoint_names[joint_index]
+                    if keypoint_names is not None and joint_index < len(keypoint_names)
+                    else None)
+
+    expected_length       = None   # None → penalty not applied
+    expected_from_symmetry = False  # True only when derived from a real measured limb
+
+    if child_name is not None and keypoint_names is not None:
+        # 1) Symmetry: if the mirrored limb is already established, use its length.
+        #    This is a reliable, frame-derived estimate, so we also tighten the
+        #    hard distance cap with it.
+        sym_child_name  = _SYMMETRIC_LIMB.get(child_name)
+        sym_anchor_name = _SYMMETRIC_LIMB.get(anchor_name) if anchor_name else None
+
+        if (sym_child_name and sym_child_name in keypoint_names and
+                sym_anchor_name and sym_anchor_name in keypoint_names):
+            sc_idx = keypoint_names.index(sym_child_name)
+            sa_idx = keypoint_names.index(sym_anchor_name)
+            sc_x, sc_y, sc_v = skeleton[sc_idx*3 : sc_idx*3 + 3]
+            sa_x, sa_y, sa_v = skeleton[sa_idx*3 : sa_idx*3 + 3]
+            if sc_v > 0 and sa_v > 0:
+                expected_length        = ((sc_x - sa_x)**2 + (sc_y - sa_y)**2) ** 0.5
+                expected_from_symmetry = True
+
+        # 2) Fallback: body scale × anatomical ratio.
+        #    avg_body_scale is estimated from whatever joints are already placed;
+        #    when only face joints are known the scale is tiny and unreliable for
+        #    distant joints like hips/knees.  Use this only as a SOFT penalty —
+        #    never tighten the hard distance cap with it.
+        if expected_length is None and avg_body_scale is not None and avg_body_scale > 0:
+            ratio = _LIMB_SCALE_FACTOR.get(child_name)
+            if ratio is not None:
+                expected_length = ratio * avg_body_scale
+
+    # Tighten the hard distance cap ONLY when we have a reliable symmetry
+    # measurement.  The scale-factor estimate is too noisy (depends on which
+    # joints are already placed) to safely restrict the search radius.
+    effective_max = max_distance_threshold
+    if expected_from_symmetry and expected_length is not None:
+        effective_max = min(max_distance_threshold, expected_length * 2.0)
+
     for candidate in keypoint_candidates:
-        candidate_x, candidate_y, _ = candidate
+        candidate_x, candidate_y, candidate_score = candidate
 
         # Euclidean distance in normalized coords
-        distance = ((candidate_x - joint_x) ** 2 +
-                    (candidate_y - joint_y) ** 2) ** 0.5
+        dist = ((candidate_x - joint_x) ** 2 +
+                (candidate_y - joint_y) ** 2) ** 0.5
 
         # Skip far-away candidates
-        if distance > max_distance_threshold:
+        if dist > effective_max:
             continue
 
         # ----------------- depth penalty (along the line) -----------------
         depth_penalty = 0.0
         if depth_map is not None and W > 1 and H > 1:
-            steps = max(3, int(distance * max(W, H)))
+            steps = max(3, int(dist * max(W, H)))
             prev_depth = None
             for step in range(steps + 1):
                 t = step / float(max(steps, 1))
@@ -399,7 +510,7 @@ def findClosestJoint(keypoint_candidates, skeleton, joint_index,
                 if 0 <= px < W and 0 <= py < H:
                     d = float(depth_map[py, px])
                     if prev_depth is not None:
-                        depth_penalty += abs(d - prev_depth)
+                        depth_penalty += abs(d - prev_depth) / 255.0
                     prev_depth = d
 
         # ----------------- PAF “goodness” along the limb -----------------
@@ -410,12 +521,21 @@ def findClosestJoint(keypoint_candidates, skeleton, joint_index,
                 joint_x, joint_y,
                 candidate_x, candidate_y
             )
-            # paf_score is in [0..1], higher is better
+
+        # ----------------- Limb-length penalty ---------------------------
+        # Penalise deviation beyond the tolerance band.
+        # penalty = max(0,  |dist/expected - 1| - tolerance)
+        length_penalty = 0.0
+        if expected_length is not None and expected_length > 0:
+            deviation = abs(dist / expected_length - 1.0)
+            length_penalty = max(0.0, deviation - _LIMB_LENGTH_TOLERANCE)
 
         # Final cost: lower is better
-        #  - distance and depth_penalty increase cost
-        #  - strong PAF decreases cost
-        cost = distance + depth_penalty - paf_weight * paf_score
+        cost = (dist
+                + depth_weight      * depth_penalty
+                + limb_length_weight * length_penalty
+                - paf_weight        * paf_score
+                - confidence_weight * (candidate_score / 240.0))
 
         if cost < min_cost:
             min_cost = cost
@@ -463,7 +583,7 @@ def growSkeletons(skeletons, skeleton_explanation,
                   depth_map,
                   PAF_heatmaps=None, paf_parents=None):
     newJointExplanations = 0
-    
+
     for person_index, skeleton in enumerate(skeletons):
         avg_distance = calculateAverageDistance(skeleton) * 2
         if avg_distance == 0:
@@ -476,7 +596,6 @@ def growSkeletons(skeletons, skeleton_explanation,
                 if parent_name != keypoint_names[joint_index]:
                     parent_index = keypoint_names.index(parent_name)
                     if not skeleton_explanation[person_index][parent_index]:
-                        # PAF channel for joint -> parent
                         paf_index = None
                         if paf_parents is not None and joint_index < len(paf_parents):
                             paf_index = paf_parents[joint_index]
@@ -484,22 +603,26 @@ def growSkeletons(skeletons, skeleton_explanation,
                         new_joint = findClosestJoint(
                             keypoint_results[parent_index],
                             skeleton,
-                            joint_index,       # anchor = current joint
+                            joint_index,
                             depth_map,
                             PAF_heatmaps=PAF_heatmaps,
                             paf_index=paf_index,
-                            max_distance_threshold=avg_distance
+                            max_distance_threshold=avg_distance,
+                            child_joint_index=parent_index,
+                            keypoint_names=keypoint_names,
+                            avg_body_scale=avg_distance / 2.0,
                         )
                         if new_joint:
                             skeleton[parent_index * 3:parent_index * 3 + 3] = new_joint
                             skeleton_explanation[person_index][parent_index] = True
                             newJointExplanations += 1
+                            if new_joint in keypoint_results[parent_index]:
+                                keypoint_results[parent_index].remove(new_joint)
 
                 # ---------------- Children ----------------
                 for child_name in keypoint_children[keypoint_names[joint_index]]:
                     child_index = keypoint_names.index(child_name)
                     if not skeleton_explanation[person_index][child_index]:
-                        # PAF channel for child -> parent (our joint)
                         paf_index = None
                         if paf_parents is not None and child_index < len(paf_parents):
                             paf_index = paf_parents[child_index]
@@ -507,23 +630,137 @@ def growSkeletons(skeletons, skeleton_explanation,
                         new_joint = findClosestJoint(
                             keypoint_results[child_index],
                             skeleton,
-                            joint_index,       # anchor = current joint
+                            joint_index,
                             depth_map,
                             PAF_heatmaps=PAF_heatmaps,
                             paf_index=paf_index,
-                            max_distance_threshold=avg_distance
+                            max_distance_threshold=avg_distance,
+                            child_joint_index=child_index,
+                            keypoint_names=keypoint_names,
+                            avg_body_scale=avg_distance / 2.0,
                         )
                         if new_joint:
                             skeleton[child_index * 3:child_index * 3 + 3] = new_joint
                             skeleton_explanation[person_index][child_index] = True
                             newJointExplanations += 1
+                            if new_joint in keypoint_results[child_index]:
+                                keypoint_results[child_index].remove(new_joint)
 
     return (newJointExplanations,
             skeletons, skeleton_explanation,
             keypoint_results, keypoint_depths,
             keypoint_names, keypoint_parents, keypoint_children)
 
-def merge_similar_skeletons(skeletons, keypoint_names, pos_tolerance=0.02):
+def is_skeleton_anatomically_valid(skeleton, keypoint_names, keypoint_parents,
+                                   vert_tolerance=0.10,
+                                   max_limb_ratio=3.5,
+                                   max_pair_dist=None):
+    """
+    Returns True when the skeleton passes basic anatomical plausibility checks.
+
+    Checks performed (only on joints that are actually filled):
+
+    1. Vertical ordering
+       Face joints should sit above shoulders, shoulders above hips,
+       hips above knees, knees above ankles.  vert_tolerance (default 10 %
+       of image height) allows for perspective tilt and partial occlusion.
+
+    2. Limb-length outlier
+       Any individual bone that is more than max_limb_ratio times the
+       average established bone length in this skeleton is flagged as an
+       implausible cross-person connection.
+
+    3. Symmetric-pair proximity
+       Joints that should be on opposite sides of the same body (eyes,
+       shoulders, hips, knees, ankles) must not be further apart than the
+       per-pair limit supplied in max_pair_dist.
+    """
+
+    # Default per-pair max distances (normalised [0..1])
+    if max_pair_dist is None:
+        max_pair_dist = {
+            ('left_eye',      'right_eye'):      0.20,
+            ('left_shoulder', 'right_shoulder'): 0.55,
+            ('left_hip',      'right_hip'):      0.55,
+            ('left_knee',     'right_knee'):     0.70,
+            ('left_ankle',    'right_ankle'):    0.80,
+        }
+
+    def joint_pos(name):
+        """Return (x, y) if the joint is filled, else None."""
+        if name not in keypoint_names:
+            return None
+        idx = keypoint_names.index(name)
+        x, y, v = skeleton[idx*3], skeleton[idx*3+1], skeleton[idx*3+2]
+        return (x, y) if v > 0 else None
+
+    def mean_y(names):
+        ys = [joint_pos(n)[1] for n in names if joint_pos(n) is not None]
+        return sum(ys) / len(ys) if ys else None
+
+    # ------------------------------------------------------------------
+    # Check 1: Vertical ordering (y increases downward in image coords)
+    # ------------------------------------------------------------------
+    face_y     = mean_y(['nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear'])
+    shoulder_y = mean_y(['left_shoulder', 'right_shoulder'])
+    hip_y      = mean_y(['left_hip', 'right_hip'])
+    knee_y     = mean_y(['left_knee', 'right_knee'])
+    ankle_y    = mean_y(['left_ankle', 'right_ankle'])
+
+    ordered_pairs = [
+        (face_y,     shoulder_y, 'face above shoulder'),
+        (shoulder_y, hip_y,      'shoulder above hip'),
+        (hip_y,      knee_y,     'hip above knee'),
+        (knee_y,     ankle_y,    'knee above ankle'),
+    ]
+    for upper_y, lower_y, _ in ordered_pairs:
+        if upper_y is not None and lower_y is not None:
+            # upper body part must have SMALLER y (higher on screen)
+            if upper_y > lower_y + vert_tolerance:
+                return False
+
+    # ------------------------------------------------------------------
+    # Check 2: Limb-length outlier
+    # ------------------------------------------------------------------
+    bone_lengths = []
+    bones = []
+    for jID in range(len(keypoint_names)):
+        name = keypoint_names[jID]
+        parent_name = keypoint_parents.get(name, name)
+        if parent_name == name:
+            continue
+        if parent_name not in keypoint_names:
+            continue
+        parentJID = keypoint_names.index(parent_name)
+        x1, y1, v1 = skeleton[jID*3],       skeleton[jID*3+1],       skeleton[jID*3+2]
+        x2, y2, v2 = skeleton[parentJID*3], skeleton[parentJID*3+1], skeleton[parentJID*3+2]
+        if v1 > 0 and v2 > 0:
+            bone_len = ((x1 - x2)**2 + (y1 - y2)**2) ** 0.5
+            bone_lengths.append(bone_len)
+            bones.append((jID, parentJID, bone_len))
+
+    if bone_lengths:
+        avg_bone = sum(bone_lengths) / len(bone_lengths)
+        if avg_bone > 0:
+            for _, _, blen in bones:
+                if blen > max_limb_ratio * avg_bone:
+                    return False
+
+    # ------------------------------------------------------------------
+    # Check 3: Symmetric-pair proximity
+    # ------------------------------------------------------------------
+    for (left_name, right_name), max_d in max_pair_dist.items():
+        lp = joint_pos(left_name)
+        rp = joint_pos(right_name)
+        if lp is not None and rp is not None:
+            d = ((lp[0] - rp[0])**2 + (lp[1] - rp[1])**2) ** 0.5
+            if d > max_d:
+                return False
+
+    return True
+
+
+def merge_similar_skeletons(skeletons, keypoint_names, pos_tolerance=0.05):
     """
     If two skeletons are almost identical in most joints, merge them.
     """
@@ -621,16 +858,45 @@ def resolveJointHierarchy(keypoint_results, keypoint_depths,
                       "persons (labels:", person_ids, ")")
 
     if not use_segmentation:
-        # Fallback: old heuristic based on "most popular joint"
-        for jID, joints in enumerate(keypoint_results):
-            thisJointCount = 0
-            for x, y, v in joints:
-                if ((x != 0) or (y != 0)) and (v != 0):
-                    thisJointCount += 1
+        # Prefer root joints (self-parented) as seed — they sit at the centre of
+        # the hierarchy so growSkeletons can reach all children from them.
+        # Fall back to "most popular joint" only when no root has any peaks.
+        root_joints = [jID for jID, name in enumerate(keypoint_names)
+                       if jID < len(keypoint_results)
+                       and keypoint_parents.get(name, '') == name]
 
-            if thisJointCount > numberOfSkeletons:
-                numberOfSkeletons = thisJointCount
-                mostPopularJoint = jID
+        # Count peaks per joint
+        joint_peak_counts = [
+            sum(1 for x, y, v in keypoint_results[jID]
+                if ((x != 0) or (y != 0)) and v != 0)
+            if jID < len(keypoint_results) else 0
+            for jID in range(len(keypoint_names))
+        ]
+
+        # Best root joint = root with most peaks (> 0)
+        best_root = -1
+        best_root_count = 0
+        for jID in root_joints:
+            if joint_peak_counts[jID] > best_root_count:
+                best_root_count = joint_peak_counts[jID]
+                best_root = jID
+
+        if best_root >= 0:
+            mostPopularJoint = best_root
+            numberOfSkeletons = best_root_count
+            if verbose:
+                print("Seeding from root joint:",
+                      keypoint_names[mostPopularJoint],
+                      "with", numberOfSkeletons, "peaks")
+        else:
+            # Fallback: old heuristic based on "most popular joint"
+            for jID, count in enumerate(joint_peak_counts):
+                if count > numberOfSkeletons:
+                    numberOfSkeletons = count
+                    mostPopularJoint = jID
+            if verbose:
+                print("No root joint peaks — seeding from most popular joint:",
+                      keypoint_names[mostPopularJoint])
 
         if numberOfSkeletons == 0:
             numberOfSkeletons = 1  # at least one slot
@@ -647,7 +913,7 @@ def resolveJointHierarchy(keypoint_results, keypoint_depths,
             print("Most popular joint has ",
                   len(keypoint_results[mostPopularJoint]), " elements")
 
-        # Populate most popular joint for each skeleton
+        # Populate seed joint for each skeleton
         for person in range(numberOfSkeletons):
             if len(keypoint_results[mostPopularJoint]) > 0:
                 skeleton_explanation[person][mostPopularJoint] = True
@@ -726,10 +992,42 @@ def resolveJointHierarchy(keypoint_results, keypoint_depths,
 
 
 
-def find_peak_point_coordinates_from_heatmaps(joint_prediction_heatmaps, threshold):
+def _nms_peaks(peaks, min_dist=0.10):
+    """
+    Non-maximum suppression on a list of (x, y, score) peaks (all in
+    normalised [0..1] coordinates).  Keeps only peaks that are at least
+    min_dist away from every higher-scoring peak already retained.
+    Peaks are returned sorted by score descending.
+    """
+    if len(peaks) <= 1:
+        return list(peaks)
+    ordered = sorted(peaks, key=lambda p: p[2], reverse=True)
+    kept = []
+    for p in ordered:
+        px, py = p[0], p[1]
+        suppressed = False
+        for k in kept:
+            d = ((px - k[0]) ** 2 + (py - k[1]) ** 2) ** 0.5
+            if d < min_dist:
+                suppressed = True
+                break
+        if not suppressed:
+            kept.append(p)
+    return kept
+
+
+def find_peak_point_coordinates_from_heatmaps(joint_prediction_heatmaps, threshold,
+                                               nms_dist=0.10):
+    """
+    Extract one peak per blob in each joint heatmap channel.
+
+    nms_dist : minimum normalised distance between two kept peaks of the
+               same joint type.  Peaks closer than this to a higher-scoring
+               peak are suppressed.  Set to 0 to disable NMS.
+    """
     heatmaps = np.array(joint_prediction_heatmaps).astype(np.float32) + 120
     result = list()
- 
+
     for i in range(heatmaps.shape[2]):
         result.append(list())
 
@@ -744,13 +1042,28 @@ def find_peak_point_coordinates_from_heatmaps(joint_prediction_heatmaps, thresho
             # Find contours in the binary image
             contours, _ = cv2.findContours(binary.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-            # Extract peak points from contours
+            raw_peaks = []
             for contour in contours:
                 M = cv2.moments(contour)
                 if M["m00"] > 0:
                     cx = int(M["m10"] / M["m00"])
                     cy = int(M["m01"] / M["m00"])
-                    result[i].append((cx / heatmaps.shape[0], cy / heatmaps.shape[1], channel_heatmap[cy, cx]))
+                    score = channel_heatmap[cy, cx]
+                    # Centroid can land on a background pixel for thin/ring-shaped
+                    # contours.  Fall back to the max-value pixel in the bounding rect.
+                    if score <= threshold:
+                        bx, by, bw, bh = cv2.boundingRect(contour)
+                        roi = channel_heatmap[by:by+bh, bx:bx+bw]
+                        local_yx = np.unravel_index(np.argmax(roi), roi.shape)
+                        cy, cx = by + local_yx[0], bx + local_yx[1]
+                        score = channel_heatmap[cy, cx]
+                    if score > threshold:
+                        raw_peaks.append((cx / heatmaps.shape[1],
+                                          cy / heatmaps.shape[0],
+                                          score))
+
+            # Suppress nearby weaker peaks
+            result[i] = _nms_peaks(raw_peaks, min_dist=nms_dist) if nms_dist > 0 else raw_peaks
 
     return result
 
@@ -920,10 +1233,30 @@ def compute_paf_children(paf_parents, num_joints):
     paf_children = [-1] * num_joints
     for child_jID, paf_id in enumerate(paf_parents):
         if paf_id >= 0:
-            # find parent joint ID by PAF index
-            # but simplest is: if parent has this paf, child gets it reversed
             paf_children[child_jID] = paf_id
     return paf_children
+
+
+def compute_paf_children_local(paf_parents_local, keypoint_names, keypoint_children):
+    """
+    For each joint j, return the local PAF channel index for the limb from
+    j's FIRST child (in the tree) that has a valid PAF back to j.
+    Returns -1 if no such child exists.
+
+    This gives the filter a second evidence source: even if the parent PAF
+    for a joint is weak, we can keep it if the child PAF is active.
+    """
+    n = len(keypoint_names)
+    result = [-1] * n
+    for j, jname in enumerate(keypoint_names):
+        for child_name in keypoint_children.get(jname, []):
+            if child_name not in keypoint_names:
+                continue
+            child_idx = keypoint_names.index(child_name)
+            if child_idx < len(paf_parents_local) and paf_parents_local[child_idx] >= 0:
+                result[j] = paf_parents_local[child_idx]
+                break  # use the first child that has a PAF
+    return result
 
 
 """
@@ -938,85 +1271,125 @@ keypoint_parents is the list of joint parents for debug/printing purposes
 keypoint_parents is a list of lists of joint children for debug/printing purposes
 paf_parents is a list of PAF parents for each heatmap 
 """
-def resolveJointHierarchyNew(keypoint_heatmaps, PAF_heatmaps, depth_map, keypoint_names, keypoint_parents, keypoint_children, paf_parents, sanity_check=True, person_label_map=None,  verbose=False, dump=False, threshold=0.5):
+def resolveJointHierarchyNew(keypoint_heatmaps, PAF_heatmaps, depth_map, keypoint_names, keypoint_parents, keypoint_children, paf_parents, sanity_check=True, person_label_map=None,  verbose=False, dump=False, threshold=0.5, debug=False):
 
     if dump:
        dump_inputs(keypoint_heatmaps, PAF_heatmaps, depth_map, keypoint_names, keypoint_parents, keypoint_children, paf_parents, folder_path='input_dump')
 
-    skeletons = [] 
- 
-    if verbose:
-        print("Resolving joint hierarchy with keypoint and PAF heatmaps...")
+    skeletons = []
 
-    if (sanity_check):
-      paf_children = compute_paf_children(paf_parents, len(keypoint_names))
-      paf_start = 17   # first PAF heatmap index
-      paf_parents_local = [
-    -1, -1, -1, -1, -1,   # 0–4
-    11,  # 5 left_shoulder
-    2,   # 6 right_shoulder
-    10,  # 7 left_elbow
-    1,   # 8 right_elbow
-    9,   # 9 left_wrist
-    0,   # 10 right_wrist
-    8,   # 11 left_hip
-    5,   # 12 right_hip
-    7,   # 13 left_knee
-    4,   # 14 right_knee
-    6,   # 15 left_ankle
-    3    # 16 right_ankle
-]
+    DBG = debug or verbose
 
-      paf_children_local = paf_parents_local.copy()
-      paf_heatmaps_np = np.stack(PAF_heatmaps, axis=2)
+    if DBG:
+        print("\n========== resolveJointHierarchyNew DEBUG ==========")
+        kp_shape  = keypoint_heatmaps.shape if hasattr(keypoint_heatmaps, 'shape') else f"list len={len(keypoint_heatmaps)}"
+        paf_shape = (f"list len={len(PAF_heatmaps)}, each={PAF_heatmaps[0].shape if PAF_heatmaps else 'n/a'}"
+                     if isinstance(PAF_heatmaps, list)
+                     else (PAF_heatmaps.shape if PAF_heatmaps is not None else "None"))
+        print(f"  keypoint_heatmaps : {kp_shape}  dtype={getattr(keypoint_heatmaps,'dtype','?')}")
+        print(f"  PAF_heatmaps      : {paf_shape}")
+        print(f"  depth_map         : {depth_map.shape if depth_map is not None else 'None'}")
+        print(f"  person_label_map  : {person_label_map.shape if person_label_map is not None else 'None'}")
+        print(f"  threshold         : {threshold}")
+        print(f"  sanity_check      : {sanity_check}")
+        kp_arr = keypoint_heatmaps if not isinstance(keypoint_heatmaps, list) else np.stack(keypoint_heatmaps, axis=2)
+        for j in range(min(17, kp_arr.shape[2])):
+            ch = kp_arr[:, :, j].astype(np.float32)
+            print(f"    joint[{j:2d}] {keypoint_names[j] if j < len(keypoint_names) else '?':15s}  min={ch.min():.1f}  max={ch.max():.1f}  mean={ch.mean():.1f}")
 
+    # Convert absolute heatmap PAF indices (17..28) to local channel indices (0..11).
+    # Config paf_parents values < paf_start mean "no PAF for this joint" → -1.
+    paf_start = 17
+    paf_parents_local = [
+        (p - paf_start) if (p is not None and p >= paf_start) else -1
+        for p in paf_parents
+    ] if paf_parents is not None else None
 
-      keypoint_results = filter_joint_heatmaps_with_segmentation_and_pafs(
-                                        keypoint_heatmaps[:, :, :17],   # slice channels
-                                      paf_heatmaps_np,          # 17..28 heatmaps
-                                      person_label_map,      # your segmentation HxW
-                                      paf_parents_local,           # mapping jID -> paf
-                                      paf_children_local,          # NEW (we generate below)
-                                      paf_threshold=0.20) 
+    # Step 1: Extract peak points from the keypoint heatmaps.
+    # When sanity_check is on, first suppress peaks that have neither PAF support
+    # nor lie inside a person region, then extract peaks from the filtered map.
+    if sanity_check and PAF_heatmaps is not None:
+        paf_heatmaps_np = (np.stack(PAF_heatmaps, axis=2)
+                           if isinstance(PAF_heatmaps, list)
+                           else PAF_heatmaps)
+        if DBG:
+            print(f"\n  PAF heatmaps stacked: {paf_heatmaps_np.shape}  dtype={paf_heatmaps_np.dtype}  min={paf_heatmaps_np.min():.1f}  max={paf_heatmaps_np.max():.1f}")
+        paf_children_local = paf_parents_local.copy() if paf_parents_local is not None else None
+        filtered_heatmaps = filter_joint_heatmaps_with_segmentation_and_pafs(
+            keypoint_heatmaps[:, :, :17],
+            paf_heatmaps_np,
+            person_label_map,
+            paf_parents_local,
+            paf_children_local,
+            paf_threshold=0.20)
+        if DBG:
+            for j in range(17):
+                ch_raw  = keypoint_heatmaps[:, :, j].astype(np.float32)
+                ch_filt = filtered_heatmaps[:, :, j].astype(np.float32)
+                n_surviving = int(np.sum(ch_filt > -119))
+                print(f"    filt joint[{j:2d}] {keypoint_names[j] if j < len(keypoint_names) else '?':15s}  raw_max={ch_raw.max():.1f}  filt_max={ch_filt.max():.1f}  surviving_px={n_surviving}")
+        keypoint_results = find_peak_point_coordinates_from_heatmaps(filtered_heatmaps, threshold=threshold)
+    else:
+        keypoint_results = find_peak_point_coordinates_from_heatmaps(keypoint_heatmaps, threshold=threshold)
 
-    # Step 1: Extract peak points from the keypoint heatmaps
-    keypoint_results = find_peak_point_coordinates_from_heatmaps(keypoint_heatmaps, threshold=threshold)
-    
-    if verbose:
-        print(f"Found {len(keypoint_results)} keypoints.")
-        print(keypoint_results)
+    if DBG:
+        print(f"\n  Peak detection (threshold={threshold}):")
+        total_peaks = 0
+        for j, peaks in enumerate(keypoint_results):
+            name = keypoint_names[j] if j < len(keypoint_names) else f'j{j}'
+            scores = [f"{p[2]:.0f}" for p in peaks]
+            print(f"    joint[{j:2d}] {name:15s}  peaks={len(peaks):2d}  scores=[{', '.join(scores[:6])}{'...' if len(scores)>6 else ''}]")
+            total_peaks += len(peaks)
+        print(f"  Total peaks across all joints: {total_peaks}")
 
     # Step 2: Initialize skeletons for the detected people based on keypoints
-    # This logic assumes each detected keypoint type could correspond to a different person/skeleton.
-    keypoint_depths = retrieve_keypoint_depth(keypoint_results, depth_map) #<- Important for this to happen before normalization (castNormalizedCoordinatesToOriginalImage)!
+    keypoint_depths = retrieve_keypoint_depth(keypoint_results, depth_map)
 
-    if verbose:
-        print(f"Found {len(keypoint_depths)} keypoint depths.")
-        print(keypoint_depths)
+    if DBG and person_label_map is not None:
+        unique_ids = np.unique(person_label_map)
+        person_ids = [p for p in unique_ids if p != 0]
+        print(f"\n  Segmentation: person_ids={person_ids}  (unique labels={list(unique_ids[:10])})")
 
-    #skeletons = resolveJointHierarchy(keypoint_results, keypoint_depths, keypoint_names, keypoint_parents, keypoint_children,  depth_map, verbose=verbose)
+    # Pass paf_parents_local (0-based channel indices) so findClosestJoint can
+    # actually index into the PAF_heatmaps list (which has 12 channels, 0..11).
     skeletons = resolveJointHierarchy(
-    keypoint_results, keypoint_depths,
-    keypoint_names, keypoint_parents, keypoint_children,
-    depth_map,
-    PAF_heatmaps=PAF_heatmaps,
-    person_label_map=person_label_map,
-    paf_parents=paf_parents,
-    verbose=verbose
-)
+        keypoint_results, keypoint_depths,
+        keypoint_names, keypoint_parents, keypoint_children,
+        depth_map,
+        PAF_heatmaps=PAF_heatmaps,
+        person_label_map=person_label_map,
+        paf_parents=paf_parents_local,
+        verbose=verbose
+    )
 
-    if verbose:
-        print(f"Returning {len(skeletons)} skeletons first step.")
-        print(skeletons)
+    if DBG:
+        print(f"\n  resolveJointHierarchy returned {len(skeletons)} skeleton(s)")
+        for si, sk in enumerate(skeletons):
+            filled = sum(1 for j in range(len(keypoint_names)) if sk[j*3+2] > 0)
+            print(f"    skel[{si}]: {filled}/{len(keypoint_names)} joints filled")
 
-    # Step 4: Perform growing using PAFs and depth maps
-    #skeletons = grow_skeletons_with_pafs_and_depth(skeletons, PAF_heatmaps, depth_map, keypoint_results, paf_parents)
-    
     skeletons = merge_similar_skeletons(skeletons, keypoint_names)
 
-    if verbose:
-        print(f"Returning {len(skeletons)} skeletons pafs and depth.")
-        print(skeletons)
+    # Drop phantom skeletons that have too few filled joints to be meaningful.
+    MIN_JOINTS = 3
+    skeletons = [sk for sk in skeletons
+                 if sum(1 for j in range(len(keypoint_names)) if sk[j*3+2] > 0) >= MIN_JOINTS]
+
+    # Drop anatomically implausible skeletons (wrong vertical ordering,
+    # wildly long bones, or symmetric joints impossibly far apart).
+    skeletons = [sk for sk in skeletons
+                 if is_skeleton_anatomically_valid(sk, keypoint_names, keypoint_parents)]
+
+    if DBG:
+        print(f"  After merge+validity filter (min {MIN_JOINTS} joints): {len(skeletons)} skeleton(s)")
+        for si, sk in enumerate(skeletons):
+            filled = sum(1 for j in range(len(keypoint_names)) if sk[j*3+2] > 0)
+            joints_str = ', '.join(
+                f"{keypoint_names[j]}=({sk[j*3]:.2f},{sk[j*3+1]:.2f})"
+                for j in range(len(keypoint_names)) if sk[j*3+2] > 0
+            )
+            print(f"    skel[{si}]: {filled} joints — {joints_str}")
+        print("========== END resolveJointHierarchyNew DEBUG ==========\n")
 
     return skeletons
 
@@ -1027,33 +1400,67 @@ def resolveJointHierarchyNew(keypoint_heatmaps, PAF_heatmaps, depth_map, keypoin
 
 
 
+_OPENPOSE_BONE_COLOR_BGR = {
+    # Face — pink / magenta / purple family
+    # Values taken from OpenPose COCO COLORS_RENDER (RGB) converted to BGR.
+    'left_eye':       (170,   0, 255),  # RGB(255,  0,170) — deep pink
+    'right_eye':      (255,   0, 255),  # RGB(255,  0,255) — magenta
+    'left_ear':       (255,   0, 170),  # RGB(170,  0,255) — purple-pink
+    'right_ear':      (255,   0,  85),  # RGB( 85,  0,255) — blue-purple
+    # Left arm — warm spectrum: red → orange → yellow
+    'left_shoulder':  (  0,   0, 255),  # RGB(255,  0,  0) — red
+    'left_elbow':     (  0,  85, 255),  # RGB(255, 85,  0) — orange
+    'left_wrist':     (  0, 170, 255),  # RGB(255,170,  0) — yellow-orange
+    # Right arm — cool spectrum: yellow-green → green
+    'right_shoulder': (  0, 255, 170),  # RGB(170,255,  0) — yellow-green
+    'right_elbow':    (  0, 255,  85),  # RGB( 85,255,  0) — light green
+    'right_wrist':    (  0, 255,   0),  # RGB(  0,255,  0) — green
+    # Left leg — teal / cyan family
+    'left_hip':       ( 85, 255,   0),  # RGB(  0,255, 85) — bright teal
+    'left_knee':      (170, 255,   0),  # RGB(  0,255,170) — teal
+    'left_ankle':     (200, 200,   0),  # RGB(  0,200,200) — dark teal
+    # Right leg — blue family
+    'right_hip':      (255, 255,   0),  # RGB(  0,255,255) — cyan
+    'right_knee':     (255, 170,   0),  # RGB(  0,170,255) — sky blue
+    'right_ankle':    (255,  85,   0),  # RGB(  0, 85,255) — blue
+}
+
 def drawSkeletons(skeletons, keypoint_names, keypoint_parents, image_shape=(480, 640, 3)):
-    # Create a blank image
     image = np.zeros(image_shape, dtype=np.uint8)
-    
-    for skeletonID,keypoints in enumerate(skeletons):
-        # Create a dictionary for easier access to keypoints
+
+    for keypoints in skeletons:
+        # First pass: draw limb lines (thick, behind joints)
         for jID in range(len(keypoint_names)):
-               name       = keypoint_names[jID]
-               x          = int(keypoints[jID*3+0]*image_shape[1])
-               y          = int(keypoints[jID*3+1]*image_shape[0])
-               visibility = keypoints[jID*3+2]
-               if visibility > 0:  # Only draw visible keypoints and connections
-                cv2.circle(image, (int(x), int(y)), 2, (255, 255, 0), 4)
-                #cv2.putText(image, "%s - %u "%(keypoint_names[jID],skeletonID), (x,y) , cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                parent_name = keypoint_parents[name]
-                if parent_name != name:  # Avoid drawing line to itself
-                    parentJID         = keypoint_names.index(parent_name)
-                    parent_x          = keypoints[parentJID*3+0] * image_shape[1]
-                    parent_y          = keypoints[parentJID*3+1] * image_shape[0]
-                    parent_visibility = keypoints[parentJID*3+2]
-                    if parent_visibility > 0:
-                        # Draw line between keypoint and its parent
-                        cv2.line(image, (int(x), int(y)), (int(parent_x), int(parent_y)), (255, 0, 0), 2)
-                        cv2.circle(image, (int(x), int(y)), 3, (0, 255, 0), -1)
-                        cv2.circle(image, (int(parent_x), int(parent_y)), 3, (0, 255, 0), -1)
-    
-    # Display the image
+            name       = keypoint_names[jID]
+            x          = int(keypoints[jID*3+0] * image_shape[1])
+            y          = int(keypoints[jID*3+1] * image_shape[0])
+            visibility = keypoints[jID*3+2]
+            if visibility <= 0:
+                continue
+            parent_name = keypoint_parents.get(name, name)
+            if parent_name == name:
+                continue  # root joint, no bone to draw
+            parentJID         = keypoint_names.index(parent_name)
+            parent_x          = int(keypoints[parentJID*3+0] * image_shape[1])
+            parent_y          = int(keypoints[parentJID*3+1] * image_shape[0])
+            parent_visibility = keypoints[parentJID*3+2]
+            if parent_visibility <= 0:
+                continue
+            color = _OPENPOSE_BONE_COLOR_BGR.get(name, (200, 200, 200))
+            cv2.line(image, (x, y), (parent_x, parent_y), color, 3, cv2.LINE_AA)
+
+        # Second pass: draw joint dots (on top of lines)
+        for jID in range(len(keypoint_names)):
+            name       = keypoint_names[jID]
+            x          = int(keypoints[jID*3+0] * image_shape[1])
+            y          = int(keypoints[jID*3+1] * image_shape[0])
+            visibility = keypoints[jID*3+2]
+            if visibility <= 0:
+                continue
+            color = _OPENPOSE_BONE_COLOR_BGR.get(name, (200, 200, 200))
+            cv2.circle(image, (x, y), 5, color,       -1, cv2.LINE_AA)
+            cv2.circle(image, (x, y), 5, (255,255,255), 1, cv2.LINE_AA)
+
     cv2.imshow('Skeletons', image)
 #---------------------------------------------------------------------------------------- 
 #============================================================================================
