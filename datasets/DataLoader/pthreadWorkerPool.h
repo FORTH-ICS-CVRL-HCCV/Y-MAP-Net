@@ -54,6 +54,7 @@ struct workerPool
     volatile char mainThreadWaiting;
     //---------------------
     volatile int activeWorkers;
+    volatile int workersWaiting;  // workers currently inside pthread_cond_wait on startWorkCondition
     //---------------------
     pthread_attr_t initializationAttribute;
 
@@ -274,7 +275,9 @@ static int threadpoolWorkerInitialWait(struct threadContext * ctx)
      pthread_cond_signal(&ctx->pool->completeWorkCondition);
      pthread_mutex_unlock(&ctx->pool->completeWorkMutex);
      pthread_mutex_lock(&ctx->pool->startWorkMutex);
+     ctx->pool->workersWaiting += 1;
      pthread_cond_wait(&ctx->pool->startWorkCondition,&ctx->pool->startWorkMutex);
+     ctx->pool->workersWaiting -= 1;
      return 1;
     }
     return 0;
@@ -333,12 +336,14 @@ static int threadpoolWorkerLoopEnd(struct threadContext * ctx)
     // Lock the "StartWorkMutex" before we send out the "CompleteCondition" signal.
     // This way, we can enter a waiting state for the next round before the main thread broadcasts the "StartWorkCondition".
     pthread_mutex_lock(&ctx->pool->startWorkMutex); //<- This will get released by threadpoolWorkerLoopCondition
+    ctx->pool->workersWaiting += 1;
     pthread_cond_signal(&ctx->pool->completeWorkCondition);
 
     // Wait for the Main thread to send us the next "StartWorkCondition" broadcast.
     // Be sure to unlock the corresponding mutex immediately so that the other worker threads can exit their waiting state as well.
     unsigned long workerLoopBlockStartTime = GetTickCountMicrosecondsT();
     pthread_cond_wait(&ctx->pool->startWorkCondition, &ctx->pool->startWorkMutex);
+    ctx->pool->workersWaiting -= 1;
     unsigned long workerLoopBlockFinishTime = GetTickCountMicrosecondsT();
 
     //report Resyncing lag with the rest of the thread pool
@@ -358,6 +363,14 @@ static int threadpoolMainThreadPrepareWorkForWorkers(struct workerPool * pool)
 
     if (pool->initialized)
     {
+        // Spin until every worker has entered pthread_cond_wait on startWorkCondition.
+        // Without this, a worker that finished the previous batch but hasn't yet reached
+        // pthread_cond_wait can miss the upcoming broadcast and deadlock indefinitely.
+        while (pool->workersWaiting < (int)pool->numberOfThreads)
+        {
+            usleep(SPIN_SLEEP_TIME_MICROSECONDS);
+        }
+
         pthread_mutex_lock(&pool->startWorkMutex); //This will be released by threadpoolMainThreadWaitForWorkersToFinishTimeoutSeconds
         return 1;
     }
@@ -475,6 +488,7 @@ static int threadpoolCreate(struct workerPool * pool,unsigned int numberOfThread
     //--------------------------------------------------
     pool->work = 0;
     pool->mainThreadWaiting = 0;
+    pool->workersWaiting = 0;
     pool->numberOfThreads = 0;
     pool->workerPoolIDs     = (pthread_t*) malloc(sizeof(pthread_t) * numberOfThreadsToSpawn);
     pool->workerPoolContext = (struct threadContext*) malloc(sizeof(struct threadContext) * numberOfThreadsToSpawn);

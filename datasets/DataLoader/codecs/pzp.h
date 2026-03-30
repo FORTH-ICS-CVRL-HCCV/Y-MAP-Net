@@ -31,6 +31,8 @@ extern "C"
 
 #include <zstd.h>
 //sudo apt install libzstd-dev
+#include <lz4.h>
+//sudo apt install liblz4-dev
 
 #if INTEL_OPTIMIZATIONS
 #include <immintrin.h>  // AVX intrinsics
@@ -104,8 +106,16 @@ typedef enum
     USE_COMPRESSION  = 1 << 0,  // 0001 — zstd entropy coding (always on)
     USE_RLE          = 1 << 1,  // 0010 — intra-frame delta filter before zstd
     USE_PALETTE      = 1 << 2,  // 0100 — per-channel palette indexing
-    USE_INTER_DELTA  = 1 << 3   // 1000 — inter-frame delta: store frame[N] - frame[N-1]
+    USE_INTER_DELTA  = 1 << 3,  // 1000 — inter-frame delta: store frame[N] - frame[N-1]
+    USE_LZ4          = 1 << 4   // 10000 — use LZ4 instead of ZSTD (faster decompress on ramdisk)
 } PZPFlags;
+
+/* Bit 31 of the 4-byte frame-prefix uint32 encodes the codec.
+ * Bit 31 = 0: ZSTD (all existing files — backward compatible)
+ * Bit 31 = 1: LZ4
+ * Bits 0–30 hold the uncompressed payload size (max ~2 GB). */
+#define PZP_CODEC_LZ4_FLAG  0x80000000u
+#define PZP_CODEC_SIZE_MASK 0x7FFFFFFFu
 
 // ─── Container format constants ──────────────────────────────────────────────
 
@@ -425,27 +435,56 @@ static unsigned char *pzp_compress_frame_to_memory(
 
     h[7] = hash_checksum(write_ptr, pixel_data_size);
 
-    /* ── zstd compress ── */
-    int    zstd_level = (configuration & USE_PALETTE) ? 19 : 1;
-    size_t max_comp   = ZSTD_compressBound(payload_size);
+    /* ── compress (LZ4 or ZSTD) ── */
+    /* result layout: [4-byte prefix][compressed bytes]
+     * prefix bit 31 = codec: 0=ZSTD, 1=LZ4  (PZP_CODEC_LZ4_FLAG)
+     * prefix bits 0-30 = uncompressed payload size (PZP_CODEC_SIZE_MASK) */
+    size_t max_comp;
+    unsigned char *frame_buf;
+    size_t comp_size;
 
-    /* result layout: [4-byte uncompressed_size][compressed bytes] */
-    unsigned char *frame_buf = (unsigned char *)malloc(sizeof(unsigned int) + max_comp);
-    if (!frame_buf) { free(payload); return NULL; }
-
-    size_t comp_size = ZSTD_compress(
-            frame_buf + sizeof(unsigned int), max_comp,
-            payload, payload_size, zstd_level);
-    free(payload);
-
-    if (ZSTD_isError(comp_size))
+    if (configuration & USE_LZ4)
     {
-        fprintf(stderr, "pzp: zstd error: %s\n", ZSTD_getErrorName(comp_size));
-        free(frame_buf);
-        return NULL;
+        max_comp  = (size_t)LZ4_compressBound((int)payload_size);
+        frame_buf = (unsigned char *)malloc(sizeof(unsigned int) + max_comp);
+        if (!frame_buf) { free(payload); return NULL; }
+
+        int lz4_written = LZ4_compress_default(
+                (const char *)payload, (char *)(frame_buf + sizeof(unsigned int)),
+                (int)payload_size, (int)max_comp);
+        free(payload);
+
+        if (lz4_written <= 0)
+        {
+            fprintf(stderr, "pzp: lz4 compression failed\n");
+            free(frame_buf);
+            return NULL;
+        }
+        comp_size = (size_t)lz4_written;
+        unsigned int prefix = (unsigned int)payload_size | PZP_CODEC_LZ4_FLAG;
+        memcpy(frame_buf, &prefix, sizeof(unsigned int));
+    }
+    else
+    {
+        int    zstd_level = (configuration & USE_PALETTE) ? 19 : 1;
+        max_comp  = ZSTD_compressBound(payload_size);
+        frame_buf = (unsigned char *)malloc(sizeof(unsigned int) + max_comp);
+        if (!frame_buf) { free(payload); return NULL; }
+
+        comp_size = ZSTD_compress(
+                frame_buf + sizeof(unsigned int), max_comp,
+                payload, payload_size, zstd_level);
+        free(payload);
+
+        if (ZSTD_isError(comp_size))
+        {
+            fprintf(stderr, "pzp: zstd error: %s\n", ZSTD_getErrorName(comp_size));
+            free(frame_buf);
+            return NULL;
+        }
+        memcpy(frame_buf, &payload_size, sizeof(unsigned int));
     }
 
-    memcpy(frame_buf, &payload_size, sizeof(unsigned int));
     *out_size = sizeof(unsigned int) + comp_size;
 
     #if PZP_VERBOSE
@@ -1173,6 +1212,131 @@ static void pzp_prefix_sum_avx2_2ch(unsigned char *src, unsigned char *dst, unsi
 }
 
 
+/*
+ * pzp_deinterleave_3ch
+ *
+ * Split n_pixels interleaved RGB bytes (src) into three separate planar
+ * buffers ch0/ch1/ch2, each of length n_pixels.
+ *
+ * SSSE3 path: 16 pixels (48 bytes) per iteration using _mm_shuffle_epi8.
+ * Three source chunks a/b/c each cover 16 bytes of the 48-byte input:
+ *   a = src[0..15]:  R0 G0 B0 R1 G1 B1 R2 G2 B2 R3 G3 B3 R4 G4 B4 R5
+ *   b = src[16..31]: G5 B5 R6 G6 B6 R7 G7 B7 R8 G8 B8 R9 G9 B9 R10 G10
+ *   c = src[32..47]: B10 R11 G11 B11 R12 G12 B12 R13 G13 B13 R14 G14 B14 R15 G15 B15
+ * Masks place each channel's bytes into the correct output positions (0x80 zeroes
+ * unused slots); the three OR'd shuffles produce one 16-byte channel result.
+ */
+static void pzp_deinterleave_3ch(
+    const unsigned char *src,
+    unsigned char *ch0, unsigned char *ch1, unsigned char *ch2,
+    unsigned int n_pixels)
+{
+    /* ch0 (R): a→R[0..5] at out[0..5], b→R[6..10] at out[6..10], c→R[11..15] at out[11..15] */
+    const __m128i shuf_r_a = _mm_setr_epi8( 0,  3,  6,  9, 12, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+    const __m128i shuf_r_b = _mm_setr_epi8(-1, -1, -1, -1, -1, -1,  2,  5,  8, 11, 14, -1, -1, -1, -1, -1);
+    const __m128i shuf_r_c = _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  1,  4,  7, 10, 13);
+
+    /* ch1 (G): a→G[0..4] at out[0..4], b→G[5..10] at out[5..10], c→G[11..15] at out[11..15] */
+    const __m128i shuf_g_a = _mm_setr_epi8( 1,  4,  7, 10, 13, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+    const __m128i shuf_g_b = _mm_setr_epi8(-1, -1, -1, -1, -1,  0,  3,  6,  9, 12, 15, -1, -1, -1, -1, -1);
+    const __m128i shuf_g_c = _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  2,  5,  8, 11, 14);
+
+    /* ch2 (B): a→B[0..4] at out[0..4], b→B[5..9] at out[5..9], c→B[10..15] at out[10..15] */
+    const __m128i shuf_b_a = _mm_setr_epi8( 2,  5,  8, 11, 14, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+    const __m128i shuf_b_b = _mm_setr_epi8(-1, -1, -1, -1, -1,  1,  4,  7, 10, 13, -1, -1, -1, -1, -1, -1);
+    const __m128i shuf_b_c = _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  0,  3,  6,  9, 12, 15);
+
+    unsigned int i = 0;
+    for (; i + 15 < n_pixels; i += 16, src += 48)
+    {
+        __m128i a = _mm_loadu_si128((const __m128i *)(src +  0));
+        __m128i b = _mm_loadu_si128((const __m128i *)(src + 16));
+        __m128i c = _mm_loadu_si128((const __m128i *)(src + 32));
+
+        _mm_storeu_si128((__m128i *)(ch0 + i),
+            _mm_or_si128(_mm_shuffle_epi8(a, shuf_r_a),
+            _mm_or_si128(_mm_shuffle_epi8(b, shuf_r_b),
+                         _mm_shuffle_epi8(c, shuf_r_c))));
+        _mm_storeu_si128((__m128i *)(ch1 + i),
+            _mm_or_si128(_mm_shuffle_epi8(a, shuf_g_a),
+            _mm_or_si128(_mm_shuffle_epi8(b, shuf_g_b),
+                         _mm_shuffle_epi8(c, shuf_g_c))));
+        _mm_storeu_si128((__m128i *)(ch2 + i),
+            _mm_or_si128(_mm_shuffle_epi8(a, shuf_b_a),
+            _mm_or_si128(_mm_shuffle_epi8(b, shuf_b_b),
+                         _mm_shuffle_epi8(c, shuf_b_c))));
+    }
+    /* scalar tail */
+    for (; i < n_pixels; ++i, src += 3)
+    {
+        ch0[i] = src[0];
+        ch1[i] = src[1];
+        ch2[i] = src[2];
+    }
+}
+
+/*
+ * pzp_interleave_3ch
+ *
+ * Inverse of pzp_deinterleave_3ch: merge three planar channel buffers
+ * ch0/ch1/ch2 (each n_pixels bytes) back into interleaved RGB dst.
+ *
+ * For each 16-pixel block the three 16-byte channel vectors r/g/b are
+ * scattered into three 16-byte output chunks (out_a, out_b, out_c = 48 bytes):
+ *   out_a = [R0 G0 B0 R1 G1 B1 R2 G2 B2 R3 G3 B3 R4 G4 B4 R5]
+ *   out_b = [G5 B5 R6 G6 B6 R7 G7 B7 R8 G8 B8 R9 G9 B9 R10 G10]
+ *   out_c = [B10 R11 G11 B11 R12 G12 B12 R13 G13 B13 R14 G14 B14 R15 G15 B15]
+ */
+static void pzp_interleave_3ch(
+    const unsigned char *ch0, const unsigned char *ch1, const unsigned char *ch2,
+    unsigned char *dst,
+    unsigned int n_pixels)
+{
+    /* out_a: R at {0,3,6,9,12,15}, G at {1,4,7,10,13}, B at {2,5,8,11,14} */
+    const __m128i shuf_a_r = _mm_setr_epi8( 0, -1, -1,  1, -1, -1,  2, -1, -1,  3, -1, -1,  4, -1, -1,  5);
+    const __m128i shuf_a_g = _mm_setr_epi8(-1,  0, -1, -1,  1, -1, -1,  2, -1, -1,  3, -1, -1,  4, -1, -1);
+    const __m128i shuf_a_b = _mm_setr_epi8(-1, -1,  0, -1, -1,  1, -1, -1,  2, -1, -1,  3, -1, -1,  4, -1);
+
+    /* out_b: G at {0,3,6,9,12,15}, B at {1,4,7,10,13}, R at {2,5,8,11,14} */
+    const __m128i shuf_b_g = _mm_setr_epi8( 5, -1, -1,  6, -1, -1,  7, -1, -1,  8, -1, -1,  9, -1, -1, 10);
+    const __m128i shuf_b_b = _mm_setr_epi8(-1,  5, -1, -1,  6, -1, -1,  7, -1, -1,  8, -1, -1,  9, -1, -1);
+    const __m128i shuf_b_r = _mm_setr_epi8(-1, -1,  6, -1, -1,  7, -1, -1,  8, -1, -1,  9, -1, -1, 10, -1);
+
+    /* out_c: B at {0,3,6,9,12,15}, R at {1,4,7,10,13}, G at {2,5,8,11,14} */
+    const __m128i shuf_c_b = _mm_setr_epi8(10, -1, -1, 11, -1, -1, 12, -1, -1, 13, -1, -1, 14, -1, -1, 15);
+    const __m128i shuf_c_r = _mm_setr_epi8(-1, 11, -1, -1, 12, -1, -1, 13, -1, -1, 14, -1, -1, 15, -1, -1);
+    const __m128i shuf_c_g = _mm_setr_epi8(-1, -1, 11, -1, -1, 12, -1, -1, 13, -1, -1, 14, -1, -1, 15, -1);
+
+    unsigned int i = 0;
+    for (; i + 15 < n_pixels; i += 16, dst += 48)
+    {
+        __m128i r = _mm_loadu_si128((const __m128i *)(ch0 + i));
+        __m128i g = _mm_loadu_si128((const __m128i *)(ch1 + i));
+        __m128i b = _mm_loadu_si128((const __m128i *)(ch2 + i));
+
+        _mm_storeu_si128((__m128i *)(dst +  0),
+            _mm_or_si128(_mm_shuffle_epi8(r, shuf_a_r),
+            _mm_or_si128(_mm_shuffle_epi8(g, shuf_a_g),
+                         _mm_shuffle_epi8(b, shuf_a_b))));
+        _mm_storeu_si128((__m128i *)(dst + 16),
+            _mm_or_si128(_mm_shuffle_epi8(g, shuf_b_g),
+            _mm_or_si128(_mm_shuffle_epi8(b, shuf_b_b),
+                         _mm_shuffle_epi8(r, shuf_b_r))));
+        _mm_storeu_si128((__m128i *)(dst + 32),
+            _mm_or_si128(_mm_shuffle_epi8(b, shuf_c_b),
+            _mm_or_si128(_mm_shuffle_epi8(r, shuf_c_r),
+                         _mm_shuffle_epi8(g, shuf_c_g))));
+    }
+    /* scalar tail */
+    for (; i < n_pixels; ++i, dst += 3)
+    {
+        dst[0] = ch0[i];
+        dst[1] = ch1[i];
+        dst[2] = ch2[i];
+    }
+}
+
+
 static void pzp_extractAndReconstruct_AVX2(unsigned char *decompressed_bytes, unsigned char *reconstructed, unsigned int width, unsigned int height, unsigned int channels, int restoreRLEChannels)
 {
     unsigned int total_size = width * height;
@@ -1192,14 +1356,29 @@ static void pzp_extractAndReconstruct_AVX2(unsigned char *decompressed_bytes, un
                 break;
             }
             case 3: {
-                // Scalar prefix sum for 3-channel interleaved data.
-                r[0] = src[0]; r[1] = src[1]; r[2] = src[2];
-                for (unsigned int i = 1; i < total_size; ++i)
-                {
-                    r[i*3]   = src[i*3]   + r[(i-1)*3];
-                    r[i*3+1] = src[i*3+1] + r[(i-1)*3+1];
-                    r[i*3+2] = src[i*3+2] + r[(i-1)*3+2];
+                // De-interleave via SSSE3 shuffle (16 px/iter), run AVX2 prefix
+                // sum on each planar buffer, then re-interleave via SSSE3 shuffle.
+                // Replaces the previous scalar stride-3 loops (~6.66B instructions
+                // callgrind hotspot) with ~16× faster SIMD scatter/gather.
+                unsigned char *ch0 = (unsigned char *)malloc(total_size);
+                unsigned char *ch1 = (unsigned char *)malloc(total_size);
+                unsigned char *ch2 = (unsigned char *)malloc(total_size);
+                if (ch0 && ch1 && ch2) {
+                    pzp_deinterleave_3ch(src, ch0, ch1, ch2, total_size);
+                    pzp_prefix_sum_avx2(ch0, ch0, total_size);
+                    pzp_prefix_sum_avx2(ch1, ch1, total_size);
+                    pzp_prefix_sum_avx2(ch2, ch2, total_size);
+                    pzp_interleave_3ch(ch0, ch1, ch2, r, total_size);
+                } else {
+                    // OOM fallback: scalar
+                    r[0] = src[0]; r[1] = src[1]; r[2] = src[2];
+                    for (unsigned int i = 1; i < total_size; ++i) {
+                        r[i*3]   = src[i*3]   + r[(i-1)*3];
+                        r[i*3+1] = src[i*3+1] + r[(i-1)*3+1];
+                        r[i*3+2] = src[i*3+2] + r[(i-1)*3+2];
+                    }
                 }
+                free(ch0); free(ch1); free(ch2);
                 break;
             }
             default: {
@@ -1621,9 +1800,12 @@ static unsigned char* pzp_decompress_combined_from_memory(
     /* ── Legacy inner-frame format ──────────────────────────────────────── */
     const unsigned char *input_ptr = (const unsigned char *)file_data;
 
-    // Read stored size
-    unsigned int dataSize;
-    memcpy(&dataSize, input_ptr, sizeof(unsigned int));
+    // Read stored size prefix (bit 31 = codec: 0=ZSTD, 1=LZ4; bits 0-30 = uncompressed size)
+    unsigned int size_prefix;
+    memcpy(&size_prefix, input_ptr, sizeof(unsigned int));
+
+    int codec_is_lz4 = (size_prefix & PZP_CODEC_LZ4_FLAG) != 0;
+    unsigned int dataSize = size_prefix & PZP_CODEC_SIZE_MASK;
 
     if (dataSize == 0 || dataSize > 100000000)
     { // sanity check
@@ -1641,15 +1823,32 @@ static unsigned char* pzp_decompress_combined_from_memory(
         return 0;
     }
 
-    pzp_thread_init();  // no-op if already initialised
-    size_t actual_decompressed_size = _pzp_zstd_dctx
-        ? ZSTD_decompressDCtx(_pzp_zstd_dctx, decompressed_buffer, decompressed_size, compressed_buffer, compressed_size)
-        : ZSTD_decompress(decompressed_buffer, decompressed_size, compressed_buffer, compressed_size);
-    if (ZSTD_isError(actual_decompressed_size))
+    size_t actual_decompressed_size;
+    if (codec_is_lz4)
     {
-        free(decompressed_buffer);
-        fprintf(stderr, "Zstd decompression error: %s\n", ZSTD_getErrorName(actual_decompressed_size));
-        return 0;
+        int lz4_result = LZ4_decompress_safe(
+                (const char *)compressed_buffer, (char *)decompressed_buffer,
+                (int)compressed_size, (int)decompressed_size);
+        if (lz4_result < 0)
+        {
+            free(decompressed_buffer);
+            fprintf(stderr, "LZ4 decompression error: %d\n", lz4_result);
+            return 0;
+        }
+        actual_decompressed_size = (size_t)lz4_result;
+    }
+    else
+    {
+        pzp_thread_init();  // no-op if already initialised
+        actual_decompressed_size = _pzp_zstd_dctx
+            ? ZSTD_decompressDCtx(_pzp_zstd_dctx, decompressed_buffer, decompressed_size, compressed_buffer, compressed_size)
+            : ZSTD_decompress(decompressed_buffer, decompressed_size, compressed_buffer, compressed_size);
+        if (ZSTD_isError(actual_decompressed_size))
+        {
+            free(decompressed_buffer);
+            fprintf(stderr, "Zstd decompression error: %s\n", ZSTD_getErrorName(actual_decompressed_size));
+            return 0;
+        }
     }
 
     if (actual_decompressed_size != decompressed_size)

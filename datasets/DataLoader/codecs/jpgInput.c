@@ -114,8 +114,6 @@ int ReadJPEGMem(unsigned char *buffer, unsigned int bufferSize, struct Image *pi
 
     struct jpeg_decompress_struct cinfo = {0};
     struct jpeg_error_mgr jerr = {0};
-    JSAMPROW row_pointer[1] = {0};
-    unsigned long location = 0;
 
     cinfo.err = jpeg_std_error(&jerr);
     jpeg_create_decompress(&cinfo);
@@ -134,32 +132,27 @@ int ReadJPEGMem(unsigned char *buffer, unsigned int bufferSize, struct Image *pi
 
     jpeg_start_decompress(&cinfo);
 
-    unsigned long img_size = cinfo.output_width * cinfo.output_height * cinfo.num_components;
-    pic->image_size = img_size;
+    unsigned long img_size = (unsigned long)cinfo.output_width * cinfo.output_height * cinfo.num_components;
+    pic->image_size  = img_size;
+    pic->channels    = cinfo.out_color_components;
+    pic->bitsperpixel = pic->channels * 8;
+
     unsigned char *raw_image = (unsigned char *)malloc(img_size);
-
-    if (raw_image != NULL) {
-        memset(raw_image, 0, img_size);
-
-        float get_channels = (float)img_size / (pic->width * pic->height);
-        pic->channels = cinfo.out_color_components;
-        pic->bitsperpixel = pic->channels * 8;
-
-        if (get_channels < (float) pic->channels)
+    if (raw_image != NULL)
+    {
+        // Build a row-pointer array that points directly into raw_image so
+        // libjpeg decodes straight into the destination — no per-row malloc,
+        // no per-row memcpy, and no memset of the output buffer.
+        const unsigned long row_stride = (unsigned long)cinfo.output_width * cinfo.num_components;
+        JSAMPARRAY rows = (JSAMPARRAY)malloc(cinfo.output_height * sizeof(JSAMPROW));
+        if (rows != NULL)
         {
-            fprintf(stderr, "ReadJPEGMem: Image buffer size mismatch for channels (got %0.2f expected %u) \n",get_channels,pic->channels);
-        }
-
-        row_pointer[0] = (unsigned char *)malloc(cinfo.output_width * cinfo.num_components);
-        if (row_pointer[0] != NULL)
-        {
+            for (JDIMENSION row = 0; row < cinfo.output_height; row++)
+                rows[row] = raw_image + row * row_stride;
             while (cinfo.output_scanline < cinfo.image_height)
-            {
-                jpeg_read_scanlines(&cinfo, row_pointer, 1);
-                memcpy(raw_image + location, row_pointer[0], cinfo.image_width * cinfo.num_components);
-                location += cinfo.image_width * cinfo.num_components;
-            }
-            free(row_pointer[0]);
+                jpeg_read_scanlines(&cinfo, rows + cinfo.output_scanline,
+                                    cinfo.image_height - cinfo.output_scanline);
+            free(rows);
         }
 
 #if READ_CREATES_A_NEW_PIXEL_BUFFER

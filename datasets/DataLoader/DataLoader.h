@@ -461,6 +461,20 @@ int db_map_sample_in_to_image(struct ImageDatabase * db,struct Image * picToMap,
 unsigned int db_resolve_sample_sourceID(struct ImageDatabase * db, SampleNumber sample);
 
 /**
+ * @brief Fill a caller-allocated buffer with DINOv2 descriptors for a batch of samples.
+ *        Respects the current shuffle order (uses db->indices[]).
+ *        When USE_DINOV2_FEATURES is 0 this function is a no-op.
+ * @param db          ImageDatabase handle.
+ * @param start       First batch index (inclusive).
+ * @param end         Last  batch index (exclusive).
+ * @param out_buffer  Pre-allocated float array of size (end-start) * DINOV2_FEATURES_LENGTH.
+ */
+void db_get_batch_descriptors(struct ImageDatabase *db,
+                               unsigned long start,
+                               unsigned long end,
+                               float *out_buffer);
+
+/**
  * @brief Function for testing the library (assuming you have the datasets in your local filesystem).
  * @return Returns an integer representing the test result.
  */

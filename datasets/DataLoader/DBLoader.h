@@ -78,6 +78,18 @@ struct DescriptionTokenBlacklist
   unsigned short * blackListedTokens;
 };
 
+/**
+ * @brief Maps source token IDs to replacement token IDs (synonym remapping).
+ *        fromTokens[i] is replaced by toTokens[i] in every sample's token list.
+ */
+struct TokenSynonymMap
+{
+  unsigned int   pairCount;
+  unsigned int   pairCapacity;
+  unsigned short *fromTokens;
+  unsigned short *toTokens;
+};
+
 
 /**
  * @brief Structure representing a pose database.
@@ -94,6 +106,7 @@ struct PoseDatabase
   struct Joint     * joint;
   struct Embeddings embeddings;
   struct DescriptionTokenBlacklist * tokenBlackList;
+  struct TokenSynonymMap           * tokenSynonymMap;
 };
 
 

@@ -106,8 +106,23 @@ void freeFileDescriptor(int fd)
 
 
 
-void resolvePathToRequestedFiles(const char * pathToCOCOImages, const char * pathToCOCODepthMaps, const char * pathToCOCOSegmentations, const char * thisFilename,
-                                 int limit,char* tmp,char * pathToRGBFile,int *rgbIsPZP, char * pathToDepthFile,int * depthIsPZP,char * pathToSegmentationFile, int * segIsPZP)
+void resolvePathToRequestedFiles(
+                                 const char * pathToCOCOImages,
+                                 const char * pathToCOCODepthMaps,
+                                 const char * pathToCOCOSegmentations,
+                                 const char * pathToCombinedMetaData,
+                                 const char * thisFilename,
+                                 int limit,
+                                 char* tmp,
+                                 char * pathToRGBFile,
+                                 int *rgbIsPZP,
+                                 char * pathToDepthFile,
+                                 int * depthIsPZP,
+                                 char * pathToSegmentationFile,
+                                 int * segIsPZP,
+                                 char * pathToCombinedMetaDataFile,
+                                 int * combinedIsPZP
+                                )
 {
   //Resolve RGB Input image path
   snprintf(pathToRGBFile,limit,"%.1023s/%.1023s",pathToCOCOImages,thisFilename);
@@ -141,7 +156,7 @@ void resolvePathToRequestedFiles(const char * pathToCOCOImages, const char * pat
                }
             }
 
-  //Resolve Segmentatioin File Input image path
+  //Resolve Segmentation File Input image path
   snprintf(tmp,limit/2,"%s",thisFilename);
             if (strlen(tmp)>4)
             {
@@ -159,6 +174,33 @@ void resolvePathToRequestedFiles(const char * pathToCOCOImages, const char * pat
                    { segmentFilePathFound = 0; }
                }
             }
+
+  //Resolve Combined Metadata (depth+segmentation multiplexed) file path.
+  //PZP takes priority; fallback to PNG.  If neither exists leave the path empty.
+  *combinedIsPZP = 0;
+  pathToCombinedMetaDataFile[0] = '\0';
+  if (pathToCombinedMetaData && strlen(pathToCombinedMetaData) > 0)
+  {
+      snprintf(tmp, limit/2, "%s", thisFilename);
+      if (strlen(tmp) > 4)
+      {
+          tmp[strlen(tmp)-4] = '\0'; // strip extension
+
+          snprintf(pathToCombinedMetaDataFile, limit, "%.1023s/%.1000s.pzp", pathToCombinedMetaData, tmp);
+          if (fileExists(pathToCombinedMetaDataFile))
+          {
+              *combinedIsPZP = 1;
+          }
+          else
+          {
+              snprintf(pathToCombinedMetaDataFile, limit, "%.1023s/%.1000s.png", pathToCombinedMetaData, tmp);
+              if (!fileExists(pathToCombinedMetaDataFile))
+              {
+                  pathToCombinedMetaDataFile[0] = '\0'; // not found
+              }
+          }
+      }
+  }
 
   return ;
 }
@@ -206,6 +248,7 @@ void preloadAllFiles(struct ImageDatabase * db)
     char rgbpath[2049]           = {0};
     char depthpath[2049]         = {0};
     char segmentationspath[2049] = {0};
+    char combinedmdatapath[2049] = {0};
     char tmp[2049]               = {0};
 
     fprintf(stderr,"Preloading %lu samples\n ",db->numberOfSamples);
@@ -240,21 +283,29 @@ void preloadAllFiles(struct ImageDatabase * db)
             const char * pathToCOCOImages        = db->dbSources->source[sourceID].pathToCOCOImages;
             const char * pathToCOCODepthMaps     = db->dbSources->source[sourceID].pathToCOCODepthMaps;
             const char * pathToCOCOSegmentations = db->dbSources->source[sourceID].pathToCOCOSegmentations;
+            const char * pathToCombinedMetadata  = db->dbSources->source[sourceID].pathToCombinedMetaData;
             const char * thisFilename            = db->pdb->sample[sampleNumber].imagePath;
 
 
             //Use the new loader if needed
-            int rgbIsPZP   = 0;
-            int depthIsPZP = 0;
-            int segIsPZP   = 0;
+            int rgbIsPZP      = 0;
+            int depthIsPZP    = 0;
+            int segIsPZP      = 0;
+            int combinedIsPZP = 0;
 
             //Resolve all paths..
             resolvePathToRequestedFiles(
                                         db->dbSources->source[sourceID].pathToCOCOImages,
                                         db->dbSources->source[sourceID].pathToCOCODepthMaps,
                                         db->dbSources->source[sourceID].pathToCOCOSegmentations,
+                                        db->dbSources->source[sourceID].pathToCombinedMetaData,
                                         db->pdb->sample[sampleNumber].imagePath,
-                                        2048,tmp,rgbpath,&rgbIsPZP,depthpath,&depthIsPZP,segmentationspath,&segIsPZP);
+                                        2048,tmp,
+                                        rgbpath,&rgbIsPZP,
+                                        depthpath,&depthIsPZP,
+                                        segmentationspath,&segIsPZP,
+                                        combinedmdatapath,&combinedIsPZP
+                                        );
 
 
             unsigned long hash = 0;
@@ -263,11 +314,19 @@ void preloadAllFiles(struct ImageDatabase * db)
             hash = hash_filename(rgbpath);
             cache_add(db->files,rgbpath,hash,&filenameSize,iteration%9 == 0);
             //------------------------------------------------
-            hash = hash_filename(depthpath);
-            cache_add(db->files,depthpath,hash,&filenameSize,0);
-            //------------------------------------------------
-            hash = hash_filename(segmentationspath);
-            cache_add(db->files,segmentationspath,hash,&filenameSize,0);
+            if (combinedmdatapath[0] != '\0')
+            {
+                hash = hash_filename(combinedmdatapath);
+                cache_add(db->files,combinedmdatapath,hash,&filenameSize,0);
+            }
+            else
+            {
+                hash = hash_filename(depthpath);
+                cache_add(db->files,depthpath,hash,&filenameSize,0);
+                //------------------------------------------------
+                hash = hash_filename(segmentationspath);
+                cache_add(db->files,segmentationspath,hash,&filenameSize,0);
+            }
            }
         }
 
@@ -366,6 +425,7 @@ void *workerThread(void * arg)
       char rgbpath[2049]               = {0};
       char depthpath[2049]             = {0};
       char segmentationspath[2049]     = {0};
+      char combinedmdatapath[2049]     = {0};
       char tmp[2049]                   = {0};
       unsigned long iteration          = 0;
       SampleNumber sampleNumber        = 0;
@@ -457,9 +517,10 @@ void *workerThread(void * arg)
 
 
             //Use the new loader if needed
-            int rgbIsPZP   = 0;
-            int depthIsPZP = 0;
-            int segIsPZP   = 0;
+            int rgbIsPZP      = 0;
+            int depthIsPZP    = 0;
+            int segIsPZP      = 0;
+            int combinedIsPZP = 0;
             int depthAndSegAreMultiplexed = 0;
 
             //Resolve all paths..
@@ -467,8 +528,13 @@ void *workerThread(void * arg)
                                         db->dbSources->source[sourceID].pathToCOCOImages,
                                         db->dbSources->source[sourceID].pathToCOCODepthMaps,
                                         db->dbSources->source[sourceID].pathToCOCOSegmentations,
+                                        db->dbSources->source[sourceID].pathToCombinedMetaData,
                                         pdb->sample[sampleNumber].imagePath,
-                                        2048,tmp,rgbpath,&rgbIsPZP,depthpath,&depthIsPZP,segmentationspath,&segIsPZP);
+                                        2048,tmp,
+                                        rgbpath,&rgbIsPZP,
+                                        depthpath,&depthIsPZP,
+                                        segmentationspath,&segIsPZP,
+                                        combinedmdatapath,&combinedIsPZP);
 
             float progress = 0.0;
             if (sampleEnd-sampleStart>0) { progress = 100.0 * ((float) (iteration-sampleStart) / (sampleEnd-sampleStart)); }
@@ -477,21 +543,22 @@ void *workerThread(void * arg)
 
 
             //###############################################################
-            //         New combined Depth and Segmentation loading...
+            //         Combined Depth and Segmentation loading
             //###############################################################
-            logThreadProgress(thisThreadNumber,1,"combined_depth_segmentation_loading");
-            char allFile[2048]={0};
-            char filenameNoExtension[1024]={0};
-            snprintf(filenameNoExtension,1024,"%s",db->pdb->sample[sampleNumber].imagePath);
-            filenameNoExtension[strlen(filenameNoExtension)-4]=0;
-            snprintf(allFile,2048,"%.1023s/%.1000s.pzp",db->dbSources->source[sourceID].pathToCombinedMetaData,filenameNoExtension);
-            if (!splitSegmentationAndDepthFromSingleFilePZP(allFile,&segment,&dpth))
-            { //Prioritize PZP, or fallback to .png
-             snprintf(allFile,2048,"%.1023s/%.1000s.png",db->dbSources->source[sourceID].pathToCombinedMetaData,filenameNoExtension);
-             splitSegmentationAndDepthFromSingleFilePNG(allFile,&segment,&dpth);
+            depthAndSegAreMultiplexed = (combinedmdatapath[0] != '\0');
+            if (depthAndSegAreMultiplexed)
+            {
+                logThreadProgress(thisThreadNumber,1,"combined_depth_segmentation_loading");
+                struct Image * combined = cachedReadImage(db->files, thisThreadNumber, combinedmdatapath,
+                                                          combinedIsPZP ? PZP_CODEC : PNG_CODEC);
+                if (combined && combined->pixels)
+                {
+                    if (combinedIsPZP) { combined->bitsperpixel = 8; } // PZP stores as 24-bit RGB; generic expects 8-bit flag
+                    splitSegmentationAndDepthFromSingleFileGeneric(combined, &segment, &dpth);
+                    // combined is consumed (destroyed) by splitSegmentationAndDepthFromSingleFileGeneric
+                }
+                logThreadProgress(thisThreadNumber,0,"combined_depth_segmentation_loading");
             }
-            depthAndSegAreMultiplexed = 1;
-            logThreadProgress(thisThreadNumber,0,"combined_depth_segmentation_loading");
             //###############################################################
             //###############################################################
 
@@ -529,7 +596,11 @@ void *workerThread(void * arg)
 
              RGBInputDescriptor     = signalPrefetchFile(rgbpath);
 
-             if (!depthAndSegAreMultiplexed)
+             if (depthAndSegAreMultiplexed)
+             {
+               DepthDescriptor = signalPrefetchFile(combinedmdatapath);
+             }
+             else
              {
                if ( (db->addDepthHeatmap) && (!eraseSample) && (DO_DEPTH) )
                  { DepthDescriptor        = signalPrefetchFile(depthpath); }
@@ -702,6 +773,34 @@ void *workerThread(void * arg)
                 {
                     //Burn up to 9 pixels on the camera sensor, for a 300x300 input frame this is 1/10000 corruption
                     burnedPixels(&augmentImage,rand()%MAXIMUM_BURNED_PIXELS, offsetX, offsetY);
+                }
+
+                if (eventOccurs(AUGMENTATION_CHANCE_PERCENT_COARSE_DROPOUT))
+                {
+                    coarseDropout(&augmentImage,
+                                  getRandomNumber(COARSE_DROPOUT_NUM_HOLES_MIN, COARSE_DROPOUT_NUM_HOLES_MAX),
+                                  COARSE_DROPOUT_MIN_SIZE, COARSE_DROPOUT_MAX_SIZE,
+                                  COARSE_DROPOUT_MIN_SIZE, COARSE_DROPOUT_MAX_SIZE,
+                                  offsetX, offsetY);
+                }
+
+                if (eventOccurs(AUGMENTATION_CHANCE_PERCENT_GAUSSIAN_BLUR))
+                {
+                    gaussianBlur(&augmentImage,
+                                 getRandomFloat(GAUSSIAN_BLUR_SIGMA_MIN, GAUSSIAN_BLUR_SIGMA_MAX),
+                                 offsetX, offsetY);
+                } else
+                if (eventOccurs(AUGMENTATION_CHANCE_PERCENT_DEFOCUS_BLUR))
+                {
+                    defocusBlur(&augmentImage,
+                                getRandomNumber(DEFOCUS_BLUR_RADIUS_MIN, DEFOCUS_BLUR_RADIUS_MAX),
+                                offsetX, offsetY);
+                } else
+                if (eventOccurs(AUGMENTATION_CHANCE_PERCENT_MOTION_BLUR))
+                {
+                    motionBlur(&augmentImage,
+                               getRandomNumber(MOTION_BLUR_LENGTH_MIN, MOTION_BLUR_LENGTH_MAX),
+                               offsetX, offsetY);
                 }
               } // Only do augmentations if enabled
 

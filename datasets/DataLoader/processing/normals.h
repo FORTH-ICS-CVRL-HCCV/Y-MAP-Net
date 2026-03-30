@@ -338,12 +338,11 @@ static void computeNormalsOnHeatmaps8Bit(signed char * heatmapPixels, unsigned i
                                          unsigned int depthMapSourceChannel,unsigned int normalOutputChannel,
                                          float *gradientX,float *gradientY, unsigned int borderX, unsigned int borderY)
 {
- //#if INTEL_OPTIMIZATIONS
- //  computeNormalsOnHeatmaps8Bit_AVX2(heatmapPixels,heatmapWidth,heatmapHeight,heatmapChannels,depthMapSourceChannel,normalOutputChannel,gradientX,gradientY);
- //This doesn't work yet
- //#else
+ #if INTEL_OPTIMIZATIONS
+   computeNormalsOnHeatmaps8Bit_AVX2(heatmapPixels,heatmapWidth,heatmapHeight,heatmapChannels,depthMapSourceChannel,normalOutputChannel,gradientX,gradientY,borderX,borderY);
+ #else
    computeNormalsOnHeatmaps8Bit_Simple(heatmapPixels,heatmapWidth,heatmapHeight,heatmapChannels,depthMapSourceChannel,normalOutputChannel,gradientX,gradientY,borderX,borderY);
- //#endif // INTEL_OPTIMIZATIONS
+ #endif // INTEL_OPTIMIZATIONS
 }
 
 

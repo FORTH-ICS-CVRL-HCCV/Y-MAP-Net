@@ -722,41 +722,47 @@ unsigned short * db_get_sample_description_tokens(struct ImageDatabase *db, unsi
 //----------------------------------------------------------------------------------------------------
 int db_get_descriptor_elements_number(struct ImageDatabase *db)
 {
+#if USE_DINOV2_FEATURES
     if (db!=0)
     {
         return DINOV2_FEATURES_LENGTH;
-        //return db->descriptorElementsNumber;
     }
+#endif
     return 0;
 }
 //----------------------------------------------------------------------------------------------------
 float * db_get_sample_descriptors(struct ImageDatabase *db, unsigned long sampleID)
 {
-    if (db!=0)
+    if (db==0)
     {
-        DatasetSourceID sourceID = db_resolve_sample_sourceID((void *) db,sampleID);
-        if (db->dbSources->source[sourceID].descriptorsAsADataset!=0)
-        {
-         //Important check to check if descriptors are loaded
-         if (sampleID < db->numberOfSamples)
-          {
-           SampleNumber sID = db->indices[sampleID];
-
-           if (db->pdb->sample[sID].descriptor!=0) { return db->pdb->sample[sID].descriptor; } else
-                                                   { fprintf(stderr,"Descriptor (sample number %lu) not allocated :(\n",sID); }
-          } else
-          {
-            fprintf(stderr,"Sample ID is out of range %lu/%lu \n",sampleID,db->numberOfSamples);
-          }
-        } else
-        {
-            fprintf(stderr,"Source %lu (%s.dinov2) did not load(?) \n",sourceID,db->dbSources->source[sourceID].pathToDBFile);
-        }
+        fprintf(stderr,"db_get_sample_descriptors(%lu): db is NULL\n",sampleID);
+        exit(1);
     }
 
-    fprintf(stderr,"db_get_sample_descriptors(%lu)=NULL\n",sampleID);
-    return emptyDescriptor;
-    //return NULL;
+    DatasetSourceID sourceID = db_resolve_sample_sourceID((void *) db,sampleID);
+
+    // No .dinov2 file for this source — not an inconsistency, return empty vector
+    if (db->dbSources->source[sourceID].descriptorsAsADataset==0)
+    {
+        return emptyDescriptor;
+    }
+
+    // Descriptor dataset IS loaded — any failure from here is an inconsistency
+    if (sampleID >= db->numberOfSamples)
+    {
+        fprintf(stderr,"db_get_sample_descriptors: sample ID %lu out of range (max %lu)\n",
+                sampleID, db->numberOfSamples);
+        exit(1);
+    }
+
+    SampleNumber sID = db->indices[sampleID];
+    if (db->pdb->sample[sID].descriptor==0)
+    {
+        fprintf(stderr,"db_get_sample_descriptors: descriptor for sample %lu not allocated\n",sID);
+        exit(1);
+    }
+
+    return db->pdb->sample[sID].descriptor;
 }
 //----------------------------------------------------------------------------------------------------
 
@@ -769,6 +775,33 @@ int db_get_description_embeddings_number(struct ImageDatabase *db, unsigned long
         return db->pdb->embeddings.D;
     }
     return 0;
+}
+//----------------------------------------------------------------------------------------------------
+void db_get_batch_descriptors(struct ImageDatabase *db,
+                               unsigned long start,
+                               unsigned long end,
+                               float *out_buffer)
+{
+#if USE_DINOV2_FEATURES
+    unsigned long n   = end - start;
+    unsigned long dim = DINOV2_FEATURES_LENGTH;
+
+    for (unsigned long i = 0; i < n; i++)
+    {
+        float *dst = out_buffer + i * dim;
+        SampleNumber sID = db->indices[start + i];
+        float *src = db->pdb->sample[sID].descriptor;
+
+        if (src != NULL)
+        {
+            memcpy(dst, src, dim * sizeof(float));
+        }
+        else
+        {
+            memset(dst, 0, dim * sizeof(float));
+        }
+    }
+#endif
 }
 //----------------------------------------------------------------------------------------------------
 float * db_get_sample_description_embeddings(struct ImageDatabase *db, unsigned long sampleID, int tokenID)
@@ -959,6 +992,113 @@ int db_compile_added_token_blacklist(struct ImageDatabase *db)
     }
  }
 return 0;
+}
+//----------------------------------------------------------------------------------------------------
+int db_allocate_token_synonym_map(struct ImageDatabase *db, unsigned int numberOfPairs)
+{
+  if (db!=0)
+  {
+    if (db->pdb!=0)
+    {
+      if (db->pdb->tokenSynonymMap==0)
+      {
+        db->pdb->tokenSynonymMap = (struct TokenSynonymMap *) malloc(sizeof(struct TokenSynonymMap));
+        if (db->pdb->tokenSynonymMap!=0)
+        {
+          memset(db->pdb->tokenSynonymMap,0,sizeof(struct TokenSynonymMap));
+        }
+      }
+
+      if (db->pdb->tokenSynonymMap!=0)
+      {
+        if (db->pdb->tokenSynonymMap->fromTokens!=0)
+        {
+          free(db->pdb->tokenSynonymMap->fromTokens);
+          db->pdb->tokenSynonymMap->fromTokens = 0;
+        }
+        if (db->pdb->tokenSynonymMap->toTokens!=0)
+        {
+          free(db->pdb->tokenSynonymMap->toTokens);
+          db->pdb->tokenSynonymMap->toTokens = 0;
+        }
+
+        db->pdb->tokenSynonymMap->fromTokens = (unsigned short *) malloc(numberOfPairs * sizeof(unsigned short));
+        db->pdb->tokenSynonymMap->toTokens   = (unsigned short *) malloc(numberOfPairs * sizeof(unsigned short));
+
+        if (db->pdb->tokenSynonymMap->fromTokens!=0 && db->pdb->tokenSynonymMap->toTokens!=0)
+        {
+          memset(db->pdb->tokenSynonymMap->fromTokens,0,numberOfPairs * sizeof(unsigned short));
+          memset(db->pdb->tokenSynonymMap->toTokens,  0,numberOfPairs * sizeof(unsigned short));
+          db->pdb->tokenSynonymMap->pairCapacity = numberOfPairs;
+          db->pdb->tokenSynonymMap->pairCount    = 0;
+          return 1;
+        }
+      }
+    }
+  }
+  return 0;
+}
+//----------------------------------------------------------------------------------------------------
+int db_add_token_synonym_pair(struct ImageDatabase *db, unsigned short fromToken, unsigned short toToken)
+{
+  if (db!=0)
+  {
+    if (db->pdb!=0)
+    {
+      struct TokenSynonymMap *sm = db->pdb->tokenSynonymMap;
+      if (sm!=0 && sm->fromTokens!=0 && sm->toTokens!=0)
+      {
+        if (sm->pairCount < sm->pairCapacity)
+        {
+          sm->fromTokens[sm->pairCount] = fromToken;
+          sm->toTokens[sm->pairCount]   = toToken;
+          sm->pairCount += 1;
+          return 1;
+        }
+      }
+    }
+  }
+  return 0;
+}
+//----------------------------------------------------------------------------------------------------
+int db_compile_token_synonym_map(struct ImageDatabase *db)
+{
+  if (db!=0)
+  {
+    if (db->pdb!=0)
+    {
+      struct TokenSynonymMap *sm = db->pdb->tokenSynonymMap;
+      if (sm!=0 && sm->fromTokens!=0 && sm->toTokens!=0 && sm->pairCount>0)
+      {
+        for (unsigned long sampleNumber=0; sampleNumber<db->numberOfSamples; sampleNumber++)
+        {
+          SampleNumber sID = sampleNumber;
+          unsigned short *tokens         = db->pdb->sample[sID].descriptionTokens;
+          int numberOfTokensForThisSample = db->pdb->sample[sID].numberOfTokens;
+
+          if (tokens!=0 && numberOfTokensForThisSample>0)
+          {
+            for (int tID=0; tID<numberOfTokensForThisSample; tID++)
+            {
+              if (tokens[tID]!=0)
+              {
+                for (unsigned int synID=0; synID<sm->pairCount; synID++)
+                {
+                  if (tokens[tID] == sm->fromTokens[synID])
+                  {
+                    tokens[tID] = sm->toTokens[synID];
+                    break; // only first matching synonym per token
+                  }
+                }
+              }
+            }
+          }
+        }
+        return 1;
+      }
+    }
+  }
+  return 0;
 }
 //---------------------------------------------------------------------
 //---------------------------------------------------------------------

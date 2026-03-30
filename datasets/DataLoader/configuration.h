@@ -223,6 +223,28 @@ hm  0       depth 16 bit
 //The chance of a sample having brightness_contrast augmentation in a uniform fashion
 #define AUGMENTATION_CHANCE_PERCENT_HORIZONTAL_FLIP 0.0
 
+//The chance of coarse dropout (random rectangular occlusion patches)
+#define AUGMENTATION_CHANCE_PERCENT_COARSE_DROPOUT 30.0
+#define COARSE_DROPOUT_NUM_HOLES_MIN 1
+#define COARSE_DROPOUT_NUM_HOLES_MAX 8
+#define COARSE_DROPOUT_MIN_SIZE 8
+#define COARSE_DROPOUT_MAX_SIZE 24
+
+//The chance of Gaussian blur (separable, sigma in [min, max])
+#define AUGMENTATION_CHANCE_PERCENT_GAUSSIAN_BLUR 20.0
+#define GAUSSIAN_BLUR_SIGMA_MIN 0.5f
+#define GAUSSIAN_BLUR_SIGMA_MAX 3.0f
+
+//The chance of defocus blur (flat disk kernel, radius in [min, max])
+#define AUGMENTATION_CHANCE_PERCENT_DEFOCUS_BLUR 15.0
+#define DEFOCUS_BLUR_RADIUS_MIN 1
+#define DEFOCUS_BLUR_RADIUS_MAX 5
+
+//The chance of motion blur (random-angle line kernel, length in [min, max])
+#define AUGMENTATION_CHANCE_PERCENT_MOTION_BLUR 15.0
+#define MOTION_BLUR_LENGTH_MIN 5
+#define MOTION_BLUR_LENGTH_MAX 15
+
 
 //Magnitude of augmentations happening
 //------------------------------------------------------

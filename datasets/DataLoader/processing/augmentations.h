@@ -967,6 +967,342 @@ static void denoisingDiffInputRGBFrameToOutput(
 }
 
 
+// ---------------------------------------------------------------------------
+// Shared in-place blur helper for uniform-weight kernels (defocus, motion).
+// Accepts a compact (dx, dy) tap list — only non-zero positions are visited.
+// All taps have equal weight; the inner loop sums raw bytes and multiplies
+// by inv_w once per output pixel.
+//
+// The image is split into two regions:
+//   Interior: pixels far enough from the edge that no tap can go out-of-bounds.
+//             Uses precomputed flat byte offsets from the center pointer —
+//             one load + one pointer-add per tap, no per-tap clamp or multiply.
+//   Border band: thin strips around the active region that do need clamping.
+//             Uses the original clamped loop on the small fraction of pixels
+//             that actually touch the image edge.
+// ---------------------------------------------------------------------------
+static void _applyBlurSparse(struct Image *image,
+                              const int *odx, const int *ody, int count,
+                              float inv_w,
+                              int sx, int sy, int ex, int ey)
+{
+    unsigned int W = image->width, H = image->height;
+    unsigned char *src = image->pixels;
+    unsigned char *dst = (unsigned char *)malloc(W * H * 3);
+    if (!dst) return;
+    memcpy(dst, src, W * H * 3);
+
+    // Precompute flat byte offsets and the max displacement in each axis.
+    // flat3[k] = (ody[k]*W + odx[k]) * 3 — used by the interior path to turn
+    // a tap lookup into a single pointer-add with no multiply.
+    int flat3[961];
+    int max_dy = 0, max_dx = 0;
+    for (int k = 0; k < count; ++k)
+    {
+        flat3[k] = (ody[k] * (int)W + odx[k]) * 3;
+        int adx = odx[k] < 0 ? -odx[k] : odx[k];
+        int ady = ody[k] < 0 ? -ody[k] : ody[k];
+        if (adx > max_dx) max_dx = adx;
+        if (ady > max_dy) max_dy = ady;
+    }
+
+    // Interior bounds: shrunk by the maximum tap displacement so that all
+    // tap accesses are guaranteed in-bounds — no clamping required.
+    int ix0 = sx + max_dx, iy0 = sy + max_dy;
+    int ix1 = ex - max_dx, iy1 = ey - max_dy;
+    if (ix1 < ix0) ix1 = ix0;
+    if (iy1 < iy0) iy1 = iy0;
+
+    // --- Interior fast path: no bounds checks, flat byte-offset taps ---
+    for (int y = iy0; y < iy1; ++y)
+    {
+        for (int x = ix0; x < ix1; ++x)
+        {
+            float accR = 0.0f, accG = 0.0f, accB = 0.0f;
+            const unsigned char *center = src + (y * W + x) * 3;
+            for (int k = 0; k < count; ++k)
+            {
+                const unsigned char *p = center + flat3[k];
+                accR += p[0];
+                accG += p[1];
+                accB += p[2];
+            }
+            unsigned char *dp = dst + (y * W + x) * 3;
+            dp[0] = (unsigned char)(accR * inv_w + 0.5f);
+            dp[1] = (unsigned char)(accG * inv_w + 0.5f);
+            dp[2] = (unsigned char)(accB * inv_w + 0.5f);
+        }
+    }
+
+    // --- Border path: full clamped loop for the thin edge strips ---
+    // Helper macro to process one pixel at (Y, X) with clamping.
+#define BLUR_PIXEL_CLAMPED(Y, X)                                                \
+    do {                                                                        \
+        float accR_ = 0.0f, accG_ = 0.0f, accB_ = 0.0f;                       \
+        for (int k_ = 0; k_ < count; ++k_)                                     \
+        {                                                                       \
+            int py_ = (Y) + ody[k_];                                           \
+            int px_ = (X) + odx[k_];                                           \
+            if (py_ < 0) py_ = 0; else if (py_ >= (int)H) py_ = (int)H - 1;  \
+            if (px_ < 0) px_ = 0; else if (px_ >= (int)W) px_ = (int)W - 1;  \
+            const unsigned char *p_ = src + (py_ * W + px_) * 3;              \
+            accR_ += p_[0]; accG_ += p_[1]; accB_ += p_[2];                   \
+        }                                                                       \
+        unsigned char *dp_ = dst + ((Y) * (int)W + (X)) * 3;                  \
+        dp_[0] = (unsigned char)(accR_ * inv_w + 0.5f);                        \
+        dp_[1] = (unsigned char)(accG_ * inv_w + 0.5f);                        \
+        dp_[2] = (unsigned char)(accB_ * inv_w + 0.5f);                        \
+    } while (0)
+
+    // Top strip
+    for (int y = sy;  y < iy0; ++y)
+        for (int x = sx; x < ex; ++x) BLUR_PIXEL_CLAMPED(y, x);
+    // Bottom strip
+    for (int y = iy1; y < ey;  ++y)
+        for (int x = sx; x < ex; ++x) BLUR_PIXEL_CLAMPED(y, x);
+    // Left column strip (middle rows)
+    for (int y = iy0; y < iy1; ++y)
+        for (int x = sx; x < ix0; ++x) BLUR_PIXEL_CLAMPED(y, x);
+    // Right column strip (middle rows)
+    for (int y = iy0; y < iy1; ++y)
+        for (int x = ix1; x < ex; ++x) BLUR_PIXEL_CLAMPED(y, x);
+
+#undef BLUR_PIXEL_CLAMPED
+
+    memcpy(src, dst, W * H * 3);
+    free(dst);
+}
+
+
+// ---------------------------------------------------------------------------
+// Gaussian blur (separable 1-D passes): sigma controls the blur radius.
+// kx/ky clamping is computed once per tap and applied to R, G, B together,
+// reducing the number of clamp operations by 3× vs. the per-channel loop.
+// sigma in [0.5, 15.0]; kernel half-width = ceil(3*sigma), max ±15 px.
+// ---------------------------------------------------------------------------
+static void gaussianBlur(struct Image *image, float sigma, float borderX, float borderY)
+{
+    if (sigma < 0.5f) return;
+
+    int half = (int)(3.0f * sigma + 0.5f);
+    if (half < 1)  half = 1;
+    if (half > 15) half = 15;
+    int ksize = 2 * half + 1;
+
+    float kernel[31];
+    float sum = 0.0f;
+    for (int i = 0; i < ksize; ++i)
+    {
+        float dx = (float)(i - half);
+        kernel[i] = expf(-0.5f * dx * dx / (sigma * sigma));
+        sum += kernel[i];
+    }
+    for (int i = 0; i < ksize; ++i) kernel[i] /= sum;
+
+    int sx = (int)borderX, sy = (int)borderY;
+    int ex = (int)image->width  - sx;
+    int ey = (int)image->height - sy;
+    if (sx < 0) sx = 0; if (sy < 0) sy = 0;
+    if (ex > (int)image->width)  ex = (int)image->width;
+    if (ey > (int)image->height) ey = (int)image->height;
+
+    unsigned int W = image->width, H = image->height;
+    unsigned char *tmp = (unsigned char *)malloc(W * H * 3);
+    if (!tmp) return;
+    memcpy(tmp, image->pixels, W * H * 3);
+
+    // Horizontal pass: src=image->pixels → dst=tmp
+    // Row pointer hoisted out of the x loop; kx clamped once per tap and
+    // applied to R/G/B together.
+    for (int y = sy; y < ey; ++y)
+    {
+        const unsigned char *row = image->pixels + (unsigned long)y * W * 3;
+        unsigned char       *dst_row = tmp        + (unsigned long)y * W * 3;
+        for (int x = sx; x < ex; ++x)
+        {
+            float accR = 0.0f, accG = 0.0f, accB = 0.0f;
+            for (int ki = 0; ki < ksize; ++ki)
+            {
+                int kx = x + (ki - half);
+                if (kx < 0) kx = 0; else if (kx >= (int)W) kx = (int)W - 1;
+                const unsigned char *p = row + kx * 3;
+                float w = kernel[ki];
+                accR += w * p[0];
+                accG += w * p[1];
+                accB += w * p[2];
+            }
+            unsigned char *tp = dst_row + x * 3;
+            tp[0] = (unsigned char)(accR + 0.5f);
+            tp[1] = (unsigned char)(accG + 0.5f);
+            tp[2] = (unsigned char)(accB + 0.5f);
+        }
+    }
+
+    // Vertical pass: src=tmp → dst=image->pixels
+    // For each tap, ky is clamped once; the row pointer `tmp + ky*W*3` is
+    // shared across all x values for that ki, so it is precomputed per-ki.
+    for (int y = sy; y < ey; ++y)
+    {
+        unsigned char *out_row = image->pixels + (unsigned long)y * W * 3;
+
+        // Build a per-tap row-pointer cache: tap_row[ki] = tmp + ky_clamped*W*3
+        const unsigned char *tap_row[31];
+        for (int ki = 0; ki < ksize; ++ki)
+        {
+            int ky = y + (ki - half);
+            if (ky < 0) ky = 0; else if (ky >= (int)H) ky = (int)H - 1;
+            tap_row[ki] = tmp + (unsigned long)ky * W * 3;
+        }
+
+        for (int x = sx; x < ex; ++x)
+        {
+            float accR = 0.0f, accG = 0.0f, accB = 0.0f;
+            for (int ki = 0; ki < ksize; ++ki)
+            {
+                const unsigned char *p = tap_row[ki] + x * 3;
+                float w = kernel[ki];
+                accR += w * p[0];
+                accG += w * p[1];
+                accB += w * p[2];
+            }
+            unsigned char *dp = out_row + x * 3;
+            dp[0] = (unsigned char)(accR + 0.5f);
+            dp[1] = (unsigned char)(accG + 0.5f);
+            dp[2] = (unsigned char)(accB + 0.5f);
+        }
+    }
+
+    free(tmp);
+}
+
+
+// ---------------------------------------------------------------------------
+// Defocus blur: simulates a lens out-of-focus by convolving with a flat
+// uniform disk of the given radius (pixels).  radius in [1, 15].
+// The disk mask is pre-expanded into a compact (dx, dy) offset list so the
+// inner loop iterates only the ~π*r² non-zero taps, not all (2r+1)² entries.
+// ---------------------------------------------------------------------------
+static void defocusBlur(struct Image *image, int radius, float borderX, float borderY)
+{
+    if (radius <= 0) return;
+    if (radius > 15) radius = 15;
+
+    // Compact disk tap list: at most π*15² ≈ 708 entries
+    int odx[961], ody[961];
+    int count = 0;
+    for (int ky = -radius; ky <= radius; ++ky)
+        for (int kx = -radius; kx <= radius; ++kx)
+            if (kx * kx + ky * ky <= radius * radius)
+            {
+                odx[count] = kx;
+                ody[count] = ky;
+                ++count;
+            }
+    if (count == 0) return;
+
+    int sx = (int)borderX, sy = (int)borderY;
+    int ex = (int)image->width  - sx;
+    int ey = (int)image->height - sy;
+    if (sx < 0) sx = 0; if (sy < 0) sy = 0;
+    if (ex > (int)image->width)  ex = (int)image->width;
+    if (ey > (int)image->height) ey = (int)image->height;
+
+    _applyBlurSparse(image, odx, ody, count, 1.0f / count, sx, sy, ex, ey);
+}
+
+
+// ---------------------------------------------------------------------------
+// Motion blur: convolves with a 1-D line kernel of the given length at a
+// random angle, simulating linear camera shake.
+// length in [3, 31] (enforced odd for a symmetric kernel center).
+// The line is pre-expanded into a compact (dx, dy) offset list (length entries
+// max) so the inner loop never visits the ~(length²-length) zero-filled cells
+// that the old dense 2-D kernel required.
+// ---------------------------------------------------------------------------
+static void motionBlur(struct Image *image, int length, float borderX, float borderY)
+{
+    if (length <= 1) return;
+    if (length > 31) length = 31;
+    if (length % 2 == 0) length += 1;
+
+    int half = length / 2;
+
+    float angle = getRandomFloat(0.0f, (float)PI);
+    float ca = cosf(angle);
+    float sa = sinf(angle);
+
+    // Walk -(half)..(half) steps along the direction vector, record tap offsets
+    int odx[31], ody[31];
+    int hits = 0;
+    for (int step = -half; step <= half; ++step)
+    {
+        int dx = (int)(ca * (float)step + 0.5f);
+        int dy = (int)(sa * (float)step + 0.5f);
+        // Deduplicate: if this (dx,dy) is already recorded, skip
+        int dup = 0;
+        for (int k = 0; k < hits; ++k)
+            if (odx[k] == dx && ody[k] == dy) { dup = 1; break; }
+        if (!dup) { odx[hits] = dx; ody[hits] = dy; ++hits; }
+    }
+    if (hits == 0) return;
+
+    int sx = (int)borderX, sy = (int)borderY;
+    int ex = (int)image->width  - sx;
+    int ey = (int)image->height - sy;
+    if (sx < 0) sx = 0; if (sy < 0) sy = 0;
+    if (ex > (int)image->width)  ex = (int)image->width;
+    if (ey > (int)image->height) ey = (int)image->height;
+
+    _applyBlurSparse(image, odx, ody, hits, 1.0f / hits, sx, sy, ex, ey);
+}
+
+
+// ---------------------------------------------------------------------------
+// Coarse dropout: zeroes-out numHoles random axis-aligned rectangles.
+// Each rectangle has width in [minW, maxW] and height in [minH, maxH].
+// Simulates occlusion and forces the model to use context beyond any one
+// region.
+// ---------------------------------------------------------------------------
+static void coarseDropout(struct Image *image,
+                           int numHoles, int minW, int maxW, int minH, int maxH,
+                           float borderX, float borderY)
+{
+    if (numHoles <= 0) return;
+
+    int sx = (int)borderX, sy = (int)borderY;
+    int ex = (int)image->width  - sx;
+    int ey = (int)image->height - sy;
+    if (sx < 0) sx = 0; if (sy < 0) sy = 0;
+    if (ex > (int)image->width)  ex = (int)image->width;
+    if (ey > (int)image->height) ey = (int)image->height;
+    if (ex <= sx || ey <= sy) return;
+
+    // Clamp hole dimensions to the active region size
+    if (maxW > ex - sx) maxW = ex - sx;
+    if (maxH > ey - sy) maxH = ey - sy;
+    if (minW > maxW) minW = maxW;
+    if (minH > maxH) minH = maxH;
+
+    unsigned int W = image->width, C = image->channels;
+
+    for (int h = 0; h < numHoles; ++h)
+    {
+        int rw = getRandomNumber(minW, maxW);
+        int rh = getRandomNumber(minH, maxH);
+
+        // Upper-left corner of the dropout rectangle
+        int x0 = getRandomNumber(sx, ex - rw);
+        int y0 = getRandomNumber(sy, ey - rh);
+        int x1 = x0 + rw;
+        int y1 = y0 + rh;
+
+        for (int y = y0; y < y1; ++y)
+            memset(image->pixels + (unsigned long)y * W * C + (unsigned long)x0 * C,
+                   0, (unsigned int)(x1 - x0) * C);
+    }
+}
+
+
 #ifdef __cplusplus
 }
 #endif

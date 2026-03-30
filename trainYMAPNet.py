@@ -616,7 +616,7 @@ if __name__ == '__main__':
                 for i in range(cfg["tokensOut"]):
                          #metrics["t%02u"%i] = keras.metrics.CosineSimilarity(name='cossim', dtype=ourDType, axis=1) #<- TODO: implement my own version at some point to fix float16 compat
                          metrics["t%02u"%i] = CosineSimilarityMetric(name='cossim', dtype=ourDType, axis=1) #<- TODO: implement my own version at some point to fix float16 compat
-               if cfg.get('outputDescriptors', False):
+                if cfg.get('outputDescriptors', False):
                          metrics['descriptors'] = CosineSimilarityMetric(name='desc_cossim', dtype=ourDType, axis=1)
 
                 # NOTE: 'accuracy' resolves to BinaryAccuracy for sigmoid outputs.

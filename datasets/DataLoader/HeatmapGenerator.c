@@ -451,6 +451,7 @@ void drawSingleLRHeatmapGaussian(
 
             x = (unsigned short)xF;
             y = (unsigned short)yF;
+            if (doLRFlip) { x = (unsigned short)(db->out8bit.width - (int)x); }
 
             // Gradient size selection
             int gradientSize                = gradientSizeDefault + db->pdb->joint[jID].jointDifficulty;

@@ -148,6 +148,13 @@ def _setup_ctypes(lib):
     lib.db_compile_added_token_blacklist.argtypes              = [vp]
     lib.db_compile_added_token_blacklist.restype               = i
 
+    lib.db_allocate_token_synonym_map.argtypes                 = [vp, ui]
+    lib.db_allocate_token_synonym_map.restype                  = i
+    lib.db_add_token_synonym_pair.argtypes                     = [vp, us, us]
+    lib.db_add_token_synonym_pair.restype                      = i
+    lib.db_compile_token_synonym_map.argtypes                  = [vp]
+    lib.db_compile_token_synonym_map.restype                   = i
+
     lib.db_count_description_tokens.argtypes                   = [vp, i]
     lib.db_count_description_tokens.restype                    = P(ul)
     lib.db_free_description_token_count.argtypes               = [vp]
@@ -157,6 +164,8 @@ def _setup_ctypes(lib):
 
     lib.db_get_sample_descriptors.argtypes                     = [vp, ul]
     lib.db_get_sample_descriptors.restype                      = P(f)
+    lib.db_get_batch_descriptors.argtypes                      = [vp, ul, ul, P(f)]
+    lib.db_get_batch_descriptors.restype                       = None
     lib.db_get_sample_description_tokens.argtypes              = [vp, ul]
     lib.db_get_sample_description_tokens.restype               = P(us)
     lib.db_get_sample_description_tokens_number.argtypes       = [vp, ul]
@@ -296,12 +305,25 @@ class DataLoader:
                  ignoreNoSkeletonSamples: int = 0, #0 means we want all samples
                  datasets = [["cocoTrain.db","../coco/cache/coco/train2017","../coco/cache/coco/depth_train2017", "../coco/cache/coco/segment_train2017"]],
                  vocabularyPath = "2d_pose_estimation/vocabulary.json",
+                 synonymPath = None,
                  elevatePriority = False,
-                 libraryPath: str  = "./libDataLoader.so", 
+                 libraryPath: str  = "./libDataLoader.so",
                  forceLibUpdate=False):
-        #Tokens 
+        #Tokens
         #---------------------------------------
         self.vocabulary         = loadJSON(vocabularyPath)
+        self.synonymPairs       = []
+        if synonymPath is not None:
+            rawPairs = loadJSON(synonymPath)
+            vocabByWord = {v: int(k) for k, v in self.vocabulary.items()}
+            for fromWord, toWord in rawPairs:
+                fromID = vocabByWord.get(fromWord)
+                toID   = vocabByWord.get(toWord)
+                if fromID is not None and toID is not None:
+                    self.synonymPairs.append((fromID, toID))
+                else:
+                    print("[synonym] skipping '%s'->'%s': not found in vocabulary" % (fromWord, toWord))
+            print("[synonym] loaded %u remapping pairs" % len(self.synonymPairs))
         self.tokenblacklist     = ["(", ")", ",", ".", "a", "an", 's', 'hu', 'hy',  'w']
 
         stopwords = [ "of", "on", "and", "I", "in", "the", "is", "it", "at", "to", "with", "for", "from", "near", "while"]
@@ -419,6 +441,8 @@ class DataLoader:
 
         self.update_token_blacklist(self.tokenblacklistkeys,lowThreshold=0)
 
+        if self.synonymPairs:
+            self.apply_synonym_map(self.synonymPairs)
 
         self.numberOfSamples = self.libDataLoader.db_get_number_of_samples(self.db)
         print(bcolors.OKGREEN,"Created a database with ",self.numberOfSamples," samples ",bcolors.ENDC)
@@ -638,6 +662,12 @@ class DataLoader:
         return response
 
 
+    def apply_synonym_map(self, synonymPairs):
+        self.libDataLoader.db_allocate_token_synonym_map(self.db, len(synonymPairs))
+        for fromID, toID in synonymPairs:
+            self.libDataLoader.db_add_token_synonym_pair(self.db, fromID, toID)
+        return self.libDataLoader.db_compile_token_synonym_map(self.db)
+
     def get_low_count_tokens(self,threshold = 10):
         MAX_TOKEN_VALUE = self.get_max_token_value()
         print("MAX_TOKEN_VALUE ",MAX_TOKEN_VALUE)
@@ -713,18 +743,16 @@ class DataLoader:
 
 
     def get_partial_descriptor_array(self, startSample=0, endSample=0):
-        numberOfSamples  = endSample-startSample
-        NUMBER_OF_DESCRIPTOR_ELEMENTS  = self.get_descriptor_number_of_elements()
+        numberOfSamples               = endSample - startSample
+        NUMBER_OF_DESCRIPTOR_ELEMENTS = self.get_descriptor_number_of_elements()
 
-        #print(" NUMBER_OF_DESCRIPTOR_ELEMENTS ", NUMBER_OF_DESCRIPTOR_ELEMENTS, "    " )
-        descriptors = np.zeros((numberOfSamples,NUMBER_OF_DESCRIPTOR_ELEMENTS), dtype=np.float32) 
+        descriptors = np.zeros((numberOfSamples, NUMBER_OF_DESCRIPTOR_ELEMENTS), dtype=np.float32)
 
-        self.libDataLoader.db_get_sample_descriptors.argtypes = [ctypes.c_void_p,ctypes.c_ulong]
-        self.libDataLoader.db_get_sample_descriptors.restype  = POINTER(ctypes.c_float)        
-        for sID in range(numberOfSamples):
-            thisDescriptorList = self.libDataLoader.db_get_sample_descriptors(self.db,startSample+sID)
-            for descriptorID in range(NUMBER_OF_DESCRIPTOR_ELEMENTS):
-                descriptors[sID,descriptorID] = thisDescriptorList[descriptorID]
+        # When USE_DINOV2_FEATURES is disabled db_get_descriptor_elements_number returns 0,
+        # so the array stays empty and no C call is made.
+        if NUMBER_OF_DESCRIPTOR_ELEMENTS > 0:
+            ptr = descriptors.ctypes.data_as(POINTER(ctypes.c_float))
+            self.libDataLoader.db_get_batch_descriptors(self.db, startSample, endSample, ptr)
 
         return descriptors
 
