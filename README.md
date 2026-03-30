@@ -156,6 +156,20 @@ To use a different engine you need to invoke it in the following way :
 ./runYMAPNet.sh --engine onnx
 ```
 
+
+
+
+### COCO17 Evaluation
+
+To evaluate the model against COCO17 follow the following commands from the root directory of the project :
+```bash
+wget http://ammar.gr/ymapnet/archive/ymapnet_coco_validation_dataset.zip
+unzip ymapnet_coco_validation_dataset.zip
+python3 evaluateYMAPNet.py
+
+```
+
+
 ---
 
 ## Citation
