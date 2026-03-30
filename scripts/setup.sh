@@ -44,7 +44,7 @@ python3 -m pip install --upgrade pip
 
 if [ "$USE_VENV" -eq "0" ]; then
   echo "Setting up Colab packages"
-  python3 -m pip install tensorflow tensorflow-model-optimization tf_keras numpy numba tensorboard tensorboard-plugin-profile etils importlib_resources tf2onnx onnxruntime onnx opencv-python wget gradio
+  python3 -m pip install jax tensorflow tensorflow-model-optimization tf_keras numpy numba tensorboard tensorboard-plugin-profile etils importlib_resources tf2onnx onnxruntime onnx opencv-python wget gradio
 else
   echo "Setting up regular set of packages"
   #python3 -m pip install nvidia-cudnn-cu12 tensorflow==2.17.0 tensorflow-model-optimization tf_keras numpy numba tensorboard tensorboard-plugin-profile tf2onnx onnxruntime onnx opencv-python wget gradio
@@ -62,7 +62,6 @@ else
   #python3 -m pip install tf-nightly[and-cuda] tensorflow-model-optimization tf_keras numpy numba tensorboard tensorboard-plugin-profile etils importlib_resources tf2onnx onnxruntime onnx opencv-python wget gradio 
 
   #sudo apt install nvidia-cudnn-cu12 
-fi
 
 read -r -p "Set up JAX venv (venv_jax) for JAX/GPU inference? [y/N] " jax_reply
 if [[ "$jax_reply" =~ ^[Yy]$ ]]; then
@@ -91,6 +90,8 @@ EOF
   deactivate
   echo "venv_jax ready. Activate with: source venv_jax/bin/activate"
 fi
+
+fi #Non Collab case..
 
 if [ -d 2d_pose_estimation/ ]; then
   echo "Found model data."
