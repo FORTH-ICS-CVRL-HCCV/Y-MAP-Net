@@ -721,7 +721,8 @@ void *workerThread(void * arg)
               }
 
 
-              char doLRFlip = 0;
+              char doLRFlip  = 0;
+              int  doRotate90 = 0;  /* 0=none, 1=CW, 2=CCW */
 
               logThreadProgress(thisThreadNumber,1,"augmentations");
               //More augmentations after resizing input (so we need less calculations) and before generating heatmaps
@@ -773,6 +774,12 @@ void *workerThread(void * arg)
                 {
                     //Burn up to 9 pixels on the camera sensor, for a 300x300 input frame this is 1/10000 corruption
                     burnedPixels(&augmentImage,rand()%MAXIMUM_BURNED_PIXELS, offsetX, offsetY);
+                }
+
+                if ( (pdb->sample[sampleNumber].numberOfSkeletons > 0) && (eventOccurs(AUGMENTATION_CHANCE_PERCENT_ROTATE90)) )
+                {
+                    doRotate90 = (rng_next32() & 1) ? 1 : 2; /* 1=CW, 2=CCW */
+                    rotate90(&augmentImage, doRotate90 == 1, (unsigned int)offsetX, (unsigned int)offsetY);
                 }
 
                 if (eventOccurs(AUGMENTATION_CHANCE_PERCENT_COARSE_DROPOUT))
@@ -1055,6 +1062,54 @@ void *workerThread(void * arg)
                     {
                       signed short *out16Base = (signed short*)db->out16bit.pixels + (db->out16bit.width * db->out16bit.height * db->out16bit.channels * targetImageNumber);
                       flipImageHoriz_16bit(out16Base, db->out16bit.width, db->out16bit.height, db->out16bit.channels, offx, offy);
+                    }
+                }
+           //-----------------------------------------------------------
+
+           // Rotate all heatmaps to match the ±90° rotated input image
+           if (doRotate90 != 0)
+                {
+                 const int    cw   = (doRotate90 == 1);
+                 const unsigned int offx = (unsigned int)offsetX;
+                 const unsigned int offy = (unsigned int)offsetY;
+
+                 // Rotate 8-bit heatmaps (all channels: joints, PAFs, depth, normals, segmentation, …)
+                 unsigned char *out8Base = (unsigned char*)db->out8bit.pixels
+                                         + (db->out8bit.width * db->out8bit.height * db->out8bit.channels * targetImageNumber);
+                 rotate90_heatmap_8bit((signed char*)out8Base,
+                                       db->out8bit.width, db->out8bit.height, db->out8bit.channels,
+                                       cw, offx, offy);
+
+                 // Recompute normals from the now-rotated depth channel.
+                 // This is cleaner than a vector fixup and uses the same code path.
+                 // Border is 0 after rotation (rotate90 fills the entire frame).
+                 if (db->addNormalHeatmaps && DO_NORMALS)
+                    {
+                      computeNormalsOnHeatmaps8Bit((signed char*)out8Base,
+                                                   db->out8bit.width, db->out8bit.height, db->out8bit.channels,
+                                                   db->depthmapHeatmapIndex8Bit, db->normalsHeatmapIndex,
+                                                   ctx->gradientX, ctx->gradientY,
+                                                   0, 0);
+                    }
+
+                 // Rotate 16-bit heatmaps (depth) if present
+                 if (db->out16bit.pixels && db->out16bit.channels > 0)
+                    {
+                      signed short *out16Base = (signed short*)db->out16bit.pixels
+                                              + (db->out16bit.width * db->out16bit.height * db->out16bit.channels * targetImageNumber);
+                      rotate90_heatmap_16bit(out16Base,
+                                             db->out16bit.width, db->out16bit.height, db->out16bit.channels,
+                                             cw, offx, offy);
+                    }
+
+                 // The denoising channels (34-36) were written from db->in before this rotation
+                 // ran, so rotate90_heatmap_8bit just double-rotated them (and the diff version
+                 // would read the now-corrupt existing values as a baseline, producing garbage).
+                 // Fix: overwrite the entire frame (borderX=0, borderY=0 — rotation eliminated
+                 // all borders) with a plain copy of the correctly-rotated db->in pixels.
+                 if (ENABLE_DENOISING_OUTPUT && !eraseSample)
+                    {
+                      copyInputRGBFrameToOutput(&db->in, &db->out8bit, 0, 0, targetImageNumber, DENOISING_OUTPUT_HEATMAP_START);
                     }
                 }
            //-----------------------------------------------------------

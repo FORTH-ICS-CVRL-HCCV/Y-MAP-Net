@@ -723,9 +723,13 @@ unsigned short * db_get_sample_description_tokens(struct ImageDatabase *db, unsi
 int db_get_descriptor_elements_number(struct ImageDatabase *db)
 {
 #if USE_DINOV2_FEATURES
-    if (db!=0)
+    if (db != 0 && db->dbSources != 0)
     {
-        return DINOV2_FEATURES_LENGTH;
+        for (unsigned int i = 0; i < db->dbSources->numberOfSources; i++)
+        {
+            DescriptorDataset *ds = db->dbSources->source[i].descriptorsAsADataset;
+            if (ds != 0) { return ds->value_count; }
+        }
     }
 #endif
     return 0;
@@ -783,8 +787,19 @@ void db_get_batch_descriptors(struct ImageDatabase *db,
                                float *out_buffer)
 {
 #if USE_DINOV2_FEATURES
-    unsigned long n   = end - start;
-    unsigned long dim = DINOV2_FEATURES_LENGTH;
+    unsigned long n = end - start;
+
+    // Read the actual descriptor dimension from the first loaded dataset.
+    unsigned long dim = 0;
+    if (db != 0 && db->dbSources != 0)
+    {
+        for (unsigned int i = 0; i < db->dbSources->numberOfSources; i++)
+        {
+            DescriptorDataset *ds = db->dbSources->source[i].descriptorsAsADataset;
+            if (ds != 0) { dim = (unsigned long)ds->value_count; break; }
+        }
+    }
+    if (dim == 0) { return; }
 
     for (unsigned long i = 0; i < n; i++)
     {
@@ -793,13 +808,9 @@ void db_get_batch_descriptors(struct ImageDatabase *db,
         float *src = db->pdb->sample[sID].descriptor;
 
         if (src != NULL)
-        {
             memcpy(dst, src, dim * sizeof(float));
-        }
         else
-        {
             memset(dst, 0, dim * sizeof(float));
-        }
     }
 #endif
 }
@@ -1509,7 +1520,13 @@ int db_start_threads(struct ImageDatabase * db,
       {
         return 1;
       }
+      // threadpoolCreate failed — free the context we allocated above so we do
+      // not leak it.  db->numberOfThreads is also reset so a future retry of
+      // db_start_threads starts from a clean state.
       fprintf(stderr,RED "db_start_threads failed threadpoolCreate\n" NORMAL);
+      free(db->threadCtx);
+      db->threadCtx       = 0;
+      db->numberOfThreads = 0;
       return 0;
      } else
      {

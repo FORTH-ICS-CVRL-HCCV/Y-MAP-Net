@@ -665,6 +665,10 @@ class JAXExecutor():
                    payload = f.read()
                self._exported = _deserialize(payload)
 
+               # Check if the artifact was exported for a specific number of devices.
+               # nr_devices=0 means multi-device export, nr_devices=1 means single-device.
+               _nr_devices = getattr(self._exported, 'nr_devices', 1)
+
                # The artifact is pinned to 1 device at export time (devices=[:1]).
                # Put the input on a device that matches the platform the artifact
                # was compiled for (e.g. 'cpu' when exported with --stablehlo).
@@ -674,13 +678,22 @@ class JAXExecutor():
                    _device = jax.devices(_platform)[0]
                except RuntimeError:
                    _device = jax.local_devices()[0]
-               self._jit_fn = lambda x: self._exported.call(
-                                   jax.device_put(jnp.asarray(x, dtype=jnp.float32), _device))
+
+               # Wrap exported.call in jax.jit so JAX traces symbolically through
+               # _call_exported_lowering (JIT path) rather than _call_exported_impl
+               # (eager path).  The eager path in JAX 0.9+ checks that nr_devices in
+               # the artifact matches the current device count and raises ValueError
+               # when the artifact has nr_devices=0 (multi-device export) but only 1
+               # device is present.  The JIT lowering path has no such guard, so the
+               # artifact is re-lowered for the actual device topology at runtime.
+               _exported_call = jax.jit(self._exported.call)
+               self._jit_fn = lambda x: _exported_call(
+                   jax.device_put(jnp.asarray(x, dtype=jnp.float32), _device))
 
                W, H = self.input_size
                dummy = jnp.zeros([1, H, W, 3], dtype=jnp.float32)
                _ = self._jit_fn(dummy)
-               print(f'JAX: loaded {modelPath}  (StableHLO + jax2tf, platforms={list(_platforms)}, device={_device})')
+               print(f'JAX: loaded {modelPath}  (StableHLO + jax2tf, platforms={list(_platforms)}, device={_device}, nr_devices={_nr_devices})')
                print(f'JAX version: {jax.__version__}')
 #-----------------------------------------------------------------------------------------------------
   def _run(self, image_batch):

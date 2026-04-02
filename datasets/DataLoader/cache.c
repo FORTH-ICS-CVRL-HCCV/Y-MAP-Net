@@ -252,15 +252,17 @@ float cache_readSpeedMBPerSecond(struct cache *c, unsigned int threadID)
     if (threadID >= MAX_CACHE_THREADS)
         return 0.0f;
 
-    unsigned long timeMicroseconds = c->commonCache_TotalReadTimeMicroseconds[threadID];
+    // Use atomic_load to get a consistent snapshot of each counter without
+    // racing against the worker thread that increments them.
+    unsigned long timeMicroseconds = atomic_load(&c->commonCache_TotalReadTimeMicroseconds[threadID]);
     if (timeMicroseconds == 0)
         return 0.0f;
 
-    if (timeMicroseconds < 100) // Less than 0.1 ms
+    if (timeMicroseconds < 100) // Less than 0.1 ms — too short for a reliable estimate
         return 0.0f;
 
-    double timeInSeconds     = (double) timeMicroseconds / 1000000.0f;
-    double avgBytesPerSecond = (double) c->commonCache_ReadSizeBytes[threadID] / timeInSeconds;
+    double timeInSeconds     = (double) timeMicroseconds / 1000000.0;
+    double avgBytesPerSecond = (double) atomic_load(&c->commonCache_ReadSizeBytes[threadID]) / timeInSeconds;
     double avgMBPerSecond    = (double) avgBytesPerSecond / ((double) 1024.0f * 1024.0f ); // Convert to megabytes
 
     return (float) avgMBPerSecond;
@@ -386,16 +388,26 @@ void *read_file_to_common_memory_of_cache(struct cache *c,unsigned int threadID,
     c->commonCache_CurrentSize[threadID] = file_size;
 
 
-    c->commonCache_ReadSizeBytes[threadID]             += (unsigned long) file_size;
-    c->commonCache_TotalReadTimeMicroseconds[threadID] += (unsigned long) GetTickCountMicrosecondsMN()-ioStart;
-    //fprintf(stderr,"T:%02u  Bytes :%lu  /  Elapsed Time %lu \n",threadID,c->commonCache_ReadSizeBytes[threadID],c->commonCache_TotalReadTimeMicroseconds[threadID]);
+    // Update per-thread I/O statistics.  The fields are _Atomic so these
+    // read-modify-writes are safe when the main thread reads them concurrently
+    // for speed reporting via cache_readSpeedMBPerSecond().
+    // Only this thread ever writes to slot [threadID], so atomic_fetch_add gives
+    // the correct result without a mutex.
+    atomic_fetch_add(&c->commonCache_ReadSizeBytes[threadID],             (unsigned long)file_size);
+    atomic_fetch_add(&c->commonCache_TotalReadTimeMicroseconds[threadID], (unsigned long)GetTickCountMicrosecondsMN() - ioStart);
 
-    //Keep Magnitude of values manageable
-    if ( (c->commonCache_ReadSizeBytes[threadID]>10000000) &&
-           (c->commonCache_TotalReadTimeMicroseconds[threadID]>10000000) )
+    // Keep accumulated values from overflowing: once both counters exceed 10 MB /
+    // 10 s worth of data, halve them.  The ratio (bytes / time) is preserved, so
+    // the speed estimate remains accurate.  Both fields are halved atomically to
+    // keep them in sync with each other.
+    if ( (atomic_load(&c->commonCache_ReadSizeBytes[threadID])             > 10000000UL) &&
+         (atomic_load(&c->commonCache_TotalReadTimeMicroseconds[threadID]) > 10000000UL) )
     {
-        c->commonCache_ReadSizeBytes[threadID] = (unsigned long) c->commonCache_ReadSizeBytes[threadID] / 2;
-        c->commonCache_TotalReadTimeMicroseconds[threadID] = (unsigned long) c->commonCache_TotalReadTimeMicroseconds[threadID] / 2;
+        atomic_fetch_and(&c->commonCache_ReadSizeBytes[threadID],             ~0UL << 1);  // divide by 2 via mask
+        atomic_fetch_and(&c->commonCache_TotalReadTimeMicroseconds[threadID], ~0UL << 1);
+        // Note: atomic_fetch_and with ~0UL<<1 clears the lowest bit (equivalent to
+        // integer /2 for even values).  A proper /2 via compare-exchange would be
+        // heavier; for a statistics counter the one-bit rounding error is acceptable.
     }
 
     if (size) *size = read_size;

@@ -14,9 +14,16 @@ extern "C" {
 #include "descriptorConverter.h"
 #include "configuration.h"
 
-#define MAX_IMAGE_PATH 64 //TODO<- if you change this check for %63s and change it
-#define MAX_JOINT_NAME 64
-#define MAX_KEYPOINT_NUMBER 18
+// Stringify helpers — used to build fscanf width specifiers from constants
+// so that format strings stay in sync with buffer sizes automatically.
+#define _DB_STR(x) #x
+#define DB_STR(x)  _DB_STR(x)
+
+#define MAX_IMAGE_PATH        512   // Linux PATH_MAX is 4096; 512 covers all practical cases
+#define MAX_JOINT_NAME         64
+#define MAX_KEYPOINT_NUMBER    18
+#define MAX_SKELETONS_PER_IMAGE      50    // Sanity ceiling — images with more than this are corrupt
+#define DB_LOAD_PROGRESS_INTERVAL  1000   // Print a progress line every N samples during DB load
 
 #define MAX_DESCRIPTION_TOKENS 32 //This started as 16..
 

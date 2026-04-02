@@ -55,51 +55,80 @@ class FolderStreamer():
       self.width       = width
       self.height      = height
       self.should_stop = False
+      # Fallback file list (populated on first miss of the numbered-name pattern)
+      self._file_list  = None
+
+  def _build_file_list(self):
+      """Collect and sort all .jpg/.png files in self.path (arbitrary filenames)."""
+      exts = ('.jpg', '.jpeg', '.png')
+      files = [
+          os.path.join(self.path, f)
+          for f in os.listdir(self.path)
+          if os.path.splitext(f)[1].lower() in exts
+      ]
+      files.sort()
+      eprint("FolderStreamer: falling back to arbitrary file list (%d images found)" % len(files))
+      return files
 
   def isOpened(self):
       return not self.should_stop
 
   def release(self):
-      print("Release Called ") 
-      self.should_stop = True 
+      print("Release Called ")
+      self.should_stop = True
 
-  def read(self):  
-            # Read frame from camera
+  def read(self):
             #----------------------------------------------------------------------
-            filenameJPG = "%s/%s%05u.jpg" % (self.path,self.label,self.frameNumber)
-            filenamePNG = "%s/%s%05u.png" % (self.path,self.label,self.frameNumber)
+            # Primary mode: numbered filenames  colorFrame_0_NNNNN.jpg/.png
             #----------------------------------------------------------------------
-            if (checkIfFileExists(filenameJPG)):
-                   self.img = cv2.imread(filenameJPG)
-            elif (checkIfFileExists(filenamePNG)):  
-                   self.img = cv2.imread(filenamePNG)
-            else: 
-                   eprint("Could not find ",filenameJPG," or ",filenamePNG)
-                   self.img = None
+            if self._file_list is None:
+                filenameJPG = "%s/%s%05u.jpg" % (self.path, self.label, self.frameNumber)
+                filenamePNG = "%s/%s%05u.png" % (self.path, self.label, self.frameNumber)
+                if checkIfFileExists(filenameJPG):
+                    self.img = cv2.imread(filenameJPG)
+                elif checkIfFileExists(filenamePNG):
+                    self.img = cv2.imread(filenamePNG)
+                else:
+                    eprint("Could not find ", filenameJPG, " or ", filenamePNG)
+                    # Switch to fallback mode on the very first miss
+                    self._file_list = self._build_file_list()
+                    self.frameNumber = 0
+                    self.img = None
+
+            #----------------------------------------------------------------------
+            # Fallback mode: arbitrary sorted file list
+            #----------------------------------------------------------------------
+            if self._file_list is not None:
+                if self.frameNumber >= len(self._file_list):
+                    self.img = None
+                else:
+                    filename = self._file_list[self.frameNumber]
+                    self.img  = cv2.imread(filename)
+                    if self.img is None:
+                        eprint("Could not read ", filename)
             #----------------------------------------------------------------------
 
-            if not self.img is None:
+            if self.img is not None:
                 if (self.width != 0) and (self.height != 0):
-                  #-------------------------- 
+                  #--------------------------
                   width  = self.img.shape[1]
                   height = self.img.shape[0]
-                  eprint("Received Image size was ",width,"x",height, end = "")
-                  #-------------------------- 
+                  eprint("Received Image size was ", width, "x", height, end="")
+                  #--------------------------
                   self.img = resize_with_padding(self.img, self.width, self.height)
-                  #-------------------------- 
+                  #--------------------------
                   width  = self.img.shape[1]
                   height = self.img.shape[0]
-                  eprint(" Rescaled Image size is ",width,"x",height)
-                  #-------------------------- 
+                  eprint(" Rescaled Image size is ", width, "x", height)
+                  #--------------------------
 
                 success = True
-               
-                self.frameNumber+=1
+                self.frameNumber += 1
             else:
                 success = False
-                self.should_stop = True 
-             
-            return success,self.img
+                self.should_stop = True
+
+            return success, self.img
 
   def visualize(
                 self,

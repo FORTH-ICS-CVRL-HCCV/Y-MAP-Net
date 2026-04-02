@@ -23,6 +23,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdint.h>  // uint64_t — used by simplePowCodecs overflow check
+#include <limits.h>  // UINT_MAX  — used by simplePowCodecs overflow check
 
 #if USE_JPG_FILES
       #include "jpgInput.h"
@@ -94,16 +96,31 @@
 #define WHITE   "\033[37m"      /* White */
 
 
-unsigned int simplePowCodecs(unsigned int base,unsigned int exp)
+// Compute base^exp for small integer exponents used in codec calculations.
+// The arithmetic is done in uint64_t to detect overflow before truncating back
+// to unsigned int.  If the result would exceed UINT_MAX the function clamps to
+// UINT_MAX and prints a warning — callers should never actually reach this with
+// valid codec parameters, so clamping is a loud-but-safe fallback.
+unsigned int simplePowCodecs(unsigned int base, unsigned int exp)
 {
-    if (exp==0) return 1;
-    unsigned int retres=base;
-    unsigned int i=0;
-    for (i=0; i<exp-1; i++)
+    if (exp == 0) { return 1; }
+
+    uint64_t result = 1;
+    uint64_t b      = (uint64_t)base;
+
+    for (unsigned int i = 0; i < exp; i++)
     {
-        retres*=base;
+        // Check for overflow before multiplying: if result > UINT_MAX / b the
+        // next multiplication would wrap.  UINT_MAX / b is the safe upper bound.
+        if (b > 0 && result > (uint64_t)UINT_MAX / b)
+        {
+            fprintf(stderr, "simplePowCodecs: overflow computing %u^%u, clamping to UINT_MAX\n", base, exp);
+            return UINT_MAX;
+        }
+        result *= b;
     }
-    return retres;
+
+    return (unsigned int)result;
 }
 
 

@@ -1258,6 +1258,72 @@ static void motionBlur(struct Image *image, int length, float borderX, float bor
 
 
 // ---------------------------------------------------------------------------
+// rotate90: rotate the active image content (inside the black border) by
+// ±90 degrees and scale it to fill the entire W×H frame.
+//
+// Because the rotated content is stretched to cover the full image (including
+// where the border was), no black border is visible in the output regardless
+// of the original borderX/borderY values.  This prevents the network from
+// overfitting on the border position.
+//
+//   clockwise == 1  →  +90°   (CW)
+//   clockwise == 0  →  −90°   (CCW)
+// ---------------------------------------------------------------------------
+static void rotate90(struct Image *image, int clockwise,
+                     unsigned int offsetX, unsigned int offsetY)
+{
+    unsigned int W = image->width;
+    unsigned int H = image->height;
+    unsigned char *src = image->pixels;
+
+    // Active region (pixels inside the black border)
+    int sx = (int)offsetX;
+    int sy = (int)offsetY;
+    int ex = (int)W - sx;
+    int ey = (int)H - sy;
+    int iW = ex - sx;
+    int iH = ey - sy;
+    if (iW <= 0 || iH <= 0) return;
+
+    // ── Step 1: rotate inner region into a temporary iH × iW buffer ─────────
+    // After 90°: rotated width = iH, rotated height = iW
+    unsigned int rW = (unsigned int)iH;
+    unsigned int rH = (unsigned int)iW;
+    unsigned char *rot = (unsigned char *)malloc((size_t)rW * rH * 3);
+    if (!rot) return;
+
+    for (int y = 0; y < iH; ++y)
+        for (int x = 0; x < iW; ++x)
+        {
+            const unsigned char *sp = src + ((sy + y) * (int)W + (sx + x)) * 3;
+            unsigned char *dp;
+            if (clockwise)
+                // CW 90°: (x,y) → new_col = iH-1-y, new_row = x
+                dp = rot + ((unsigned int)x * rW + (unsigned int)(iH-1-y)) * 3;
+            else
+                // CCW 90°: (x,y) → new_col = y, new_row = iW-1-x
+                dp = rot + ((unsigned int)(iW-1-x) * rW + (unsigned int)y) * 3;
+            dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2];
+        }
+
+    // ── Step 2: scale rotated content (rW × rH) to fill full W × H ──────────
+    // Nearest-neighbour — fast, good enough for augmentation.
+    // Writing every pixel of src eliminates the border entirely.
+    for (unsigned int oy = 0; oy < H; ++oy)
+        for (unsigned int ox = 0; ox < W; ++ox)
+        {
+            unsigned int rx = (unsigned int)((float)ox * (float)rW / (float)W);
+            unsigned int ry = (unsigned int)((float)oy * (float)rH / (float)H);
+            if (rx >= rW) rx = rW - 1;
+            if (ry >= rH) ry = rH - 1;
+            const unsigned char *sp = rot + (ry * rW + rx) * 3;
+            unsigned char *dp = src + (oy * W + ox) * 3;
+            dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2];
+        }
+
+    free(rot);
+}
+// ---------------------------------------------------------------------------
 // Coarse dropout: zeroes-out numHoles random axis-aligned rectangles.
 // Each rectangle has width in [minW, maxW] and height in [minH, maxH].
 // Simulates occlusion and forces the model to use context beyond any one

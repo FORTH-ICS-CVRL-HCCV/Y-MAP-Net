@@ -195,9 +195,13 @@ hm  0       depth 16 bit
 #define ENABLE_LEFT_RIGHT_JOINT_DISAMBIGUATION_OUTPUT 1
 #define LEFT_RIGHT_JOINT_DISAMBIGUATION_HEATMAP_START (DENOISING_OUTPUT_HEATMAP_START+3) //+3 because noise affects R, G, and B
 
-//Dino V2 code..
-#define DINOV2_FEATURES_LENGTH 768
-#define USE_DINOV2_FEATURES 0 //DINO code is botched after half-upgrade to DINOv3
+// Dino descriptor code — dimension is read at runtime from the file header's
+// value_count field, so it works for any model (DINOv2=768, DINOv3 variants up
+// to 2560+).  MAX_DESCRIPTOR_LENGTH is only used for the static emptyDescriptor
+// fallback buffer; set it well above any expected model size.
+#define MAX_DESCRIPTOR_LENGTH 4096
+#define DINOV2_FEATURES_LENGTH MAX_DESCRIPTOR_LENGTH  // kept for any legacy references
+#define USE_DINOV2_FEATURES 0
 
 //Change of augmentations happening
 //------------------------------------------------------
@@ -222,6 +226,10 @@ hm  0       depth 16 bit
 
 //The chance of a sample having brightness_contrast augmentation in a uniform fashion
 #define AUGMENTATION_CHANCE_PERCENT_HORIZONTAL_FLIP 0.0
+
+//The chance of 90° rotation (CW or CCW chosen randomly per sample).
+//The rotated content fills the full frame so no black border is left visible.
+#define AUGMENTATION_CHANCE_PERCENT_ROTATE90 10.0
 
 //The chance of coarse dropout (random rectangular occlusion patches)
 #define AUGMENTATION_CHANCE_PERCENT_COARSE_DROPOUT 30.0

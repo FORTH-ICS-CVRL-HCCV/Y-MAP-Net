@@ -18,7 +18,7 @@ extern "C" {
 
 #include "descriptorConverter.h"
 
-static const char version[]="Heroic v0.94";
+static const char version[]="Heroic v0.96";
 
 //Make sure the DB files are created by a compatible version
 //of the python code..

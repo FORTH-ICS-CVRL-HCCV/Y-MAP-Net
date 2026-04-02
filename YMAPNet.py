@@ -307,6 +307,377 @@ def segment_and_label_persons(heatmap, threshold=180, min_area=1050, debug=False
 
     return labeled_map, bounding_boxes
 #----------------------------------------------------------------------------------------
+def draw_floor_normal_axes(image, floor_normal_result, scale=60, margin=14):
+    """
+    Draw an XYZ axis indicator showing the floor plane normal on *image* (in-place).
+
+    A small 3D-axis widget is rendered in the bottom-right corner:
+      • Red   arrow  →  X axis reference  (+X right in camera space)
+      • Green arrow  →  Y axis reference  (+Y up   in camera space)
+      • Blue  arrow  →  Z axis reference  (+Z into scene, shown foreshortened)
+      • White arrow  →  actual floor normal vector projected onto the same axes
+
+    The normal components also appear as a text legend beside the widget.
+
+    Parameters
+    ----------
+    image : np.ndarray  [H, W, 3]  BGR uint8 — modified in-place.
+    floor_normal_result : dict returned by compute_floor_plane_normal().
+    scale  : int  — arrow length in pixels for a unit-length vector.
+    margin : int  — gap from the image edge to the widget origin.
+    """
+    if floor_normal_result is None or floor_normal_result.get("normal") is None:
+        return image
+
+    H, W = image.shape[:2]
+    nx, ny, nz = floor_normal_result["normal"]
+    tilt        = floor_normal_result["tilt_deg"]
+    conf        = floor_normal_result["confidence"]
+    floor_px    = floor_normal_result.get("floor_pixels",   floor_normal_result.get("floor_pixel_count", 0))
+    ceil_px     = floor_normal_result.get("ceiling_pixels", 0)
+    wall_px     = floor_normal_result.get("wall_pixels",    0)
+    sources     = floor_normal_result.get("sources", ["floor"])
+
+    # ── widget origin (bottom-right corner) ──────────────────────────────────
+    ox = W - margin - scale - 5
+    oy = H - margin - scale - 5
+
+    # ── 3-D → 2-D projection (simple cabinet/oblique: X right, Y up, Z diagonal) ──
+    # Each unit 3-D vector maps to a 2-D displacement in pixel space.
+    def proj(vx, vy, vz):
+        px = int( vx * scale - vz * scale * 0.35)
+        py = int(-vy * scale + vz * scale * 0.35)   # Y up = negative pixel-Y
+        return px, py
+
+    axes = [
+        ((1, 0, 0), (0,   0, 255), "X"),   # red
+        ((0, 1, 0), (0, 255,   0), "Y"),   # green
+        ((0, 0, 1), (255,  0,   0), "B"),  # blue  (OpenCV BGR: blue = (255,0,0))
+    ]
+
+    font       = cv2.FONT_HERSHEY_SIMPLEX
+    fscale     = max(0.38, W / 1800)
+    thick      = max(1, int(fscale * 2))
+    tip_radius = max(3, int(scale * 0.08))
+
+    # Dark background panel for the widget
+    pad = 6
+    x0p, y0p = ox - scale - pad, oy - scale - pad
+    x1p, y1p = ox + scale + pad, oy + scale + pad + int(scale * 0.4)
+    cv2.rectangle(image, (max(0, x0p), max(0, y0p)),
+                         (min(W-1, x1p), min(H-1, y1p)), (20, 20, 20), -1)
+
+    # Reference axes
+    for (ax, ay, az), color, lbl in axes:
+        dx, dy = proj(ax, ay, az)
+        tip = (ox + dx, oy + dy)
+        cv2.arrowedLine(image, (ox, oy), tip, (0, 0, 0), thick + 2, cv2.LINE_AA, tipLength=0.25)
+        cv2.arrowedLine(image, (ox, oy), tip, color,     thick,     cv2.LINE_AA, tipLength=0.25)
+
+    # Floor normal vector (white with black outline)
+    ndx, ndy = proj(nx, ny, nz)
+    ntip = (ox + ndx, oy + ndy)
+    cv2.arrowedLine(image, (ox, oy), ntip, (0,   0,   0), thick + 3, cv2.LINE_AA, tipLength=0.30)
+    cv2.arrowedLine(image, (ox, oy), ntip, (255, 255, 255), thick + 1, cv2.LINE_AA, tipLength=0.30)
+
+    # Origin dot
+    cv2.circle(image, (ox, oy), tip_radius, (200, 200, 200), -1, cv2.LINE_AA)
+
+    # Text legend to the left of the widget
+    src_label = "+".join(sources) if sources else "none"
+    lines = [
+        (f"scene normal",           (200, 200, 200)),
+        (f"src: {src_label}",       (160, 160, 160)),
+        (f"X {nx:+.2f}",            (0,   0, 255)),
+        (f"Y {ny:+.2f}",            (0, 255,   0)),
+        (f"Z {nz:+.2f}",            (255, 50,  50)),
+        (f"tilt {tilt:.1f}\u00b0",  (200, 200, 200)),
+        (f"fl:{floor_px} cl:{ceil_px} wl:{wall_px}", (130, 130, 130)),
+    ]
+    lh   = int(fscale * 22)+20
+    tx   = max(4, x0p - int(fscale * 115))
+    ty0  = y0p + lh
+    for i, (txt, col) in enumerate(lines):
+        y = ty0 + i * lh
+        cv2.putText(image, txt, (tx,  y), font, fscale, (0, 0, 0), thick + 1, cv2.LINE_AA)
+        cv2.putText(image, txt, (tx,  y), font, fscale, col,        thick,     cv2.LINE_AA)
+
+    return image
+#----------------------------------------------------------------------------------------
+def compute_floor_plane_normal(normal_x, normal_y, normal_z, floor_mask,
+                                ceiling_mask=None, wall_mask=None,
+                                floor_threshold=30, ceiling_threshold=30, wall_threshold=30,
+                                min_pixels=50):
+    """
+    Estimate the scene gravity / world-up normal vector by fusing surface normals
+    from all available planar surfaces: floor, ceiling and walls.
+
+    Sign convention (all contributions are aligned to point in the +Y / world-up direction
+    before blending):
+      • Floor   normals are used as-is   — they already point upward (+Y).
+      • Ceiling normals are sign-flipped  — they point downward (-Y), so negating them
+                                            aligns them with the floor contribution.
+      • Wall    normals are used as-is   — they are roughly horizontal so their Y
+                                            component is small, but they still constrain
+                                            the X/Z orientation of the scene frame.
+
+    All three sources are weighted by their pixel count before averaging, so a large
+    visible floor dominates over a thin strip of ceiling, etc.
+
+    The normal maps are assumed to be stored in [0, 255] uint8/float range and are
+    remapped to [-1, 1] before averaging.  The result is a unit vector.
+
+    Parameters
+    ----------
+    normal_x, normal_y, normal_z : np.ndarray [H, W]
+        Surface normal component heatmaps (heatmapsOut[chanNormalX/Y/Z]).
+    floor_mask   : np.ndarray [H, W]   — Floor   segmentation heatmap (required).
+    ceiling_mask : np.ndarray [H, W]   — Ceiling segmentation heatmap (optional).
+    wall_mask    : np.ndarray [H, W]   — Wall    segmentation heatmap (optional).
+    floor_threshold / ceiling_threshold / wall_threshold : int
+        Minimum heatmap value to count a pixel as that surface type.
+    min_pixels : int
+        Minimum total contributing pixels across all sources.
+
+    Returns
+    -------
+    dict with keys:
+        normal          : (nx, ny, nz) unit-length tuple, or None if insufficient data
+        confidence      : float in [0, 1] — total contributing pixels / image area
+        floor_pixels    : int
+        ceiling_pixels  : int
+        wall_pixels     : int
+        tilt_deg        : float — angle between the estimated normal and world-up (0,1,0);
+                          0° = perfectly level camera
+        sources         : list[str] — which surfaces contributed ('floor','ceiling','wall')
+    """
+    H, W = floor_mask.shape
+
+    # ── binary masks ─────────────────────────────────────────────────────────
+    floor_bin   = (floor_mask > floor_threshold)
+    ceil_bin    = (ceiling_mask  > ceiling_threshold) if ceiling_mask  is not None else np.zeros((H, W), dtype=bool)
+    wall_bin    = (wall_mask     > wall_threshold)    if wall_mask     is not None else np.zeros((H, W), dtype=bool)
+
+    floor_px   = int(floor_bin.sum())
+    ceil_px    = int(ceil_bin.sum())
+    wall_px    = int(wall_bin.sum())
+    total_px   = floor_px + ceil_px + wall_px
+
+    if total_px < min_pixels:
+        return dict(normal=None, confidence=0.0,
+                    floor_pixels=floor_px, ceiling_pixels=ceil_px, wall_pixels=wall_px,
+                    tilt_deg=0.0, sources=[])
+
+    # ── remap [0, 255] → [-1, 1] ──────────────────────────────────────────────
+    nx = normal_x.astype(np.float32) / 127.5 - 1.0
+    ny = normal_y.astype(np.float32) / 127.5 - 1.0
+    nz = normal_z.astype(np.float32) / 127.5 - 1.0
+
+    # ── weighted sum of normals (pixel-count weights) ─────────────────────────
+    sum_nx = sum_ny = sum_nz = 0.0
+    sources = []
+
+    if floor_px > 0:
+        # Floor normals point upward — use as-is
+        sum_nx += float(nx[floor_bin].sum())
+        sum_ny += float(ny[floor_bin].sum())
+        sum_nz += float(nz[floor_bin].sum())
+        sources.append("floor")
+
+    if ceil_px > 0:
+        # Ceiling normals point downward — negate to align with world-up
+        sum_nx -= float(nx[ceil_bin].sum())
+        sum_ny -= float(ny[ceil_bin].sum())
+        sum_nz -= float(nz[ceil_bin].sum())
+        sources.append("ceiling")
+
+    if wall_px > 0:
+        # Wall normals are horizontal — they constrain X/Z but barely affect Y;
+        # included to improve scene-frame orientation when floor/ceiling are scarce.
+        sum_nx += float(nx[wall_bin].sum())
+        sum_ny += float(ny[wall_bin].sum())
+        sum_nz += float(nz[wall_bin].sum())
+        sources.append("wall")
+
+    avg_nx = sum_nx / total_px
+    avg_ny = sum_ny / total_px
+    avg_nz = sum_nz / total_px
+
+    # ── normalise to unit length ───────────────────────────────────────────────
+    length = (avg_nx**2 + avg_ny**2 + avg_nz**2) ** 0.5
+    if length < 1e-6:
+        return dict(normal=None, confidence=0.0,
+                    floor_pixels=floor_px, ceiling_pixels=ceil_px, wall_pixels=wall_px,
+                    tilt_deg=0.0, sources=sources)
+
+    unit = (avg_nx / length, avg_ny / length, avg_nz / length)
+
+    # ── tilt: angle between estimated normal and world-up (0, 1, 0) ──────────
+    dot_up   = abs(unit[1])
+    tilt_deg = float(np.degrees(np.arccos(np.clip(dot_up, 0.0, 1.0))))
+
+    confidence = total_px / float(H * W)
+
+    return dict(
+        normal         = unit,
+        confidence     = round(confidence, 4),
+        floor_pixels   = floor_px,
+        ceiling_pixels = ceil_px,
+        wall_pixels    = wall_px,
+        tilt_deg       = round(tilt_deg, 2),
+        sources        = sources,
+    )
+#----------------------------------------------------------------------------------------
+def detect_fallen_person(person_mask, normal_x, normal_y, normal_z, floor_mask,
+                          furniture_mask=None,
+                          person_threshold=30,
+                          floor_threshold=30,
+                          furniture_threshold=30,
+                          aspect_ratio_threshold=0.80,
+                          orientation_angle_threshold=35.0,
+                          floor_overlap_threshold=0.20,
+                          normal_horiz_threshold=0.45,
+                          furniture_overlap_threshold=0.25,
+                          min_bbox_area=400):
+    """
+    Heuristically determine whether the visible person has fallen.
+
+    Inputs (all 2-D numpy arrays of the same spatial resolution):
+        person_mask    -- Person segmentation heatmap  (heatmapsOut[chanPerson], uint8/float)
+        normal_x/y/z   -- Surface normal components    (heatmapsOut[chanNormalX/Y/Z], 0-255)
+        floor_mask     -- Floor segmentation heatmap   (heatmapsOut[chanFloor], uint8/float)
+        furniture_mask -- Furniture segmentation heatmap (heatmapsOut[chanFurniture], optional)
+                          When provided, high person/furniture overlap raises the
+                          'on_furniture' signal which can veto the fallen verdict
+                          (person is likely sleeping/resting on furniture, not fallen).
+
+    Thresholds (all keyword-overridable):
+        person_threshold        : min heatmap value to count as a person pixel
+        floor_threshold         : min heatmap value to count as a floor pixel
+        furniture_threshold     : min heatmap value to count as a furniture pixel
+        aspect_ratio_threshold  : bbox width/height above which the person is considered
+                                  horizontal  (1.0 = square, <1 = tall = standing)
+        orientation_angle_threshold : degrees from vertical of the blob's principal axis
+                                  above which the person is considered fallen  (0=upright, 90=flat)
+        floor_overlap_threshold : fraction of person pixels that must also be floor pixels
+                                  for the floor-contact signal to fire
+        normal_horiz_threshold  : fraction of person pixels whose surface normal is more
+                                  horizontal than vertical (high = person lying flat)
+        furniture_overlap_threshold : fraction of person pixels overlapping furniture above
+                                  which the person is considered on furniture (not fallen)
+        min_bbox_area           : minimum bounding-box area in heatmap pixels below which
+                                  the detection is ignored (person too small / distant)
+
+    Returns a dict with:
+        is_fallen           bool   -- overall verdict (majority vote of sub-signals)
+        aspect_ratio        float  -- bbox W/H  (>1 wide, <1 tall)
+        orientation_deg     float  -- degrees of long axis from vertical (90 = fully horizontal)
+        floor_overlap       float  -- fraction of person pixels on floor
+        normal_horiz_frac   float  -- fraction of person pixels with horizontal surface normal
+        furniture_overlap   float  -- fraction of person pixels on furniture (0 if no furniture mask)
+        centroid_y_frac     float  -- person centroid Y / image height  (1 = bottom of frame)
+        person_pixel_count  int    -- number of person pixels above threshold
+        signals             dict   -- individual boolean sub-signals that voted
+    """
+    H, W = person_mask.shape
+
+    # ── binary masks ──────────────────────────────────────────────────────────
+    p_bin  = (person_mask > person_threshold).astype(np.uint8)
+    fl_bin = (floor_mask  > floor_threshold ).astype(np.uint8)
+    fu_bin = (furniture_mask > furniture_threshold).astype(np.uint8) if furniture_mask is not None else None
+
+    person_pixel_count = int(p_bin.sum())
+    if person_pixel_count == 0:
+        return dict(is_fallen=False, aspect_ratio=0.0, orientation_deg=0.0,
+                    floor_overlap=0.0, normal_horiz_frac=0.0, furniture_overlap=0.0,
+                    centroid_y_frac=0.0, person_pixel_count=0, signals={})
+
+    # ── 1. bounding-box aspect ratio ──────────────────────────────────────────
+    ys, xs = np.where(p_bin)
+    x0, x1 = int(xs.min()), int(xs.max())
+    y0, y1 = int(ys.min()), int(ys.max())
+    bbox_w = float(x1 - x0 + 1)
+    bbox_h = float(y1 - y0 + 1)
+    bbox_area = bbox_w * bbox_h
+    if bbox_area < min_bbox_area:
+        return dict(is_fallen=False, aspect_ratio=round(bbox_w / max(bbox_h, 1.0), 3),
+                    orientation_deg=0.0, floor_overlap=0.0, normal_horiz_frac=0.0,
+                    furniture_overlap=0.0, centroid_y_frac=0.0,
+                    person_pixel_count=person_pixel_count,
+                    bbox_heatmap=(x0, y0, x1, y1), heatmap_size=(W, H), signals={})
+    aspect_ratio = bbox_w / max(bbox_h, 1.0)
+
+    # ── 2. principal-axis orientation via image moments ───────────────────────
+    #    mu20, mu02, mu11 give the covariance ellipse; theta is the long-axis angle.
+    M = cv2.moments(p_bin)
+    mu20 = M["mu20"]; mu02 = M["mu02"]; mu11 = M["mu11"]
+    # angle of principal axis from vertical, in [0, 90]
+    if (mu20 - mu02) == 0 and mu11 == 0:
+        orientation_deg = 0.0
+    else:
+        theta_rad = 0.5 * np.arctan2(2.0 * mu11, mu20 - mu02)  # from horizontal
+        orientation_deg = abs(np.degrees(theta_rad))            # 0=vertical, 90=horizontal
+
+    # centroid
+    cx = M["m10"] / max(M["m00"], 1)
+    cy = M["m01"] / max(M["m00"], 1)
+    centroid_y_frac = cy / H
+
+    # ── 3. floor overlap ──────────────────────────────────────────────────────
+    floor_overlap = float((p_bin & fl_bin).sum()) / person_pixel_count
+
+    # ── 3b. furniture overlap ─────────────────────────────────────────────────
+    #    High overlap means the person is likely on a bed/sofa (sleeping), not fallen.
+    if fu_bin is not None:
+        furniture_overlap = float((p_bin & fu_bin).sum()) / person_pixel_count
+    else:
+        furniture_overlap = 0.0
+
+    # ── 4. normal orientation within person region ────────────────────────────
+    #    Normals are stored 0-255; map to [-1, 1].
+    nx = normal_x.astype(np.float32) / 127.5 - 1.0
+    ny = normal_y.astype(np.float32) / 127.5 - 1.0
+    nz = normal_z.astype(np.float32) / 127.5 - 1.0
+
+    # Horizontal normal: |ny| dominates (world-up direction).
+    # For a standing person the body faces the camera (nz dominant);
+    # for a fallen person the body faces up like the floor (ny dominant).
+    p_idx = p_bin.astype(bool)
+    nx_p = nx[p_idx]; ny_p = ny[p_idx]; nz_p = nz[p_idx]
+    abs_ny = np.abs(ny_p)
+    abs_nz = np.abs(nz_p)
+    normal_horiz_frac = float((abs_ny > abs_nz).sum()) / person_pixel_count
+
+    # ── 5. majority vote ──────────────────────────────────────────────────────
+    on_furniture = furniture_overlap > furniture_overlap_threshold
+    signals = {
+        "wide_bbox":       aspect_ratio      > aspect_ratio_threshold,
+        "horizontal_axis": orientation_deg   > orientation_angle_threshold,
+        "on_floor":        floor_overlap     > floor_overlap_threshold,
+        "flat_normals":    normal_horiz_frac > normal_horiz_threshold,
+        "on_furniture":    on_furniture,   # informational — used as veto below
+    }
+    positive_votes = sum(v for k, v in signals.items() if k != "on_furniture")
+    # A person mostly overlapping furniture is more likely sleeping than fallen:
+    # require 3 of 4 positive signals to override the furniture veto, otherwise 2 suffice.
+    required_votes = 3 if on_furniture else 2
+    is_fallen = positive_votes >= required_votes
+
+    return dict(
+        is_fallen          = is_fallen,
+        aspect_ratio       = round(aspect_ratio,       3),
+        orientation_deg    = round(orientation_deg,    1),
+        floor_overlap      = round(floor_overlap,      3),
+        normal_horiz_frac  = round(normal_horiz_frac,  3),
+        furniture_overlap  = round(furniture_overlap,  3),
+        centroid_y_frac    = round(centroid_y_frac,    3),
+        person_pixel_count = person_pixel_count,
+        signals            = signals,
+        # Bounding box in heatmap pixel space + heatmap dimensions for caller scaling
+        bbox_heatmap       = (x0, y0, x1, y1),
+        heatmap_size       = (W, H),
+    )
+#----------------------------------------------------------------------------------------
 def reseed_ranomizer():
   import time
   t = int( time.time() * 1000.0 )
@@ -1241,6 +1612,9 @@ class YMAPNet:
         self.chanObject    = 37
         self.chanFurniture = 38
         self.chanAppliance = 39
+        self.chanFloor     = -1   # set from config below
+        self.chanCeiling   = -1
+        self.chanWall      = -1
 
         # "Programmable" heatmap IDs
         if "heatmaps" in self.cfg:
@@ -1271,6 +1645,10 @@ class YMAPNet:
           self.chanObject   = retrieveHeatmapIndex(self.cfg['heatmaps'],"Object")
           self.chanFurniture= retrieveHeatmapIndex(self.cfg['heatmaps'],"Furniture")
           self.chanAppliance= retrieveHeatmapIndex(self.cfg['heatmaps'],"Appliance")
+          self.chanFloor    = retrieveHeatmapIndex(self.cfg['heatmaps'],"Floor")
+          self.chanCeiling  = retrieveHeatmapIndex(self.cfg['heatmaps'],"Ceiling")
+          self.chanWall     = retrieveHeatmapIndex(self.cfg['heatmaps'],"Wall")
+          self.chanPerson   = retrieveHeatmapIndex(self.cfg['heatmaps'],"Person")
         #--------------------------------------------------------------------- 
 
 
@@ -1726,6 +2104,20 @@ class YMAPNet:
             cv2.putText(frame, "NN @ %0.2f Hz" % self.keypoints_model.hz, (8,23),  cv2.FONT_HERSHEY_SIMPLEX, 1.0, (123, 123, 123), 1)
             cv2.putText(frame, "NN @ %0.2f Hz" % self.keypoints_model.hz, (10,25), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 1)
             visRGB = visualization(frame, self.frameNumber, self.keypoint_results,self.keypoint_depths, self.keypoint_names) #, self.blobs
+
+            if self.chanFloor >= 0 and len(self.heatmapsOut) > max(self.chanFloor, self.chanNormalX, self.chanNormalY, self.chanNormalZ):
+                _n_hm = len(self.heatmapsOut)
+                _ceiling_mask = self.heatmapsOut[self.chanCeiling] if (self.chanCeiling >= 0 and self.chanCeiling < _n_hm) else None
+                _wall_mask    = self.heatmapsOut[self.chanWall]    if (self.chanWall    >= 0 and self.chanWall    < _n_hm) else None
+                _floor_plane = compute_floor_plane_normal(
+                    self.heatmapsOut[self.chanNormalX],
+                    self.heatmapsOut[self.chanNormalY],
+                    self.heatmapsOut[self.chanNormalZ],
+                    self.heatmapsOut[self.chanFloor],
+                    ceiling_mask = _ceiling_mask,
+                    wall_mask    = _wall_mask,
+                )
+                draw_floor_normal_axes(visRGB, _floor_plane)
 
 
             if (self.illustrate):

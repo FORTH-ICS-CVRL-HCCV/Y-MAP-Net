@@ -446,7 +446,14 @@ if __name__ == '__main__':
                   sys.exit(1)
         #----------------------------------------------------------------
 
-        steps_per_epoch = dbTrain.numberOfSamples // int(cfg['batchSize'])  
+        steps_per_epoch = dbTrain.numberOfSamples // int(cfg['batchSize'])
+
+        if cfg.get('outputDescriptors', False):
+            desc_dim = dbTrain.get_descriptor_number_of_elements()
+            assert desc_dim == 768, (
+                f"outputDescriptors=True but the C DataLoader returned descriptor dim={desc_dim}. "
+                "Rebuild libDataLoader.so with -DUSE_DINOV2_FEATURES and verify .dinov2 files exist alongside each dataset."
+            )
 
         # Print the shapes of inputs and outputs
         print("Training Configuration :", cfg)

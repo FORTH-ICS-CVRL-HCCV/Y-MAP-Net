@@ -3,6 +3,7 @@
 #define CACHE_H
 
 #include <stddef.h>
+#include <stdatomic.h>  // _Atomic — used for per-thread I/O statistics counters
 
 #define CACHE_FILENAME_LEN 128
 
@@ -29,8 +30,12 @@ struct cache
     void *commonCache[MAX_CACHE_THREADS];
     size_t commonCache_MaxSize[MAX_CACHE_THREADS];
     size_t commonCache_CurrentSize[MAX_CACHE_THREADS];
-    unsigned long commonCache_ReadSizeBytes[MAX_CACHE_THREADS];
-    unsigned long commonCache_TotalReadTimeMicroseconds[MAX_CACHE_THREADS];
+    // These counters are written by worker threads and read by the main thread
+    // for speed reporting.  _Atomic gives sequentially-consistent load/store
+    // without a mutex, avoiding data races on the read-modify-write in
+    // read_file_to_common_memory_of_cache() and the halving that follows it.
+    _Atomic unsigned long commonCache_ReadSizeBytes[MAX_CACHE_THREADS];
+    _Atomic unsigned long commonCache_TotalReadTimeMicroseconds[MAX_CACHE_THREADS];
 };
 
 // Initializes the cache
