@@ -161,7 +161,7 @@ To use a different engine you need to invoke it in the following way :
 
 ### COCO17 Evaluation
 
-To evaluate the model against COCO17 follow the following commands from the root directory of the project :
+To evaluate the model against COCO17 follow the following commands from the root directory of the project to [download the evaluation data](https://huggingface.co/AmmarkoV/Y-MAP-Net/blob/main/ymapnet_coco_validation_dataset.zip) unzip it and then run evaluateYMAPNet.py on it :
 ```bash
 wget "https://huggingface.co/AmmarkoV/Y-MAP-Net/resolve/main/ymapnet_coco_validation_dataset.zip?download=true"
 unzip ymapnet_coco_validation_dataset.zip
