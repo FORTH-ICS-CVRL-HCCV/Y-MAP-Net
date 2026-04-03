@@ -10,6 +10,39 @@ if [[ " $* " == *" --collab "* ]]; then
   USE_VENV=0
 fi
 
+
+
+if [ "$USE_VENV" -eq "1" ]; then
+#If we are not in collab mode.. :
+
+
+#Simple dependency checker that will apt-get stuff if something is missing
+# sudo apt-get install python3-pip python3-venv build-essential wget unzip libjpeg-dev libpng-dev libzstd-dev liblz4-dev libpthread-stubs0-dev
+SYSTEM_DEPENDENCIES="python3-pip python3-venv build-essential wget unzip libjpeg-dev libpng-dev libzstd-dev liblz4-dev libpthread-stubs0-dev"
+
+for REQUIRED_PKG in $SYSTEM_DEPENDENCIES
+do
+PKG_OK=$(dpkg-query -W --showformat='${Status}\n' $REQUIRED_PKG|grep "install ok installed")
+echo "Checking for $REQUIRED_PKG: $PKG_OK"
+if [ "" = "$PKG_OK" ]; then
+
+  echo "No $REQUIRED_PKG. Setting up $REQUIRED_PKG."
+
+  #If this is uncommented then only packages that are missing will get prompted..
+  #sudo apt-get --yes install $REQUIRED_PKG
+
+  #if this is uncommented then if one package is missing then all missing packages are immediately installed..
+  sudo apt-get install $SYSTEM_DEPENDENCIES  
+  break
+fi
+done
+#------------------------------------------------------------------------------
+fi
+
+
+
+
+
 if [ -d venv/ ]; then
   echo "Found a virtual environment"
   if [ "$USE_VENV" -eq "1" ]; then
@@ -47,6 +80,11 @@ if [ "$USE_VENV" -eq "0" ]; then
   python3 -m pip install jax tensorflow tf_keras numpy numba onnxruntime onnx opencv-python wget
 else
   echo "Setting up regular set of packages"
+
+
+
+
+
   #python3 -m pip install nvidia-cudnn-cu12 tensorflow==2.17.0 tensorflow-model-optimization tf_keras numpy numba tensorboard tensorboard-plugin-profile tf2onnx onnxruntime onnx opencv-python wget gradio
   #This will probably install keras 3.5+ which currently has a problam with the dataloader so revert back to a working version
   #python3 -m pip install keras==3.4.0
