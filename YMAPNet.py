@@ -2038,9 +2038,11 @@ class YMAPNet:
               cv2.imshow('Class segmentation Union', union_segms)
               cv2.imshow('Unsegmented', not_segmented)
 
-            human_segms      = self.heatmapsOut[33:37] #Slice
-            if show:
-              cv2.imshow('Person Union', human_segms)
+            human_segms      = None
+            if "Face" in self.cfg['heatmaps'], 
+               human_segms      = self.heatmapsOut[33:37] #Slice
+               if show:
+                 cv2.imshow('Person Union', human_segms)
 
             improved_depth   = self.heatmapsOut[self.chanDepth] #17
             if ('heatmapAddNormals' in self.cfg) and (self.cfg['heatmapAddNormals']):
@@ -2202,7 +2204,8 @@ class YMAPNet:
 
                 # ── primary outputs (Monitor 1) ───────────────────────────────
                 _pri("Overlay",           visRGB)
-                _pri("Person Union", human_segms)
+                if human_segms is not None:
+                    _pri("Person Union", human_segms)
                 if (self.labeled_map is not None) and (self.bounding_boxes is not None):
                     _pri("Person IDs",    labelsVisualiation)
                 primary_specs.append(("Skeletons", 640, 480))
