@@ -142,13 +142,13 @@ python3 scripts/setup.sh
 
 | Format | Model | Size | Download | Engine |
 |--------|------|------|----------|----------|
-| Keras (ICRA26)| Full | 2.1GB | [GDrive](https://drive.google.com/file/d/1DPSYH3_l2T_iaTAjpkMc9oh1VOwEJdpc/view?usp=drive_link) [Link2](http://anoiksi.ammar.gr/ymapnet/archive/2d_pose_estimation_v180.zip) | --engine tf |
-| Keras (dev) | Full | 1.8GB | [Link](http://anoiksi.ammar.gr/ymapnet/archive/2d_pose_estimation_v263.zip) | --engine tf |
-| TFLite FP32 | Lite | ~268 MB | [Link](http://anoiksi.ammar.gr/ymapnet/archive/2d_pose_estimation_v265_tflite_fp32.zip) | --engine tflite |
-| TFLite FP16 | Lite | ~210 MB | [Link](http://anoiksi.ammar.gr/ymapnet/archive/2d_pose_estimation_v265_tflite_fp16.zip) | --engine tflite |
-| ONNX FP32 | Lite | ~268 MB | [Link](http://anoiksi.ammar.gr/ymapnet/archive/2d_pose_estimation_v265_onnx.zip) | --engine onnx |
-| ONNX FP16 | Lite | ~209 MB | [Link](http://anoiksi.ammar.gr/ymapnet/archive/2d_pose_estimation_v265_onnx_fp16.zip) | --engine onnx |
-| JAX (npz) | Lite | ~268 MB | [Link](http://anoiksi.ammar.gr/ymapnet/archive/2d_pose_estimation_v265_jax.zip) | --engine jax |
+| Keras (ICRA26)| Full | 2.1GB | [GDrive](https://drive.google.com/file/d/1DPSYH3_l2T_iaTAjpkMc9oh1VOwEJdpc/view?usp=drive_link) [Link2](https://huggingface.co/AmmarkoV/Y-MAP-Net/resolve/main/2d_pose_estimation_v180.zip?download=true) | --engine tf |
+| Keras (dev) | Full | 1.8GB | [Link](https://huggingface.co/AmmarkoV/Y-MAP-Net/resolve/main/2d_pose_estimation_v263.zip?download=true) | --engine tf |
+| TFLite FP32 | Lite | ~268 MB | [Link](https://huggingface.co/AmmarkoV/Y-MAP-Net/blob/main/2d_pose_estimation_v265_tflite_fp32.zip) | --engine tflite |
+| TFLite FP16 | Lite | ~210 MB | [Link](https://huggingface.co/AmmarkoV/Y-MAP-Net/resolve/main/2d_pose_estimation_v265_tflite_fp16.zip?download=true) | --engine tflite |
+| ONNX FP32 | Lite | ~268 MB | [Link](https://huggingface.co/AmmarkoV/Y-MAP-Net/blob/main/2d_pose_estimation_v265_onnx.zip) | --engine onnx |
+| ONNX FP16 | Lite | ~209 MB | [Link](https://huggingface.co/AmmarkoV/Y-MAP-Net/blob/main/2d_pose_estimation_v265_onnx_fp16.zip) | --engine onnx |
+| JAX (npz) | Lite | ~268 MB | [Link](https://huggingface.co/AmmarkoV/Y-MAP-Net/resolve/main/2d_pose_estimation_v265_jax.zip?download=true) | --engine jax |
 
 To use a different engine you need to invoke it in the following way :
 
@@ -163,7 +163,7 @@ To use a different engine you need to invoke it in the following way :
 
 To evaluate the model against COCO17 follow the following commands from the root directory of the project :
 ```bash
-wget http://anoiksi.ammar.gr/ymapnet/archive/ymapnet_coco_validation_dataset.zip
+wget "https://huggingface.co/AmmarkoV/Y-MAP-Net/resolve/main/ymapnet_coco_validation_dataset.zip?download=true"
 unzip ymapnet_coco_validation_dataset.zip
 python3 evaluateYMAPNet.py
 
