@@ -21,7 +21,7 @@ else
 fi
 
 ZIPFILE="2d_pose_estimation_v${VERSION}.zip"
-URL="http://ammar.gr/ymapnet/archive/${ZIPFILE}"
+URL="http://anoiksi.ammar.gr/ymapnet/archive/${ZIPFILE}"
 
 # Check if .zip file already exists locally
 if [ -f "$ZIPFILE" ]; then
