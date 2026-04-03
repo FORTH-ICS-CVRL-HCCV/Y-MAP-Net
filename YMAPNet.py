@@ -1649,6 +1649,7 @@ class YMAPNet:
           self.chanCeiling  = retrieveHeatmapIndex(self.cfg['heatmaps'],"Ceiling")
           self.chanWall     = retrieveHeatmapIndex(self.cfg['heatmaps'],"Wall")
           self.chanPerson   = retrieveHeatmapIndex(self.cfg['heatmaps'],"Person")
+          self.chanFace     = retrieveHeatmapIndex(self.cfg['heatmaps'],"Face")
         #--------------------------------------------------------------------- 
 
 
@@ -2037,6 +2038,10 @@ class YMAPNet:
               cv2.imshow('Class segmentation Union', union_segms)
               cv2.imshow('Unsegmented', not_segmented)
 
+            human_segms      = self.heatmapsOut[33:37] #Slice
+            if show:
+              cv2.imshow('Person Union', human_segms)
+
             improved_depth   = self.heatmapsOut[self.chanDepth] #17
             if ('heatmapAddNormals' in self.cfg) and (self.cfg['heatmapAddNormals']):
               if show:
@@ -2197,6 +2202,7 @@ class YMAPNet:
 
                 # ── primary outputs (Monitor 1) ───────────────────────────────
                 _pri("Overlay",           visRGB)
+                _pri("Person Union", human_segms)
                 if (self.labeled_map is not None) and (self.bounding_boxes is not None):
                     _pri("Person IDs",    labelsVisualiation)
                 primary_specs.append(("Skeletons", 640, 480))

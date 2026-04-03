@@ -302,6 +302,12 @@ if __name__ == '__main__':
         #----------------------------------------------------------------------------------------
 
 
+ 
+        print(bcolors.OKGREEN,"Cleaning previous training artifacts.. ",bcolors.ENDC)
+        os.system("rm 2d_pose_estimation/evaluation*.json 2d_pose_estimation/sample_report*.json 2d_pose_estimation/loss_history.txt")
+        os.system("rm -rf 2d_pose_estimation/tensorboard") #Always clean tensorboard from now on
+
+
         #Command line parameter modifiers after loading the model
         #----------------------------------------------------------------------------------------
         transplantTokenInitialization = False
