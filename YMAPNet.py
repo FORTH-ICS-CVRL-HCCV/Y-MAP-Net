@@ -2031,18 +2031,28 @@ class YMAPNet:
             if show:
               cv2.imshow('PAFs Union', union_pafs)
 
-            selected_segms   = self.heatmapsOut[33:61]  # Slicing to get heatmaps
+            selected_segms   = np.stack(self.heatmapsOut[39:61], axis=0)  # Slicing to get heatmaps
             union_segms      = np.max(selected_segms, axis=0)
             not_segmented = (union_segms <= 0.0).astype(np.float32)
             if show:
+              #print(f"DEBUG selected_segms: dtype={selected_segms.dtype}, min={np.min(selected_segms)}, max={np.max(selected_segms)}")
+              #print(f"DEBUG union_segms: dtype={union_segms.dtype}, min={np.min(union_segms)}, max={np.max(union_segms)}")
               cv2.imshow('Class segmentation Union', union_segms)
-              cv2.imshow('Unsegmented', not_segmented)
+              cv2.imshow('Unsegmented', (not_segmented * 255).astype(np.uint8))
 
             human_segms      = None
-            if "Face" in self.cfg['heatmaps'], 
-               human_segms      = self.heatmapsOut[33:37] #Slice
+            if "Face" in self.cfg['heatmaps']:
+               #print(f"Person: dtype={self.heatmapsOut[39].dtype}, min={np.min(self.heatmapsOut[39])}, max={np.max(self.heatmapsOut[39])}")
+               #print(f"Face: dtype={self.heatmapsOut[40].dtype}, min={np.min(self.heatmapsOut[40])}, max={np.max(self.heatmapsOut[40])}")
+               #print(f"Hand: dtype={self.heatmapsOut[41].dtype}, min={np.min(self.heatmapsOut[41])}, max={np.max(self.heatmapsOut[41])}")
+               #print(f"Foot: dtype={self.heatmapsOut[42].dtype}, min={np.min(self.heatmapsOut[42])}, max={np.max(self.heatmapsOut[42])}")
+               human_segms      = np.stack(self.heatmapsOut[39:43], axis=0) #Slice
+               union_human      = np.max(human_segms, axis=0)
                if show:
-                 cv2.imshow('Person Union', human_segms)
+                 if human_segms is not None:
+                   #print(f"DEBUG human_segms: dtype={human_segms.dtype}, min={np.min(human_segms)}, max={np.max(human_segms)}")
+                   #print(f"DEBUG union_human: dtype={union_human.dtype}, min={np.min(union_human)}, max={np.max(union_human)}")
+                   cv2.imshow('Person Union', union_human)
 
             improved_depth   = self.heatmapsOut[self.chanDepth] #17
             if ('heatmapAddNormals' in self.cfg) and (self.cfg['heatmapAddNormals']):
@@ -2195,8 +2205,10 @@ class YMAPNet:
                 processed_specs = []
 
                 def _pri(name, img):
-                    if img is not None and img.ndim >= 2:
-                        primary_specs.append((name, img.shape[1], img.shape[0]))
+                    if img is not None:
+                        img_arr = np.asarray(img)
+                        if img_arr.ndim >= 2:
+                            primary_specs.append((name, img_arr.shape[1], img_arr.shape[0]))
 
                 def _pro(name, img):
                     if img is not None and img.ndim >= 2:
