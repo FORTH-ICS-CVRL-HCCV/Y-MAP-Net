@@ -315,6 +315,7 @@ def draw_floor_normal_axes(image, floor_normal_result, scale=60, margin=14):
       • Red   arrow  →  X axis reference  (+X right in camera space)
       • Green arrow  →  Y axis reference  (+Y up   in camera space)
       • Blue  arrow  →  Z axis reference  (+Z into scene, shown foreshortened)
+      • Yellow arrow →  gravity vector    (0, -1, 0) — always points down
       • White arrow  →  actual floor normal vector projected onto the same axes
 
     The normal components also appear as a text legend beside the widget.
@@ -374,6 +375,12 @@ def draw_floor_normal_axes(image, floor_normal_result, scale=60, margin=14):
         cv2.arrowedLine(image, (ox, oy), tip, (0, 0, 0), thick + 2, cv2.LINE_AA, tipLength=0.25)
         cv2.arrowedLine(image, (ox, oy), tip, color,     thick,     cv2.LINE_AA, tipLength=0.25)
 
+    # Gravity vector (0, -1, 0) in camera space — yellow arrow pointing down
+    gdx, gdy = proj(0, -1, 0)
+    gtip = (ox + gdx, oy + gdy)
+    cv2.arrowedLine(image, (ox, oy), gtip, (0,     0,   0), thick + 3, cv2.LINE_AA, tipLength=0.25)
+    cv2.arrowedLine(image, (ox, oy), gtip, (0,   220, 220), thick + 1, cv2.LINE_AA, tipLength=0.25)
+
     # Floor normal vector (white with black outline)
     ndx, ndy = proj(nx, ny, nz)
     ntip = (ox + ndx, oy + ndy)
@@ -392,6 +399,7 @@ def draw_floor_normal_axes(image, floor_normal_result, scale=60, margin=14):
         (f"Y {ny:+.2f}",            (0, 255,   0)),
         (f"Z {nz:+.2f}",            (255, 50,  50)),
         (f"tilt {tilt:.1f}\u00b0",  (200, 200, 200)),
+        (f"gravity \u2193",         (0, 220, 220)),
         (f"fl:{floor_px} cl:{ceil_px} wl:{wall_px}", (130, 130, 130)),
     ]
     lh   = int(fscale * 22)+20

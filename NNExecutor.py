@@ -868,6 +868,129 @@ class HAILOExecutor():
 
 
 #-----------------------------------------------------------------------------------------------------
+class PyTorchExecutor():
+  # TorchScript (.pt) model produced by convertModelToPytorch.py.
+  #
+  # The .pt file is a traced TorchScript model exported in PyTorch NCHW layout.
+  # Input images are converted NHWC→NCHW internally; outputs are returned as
+  # numpy arrays in the same shape convention as every other executor.
+  #
+  # pip install torch onnx2torch
+  # Usage: --engine pytorch
+  def __init__(
+               self,
+               modelPath:str  = "2d_pose_estimation/model_pytorch.pt",
+               inputWidth     = 256,
+               inputHeight    = 256,
+               targetWidth    = 96,
+               targetHeight   = 96,
+               outputChannels = 18,
+              ):
+               print("Using PyTorch Runtime")
+               # ── deferred imports ──────────────────────────────────────────
+               import torch
+               # ─────────────────────────────────────────────────────────────
+               self.input_size           = (inputWidth, inputHeight)
+               self.output_size          = (targetWidth, targetHeight)
+               self.numberOfHeatmaps     = outputChannels
+               self.heatmaps             = None
+               self.heatmaps_16b         = None
+               self.description          = None
+               self.multihot_description = None
+               self.activity             = None
+               self._torch               = torch
+
+               self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+               self._model  = torch.jit.load(modelPath, map_location=self._device)
+               self._model.eval()
+
+               # Determine weight dtype from the first parameter so we can cast
+               # input tensors to match (handles fp16-exported models).
+               try:
+                   self._dtype = next(self._model.parameters()).dtype
+               except StopIteration:
+                   self._dtype = torch.float32
+
+               # Warm-up: trigger JIT compilation before the first real call.
+               W, H = self.input_size
+               dummy = torch.zeros(1, 3, H, W, dtype=self._dtype, device=self._device)
+               with torch.no_grad():
+                   _ = self._model(dummy)
+               print(f'PyTorch: loaded {modelPath}  (device={self._device}, dtype={self._dtype})')
+               print(f'PyTorch version: {torch.__version__}')
+#-----------------------------------------------------------------------------------------------------
+  def _run(self, image_batch):
+        """Run inference; return all outputs as a list of numpy arrays.
+
+        Expects image_batch in NHWC float32 numpy format (standard project
+        convention); converts to NCHW torch.Tensor before calling the model.
+        """
+        torch = self._torch
+        # NHWC → NCHW
+        x = np.transpose(image_batch, (0, 3, 1, 2))
+        x = torch.from_numpy(x).to(dtype=self._dtype, device=self._device)
+        with torch.no_grad():
+            raw = self._model(x)
+        # Normalise output to a list of numpy arrays in NHWC order
+        if isinstance(raw, (list, tuple)):
+            outputs = []
+            for t in raw:
+                arr = t.cpu().numpy()
+                # 4-D NCHW → NHWC for heatmap tensors
+                if arr.ndim == 4:
+                    arr = np.transpose(arr, (0, 2, 3, 1))
+                outputs.append(arr)
+            return outputs
+        else:
+            arr = raw.cpu().numpy()
+            if arr.ndim == 4:
+                arr = np.transpose(arr, (0, 2, 3, 1))
+            return [arr]
+#-----------------------------------------------------------------------------------------------------
+  def predict(self, image):
+        if image.ndim == 3:
+            image_batch = np.expand_dims(image, axis=0).astype(np.float32)
+        elif image.ndim == 4:
+            image_batch = image.astype(np.float32)
+        else:
+            print("Unexpected dimensions", image.ndim)
+            return None
+
+        predictions = self._run(image_batch)
+
+        if len(predictions) == 1:
+            self.heatmaps = predictions[0][0]
+            return self.heatmaps
+
+        hm, hm16, desc, mh = _parse_predictions(predictions)
+        self.heatmaps             = hm[0]   if hm   is not None else None
+        self.heatmaps_16b         = hm16[0] if hm16 is not None else None
+        self.description          = desc
+        self.multihot_description = mh
+        return self.heatmaps
+#-----------------------------------------------------------------------------------------------------
+  def predict_multi(self, image):
+        if image.ndim == 3:
+            image_batch = np.expand_dims(image, axis=0).astype(np.float32)
+        elif image.ndim == 4:
+            image_batch = image.astype(np.float32)
+        else:
+            print("Unexpected dimensions", image.ndim)
+            return None
+
+        predictions = self._run(image_batch)
+
+        if len(predictions) == 1:
+            self.heatmaps = predictions[0]
+            return self.heatmaps
+
+        self.heatmaps, self.heatmaps_16b, self.description, self.multihot_description = \
+            _parse_predictions(predictions)
+        return self.heatmaps
+#-----------------------------------------------------------------------------------------------------
+
+
+#-----------------------------------------------------------------------------------------------------
 class NNExecutor():
   def __init__(
                self,
@@ -965,6 +1088,19 @@ class NNExecutor():
                                                    targetHeight   = targetHeight,
                                                    outputChannels = outputChannels,
                                                   )
+                elif (engine=="pytorch") or (engine=="torch"):
+                        if (modelPath==defaultModelDir):
+                            modelPath = _resolve(modelPath,
+                                                 "model_pytorch.pt",
+                                                 "model_pytorch_fp16.pt")
+                        self.model = PyTorchExecutor(
+                                                     modelPath      = modelPath,
+                                                     inputWidth     = inputWidth,
+                                                     inputHeight    = inputHeight,
+                                                     targetWidth    = targetWidth,
+                                                     targetHeight   = targetHeight,
+                                                     outputChannels = outputChannels,
+                                                    )
                #------------------------------------------
 #-----------------------------------------------------------------------------------------------------
   def predict(self,image):
