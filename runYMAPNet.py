@@ -93,6 +93,12 @@ def build_arg_parser():
                    help="Disable saving frames when a fallen person is detected (saving is ON by default)")
     p.add_argument("--faces",          action="store_true",
                    help="Dump RGB crops of every detected face (Face segmentation mask) to faces/")
+    p.add_argument("--pose-match",     action="store_true",
+                   dest="pose_match",
+                   help="Enable real-time pose matching demo (press R to capture reference)")
+    p.add_argument("--eco",            type=float, default=4.0, metavar="THRESHOLD",
+                   help="Skip network run when mean pixel diff of the 256x256 input is below "
+                        "THRESHOLD (0 = disabled). Try 5.0-15.0 for static scenes.")
     return p
 
 # =============================================================================
@@ -323,6 +329,7 @@ def detect_screen_resolution():
 
 from appFallDetection import _run_fallen_person_detector, _save_fallen_frame, _print_fallen_result
 from appFace import _dump_face_crops
+from appPoseMatch import PoseMatcher, draw_pose_match_overlay
 
 
 # =============================================================================
@@ -396,6 +403,7 @@ def main_pose_estimation(args):
         estimator.setup_threshold_control_window()
 
     face_crop_counter = [0]   # mutable counter shared across frames
+    pose_matcher = PoseMatcher(estimator) if args.pose_match else None
 
     failedFrames = 0
     try:
@@ -434,7 +442,7 @@ def main_pose_estimation(args):
             if estimator.addedNoise != 0.0:
                 frame = add_noise_to_image(frame, noise_magnitude=estimator.addedNoise)
 
-            estimator.process(frame)
+            estimator.process(frame, static_frame_threshold=args.eco)
 
             if args.fallen_person_detector:
                 _fp_result = _run_fallen_person_detector(estimator)
@@ -446,6 +454,11 @@ def main_pose_estimation(args):
 
             if args.faces:
                 _dump_face_crops(estimator, frame, face_crop_counter)
+
+            if pose_matcher is not None:
+                pm_result = pose_matcher.tick()
+                if pm_result is not None:
+                    draw_pose_match_overlay(frame, pm_result, estimator, pose_matcher)
 
         if visualize:
             if show:
@@ -472,6 +485,9 @@ def main_pose_estimation(args):
             elif key in (27, ord('q'), ord('Q')):
                 print("Terminating after receiving keyboard request")
                 break
+            elif key in (ord('r'), ord('R')):
+                if pose_matcher is not None:
+                    pose_matcher.capture_reference()
             elif key in (ord('u'), ord('U')):
                 save_and_upload_frame(frame, args.upload_url)
             elif key in (ord('s'), ord('S')):

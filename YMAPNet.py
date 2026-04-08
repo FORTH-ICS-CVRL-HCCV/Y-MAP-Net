@@ -1791,13 +1791,25 @@ class YMAPNet:
               sys.exit(0)
 
 
-    def process(self,frame,borders=False):
+    def process(self,frame,borders=False,static_frame_threshold=0.0):
             self.input_image, keypointXMultiplier, keypointYMultiplier, keypointXOffset, keypointYOffset = preprocess_image(frame,target_size=self.input_size,add_borders=borders)
 
-            self.keypointXMultiplier = keypointXMultiplier 
+            self.keypointXMultiplier = keypointXMultiplier
             self.keypointYMultiplier = keypointYMultiplier
             self.keypointXOffset     = keypointXOffset
             self.keypointYOffset     = keypointYOffset
+
+            # Static-scene skip: if the resized 256x256x3 input is nearly identical
+            # to the previous frame, reuse the last results and skip the network run.
+            if static_frame_threshold > 0.0:
+                if hasattr(self, '_prev_input_image') and self._prev_input_image is not None:
+                    
+                    frame_diff = np.mean(np.abs(self.input_image.astype(np.float32) - self._prev_input_image.astype(np.float32)))
+                    if frame_diff < static_frame_threshold:
+                        return  # reuse self.keypoints_predictions / heatmapsOut etc. from last run
+                self._prev_input_image = self.input_image.copy()
+            else:
+                self._prev_input_image = None
 
             #if (borders==True):
             #   frame = self.input_image
@@ -1878,7 +1890,11 @@ class YMAPNet:
                 self.keypoint_depths  = retrieve_keypoint_depth(keypoint_results, self.depthmap) #<- Important for this to happen before normalization (castNormalizedCoordinatesToOriginalImage)!
 
  
-            self.person_union = np.max(self.heatmapsOut[33:36], axis=0)
+            _person_hm = self.heatmapsOut[33:36]
+            if len(_person_hm) > 0:
+                self.person_union = np.max(_person_hm, axis=0)
+            else:
+                self.person_union = np.zeros_like(self.heatmapsOut[0])
             if self.estimate_person_id:
                 self.labeled_map, self.bounding_boxes = segment_and_label_persons(self.person_union,threshold=self.bounding_boxes_threshold, min_area=self.bounding_boxes_minarea)
             """
@@ -2089,9 +2105,9 @@ class YMAPNet:
                  #print("Depth 16 bit MIN: ",np.min(self.heatmap_16b))
                  #print("Depth 16 bit MAX: ",np.max(self.heatmap_16b))
                  #self.heatmap_16b = self.heatmap_16b / 32767
-                 self.heatmap_16b = 0.5 + ( self.heatmap_16b / 65534 )
+                 _depth_16b_display = 0.5 + ( self.heatmap_16b / 65534 )
                  if show:
-                    cv2.imshow('Depth 16-bit', self.heatmap_16b)
+                    cv2.imshow('Depth 16-bit', _depth_16b_display)
 
 
 
@@ -2251,7 +2267,7 @@ class YMAPNet:
                     _pro("Normals Y",           self.heatmapsOut[self.chanNormalY])
                     _pro("Normals Z",           self.heatmapsOut[self.chanNormalZ])
                 if self.heatmap_16b is not None:
-                    _pro("Depth 16-bit",        self.heatmap_16b)
+                    _pro("Depth 16-bit",        0.5 + (self.heatmap_16b / 65534))
                 if hasattr(self, 'chanText') and len(self.heatmapsOut) > self.chanText:
                     _pro("Text",                self.heatmapsOut[self.chanText])
 

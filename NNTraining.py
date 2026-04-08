@@ -281,7 +281,7 @@ def check_vram_and_suggest_batch_size(cfg, threshold_pct=80.0):
 
     Returns a list of dicts with keys: gpu_index, used_mb, total_mb, utilization_pct
     """
-    import subprocess, json
+    import subprocess
     try:
         result = subprocess.run(
             ["nvidia-smi",
@@ -296,7 +296,6 @@ def check_vram_and_suggest_batch_size(cfg, threshold_pct=80.0):
         print("check_vram_and_suggest_batch_size: nvidia-smi not found")
         return []
 
-    from tools import bcolors
     stats = []
     for line in result.stdout.strip().splitlines():
         parts = [p.strip() for p in line.split(",")]
