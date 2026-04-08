@@ -62,6 +62,22 @@ def deriveRGBChannelsFromCFG(cfg):
         numberOfChannels = 2
     return numberOfChannels
 #-------------------------------------------------------------------------------
+_DEPTH_NORMAL_CHANNELS = {"depthmap", "normalX", "normalY", "normalZ"}
+
+def _resolve_depth_channel_start(cfg):
+    heatmaps = cfg.get('heatmaps', [])
+    indices = [i for i, h in enumerate(heatmaps) if h in _DEPTH_NORMAL_CHANNELS]
+    if not indices:
+        return -1
+    return min(indices)
+
+def _resolve_depth_channel_end(cfg):
+    heatmaps = cfg.get('heatmaps', [])
+    indices = [i for i, h in enumerate(heatmaps) if h in _DEPTH_NORMAL_CHANNELS]
+    if not indices:
+        return -1
+    return max(indices) + 1
+
 def createSelectedModel(cfg,testModel=True):
    channels = deriveRGBChannelsFromCFG(cfg)
    if (cfg['model']=='unet'):
@@ -102,7 +118,12 @@ def createSelectedModel(cfg,testModel=True):
                                           nextTokenStrength  = cfg['nextTokenStrength'],
                                           quantize           = cfg['quantizeModel'],
                                           serial             = cfg['serial'],
-                                          useDescriptors     = cfg['outputDescriptors']
+                                          useDescriptors     = cfg['outputDescriptors'],
+                                          useASPPBridge           = cfg.get('useASPPBridge', False),
+                                          useDepthRefinementHead  = cfg.get('useDepthRefinementHead', False),
+                                          depth_channel_start     = _resolve_depth_channel_start(cfg),
+                                          depth_channel_end       = _resolve_depth_channel_end(cfg),
+                                          convBlockRepetitions    = cfg.get('convBlockRepetitions', 2)
                                         )
    else:
         print("ERROR, incorrect model type ",cfg['model'])
@@ -117,7 +138,33 @@ def createSelectedModel(cfg,testModel=True):
 #============================================================================================
 #============================================================================================
 #============================================================================================
-from NNTraining import logTrainingHistory,logText,logSomeInputsAndOutputs,printTFVersion, TrainingDataGenerator, getOptimizerFromCFG, custom_lr_scheduler, custom_lr_schedulerWarmup, DataAugmentation, weighted_token_loss, extract_validation_losses
+from NNTraining import logTrainingHistory,logText,logSomeInputsAndOutputs,printTFVersion, TrainingDataGenerator, getOptimizerFromCFG, custom_lr_scheduler, custom_lr_schedulerWarmup, DataAugmentation, weighted_token_loss, extract_validation_losses, check_vram_and_suggest_batch_size
+#============================================================================================
+#============================================================================================
+# Status server helpers
+#============================================================================================
+#============================================================================================
+def _start_status_server():
+    """Start statusServer.py in the background if it is not already running."""
+    import subprocess
+    import socket
+    port = 6005
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        already_running = s.connect_ex(("127.0.0.1", port)) == 0
+    if already_running:
+        print(bcolors.OKBLUE, "Status server already running on port %d" % port, bcolors.ENDC)
+        return
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "statusServer.py")
+    subprocess.Popen(
+        [sys.executable, script],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    print(bcolors.OKBLUE, "Status server started on port %d" % port, bcolors.ENDC)
+
+
 #============================================================================================
 #============================================================================================
 # Main Function
@@ -128,6 +175,8 @@ if __name__ == '__main__':
    #for epoch in range(1, 200):
    #  print(f"Epoch {epoch}: Learning Rate = {custom_lr_scheduler(epoch)}")
    #sys.exit(0)
+   _start_status_server()
+
    print("Ensuring the same seed for reproducible results always..\n")
    from numpy.random import seed
    seed(1)
@@ -154,7 +203,8 @@ if __name__ == '__main__':
         from createJSONConfiguration import createJSONConfiguration
         cfg = createJSONConfiguration(jsonPath,useRAMfs=useRAMfs)
 
-   ourDType=tf.float32
+   ourDType       = tf.float32
+   useXLA         = cfg.get('xlaJitCompile', False)
    if (cfg['mixedPrecision']):
       print(bcolors.WARNING,"Using mixed precision mode!",bcolors.ENDC)
       ##policy = keras.mixed_precision.Policy('mixed_float16')
@@ -167,7 +217,9 @@ if __name__ == '__main__':
       # Enables mixed precision (e.g., float16 on GPU)
       mixed_precision.set_global_policy("mixed_float16")
 
-
+   if (useXLA):
+      print(bcolors.WARNING,"Using XLA JIT compilation!",bcolors.ENDC)
+      tf.config.optimizer.set_jit(True)
 
     #Before starting training log TF Versions
    printTFVersion()
@@ -673,7 +725,7 @@ if __name__ == '__main__':
                               HeatmapDistanceMetricPartial(name="hdm_segms",     threshold=HDM_THRESHOLD,start=39,end=72)
                              ]
              #-------------------------------------------------------------------------------------
-             model.compile(optimizer=optimizer, loss=losses, loss_weights=loss_weights, metrics=metrics)
+             model.compile(optimizer=optimizer, loss=losses, loss_weights=loss_weights, metrics=metrics, jit_compile=useXLA)
              #-------------------------------------------------------------------------------------
         else: 
              #model.compile(optimizer=optimizer,
@@ -681,7 +733,7 @@ if __name__ == '__main__':
              #              loss_weights = {'hm': 1.0 ,               'heatmaps_output_16bit': 1.0 },
              #              metrics      = {'hm': hdm_metric,         'heatmaps_output_16bit': hdm16bit_metric})
              #model.compile(optimizer=optimizer, loss=combined_two_loss, metrics=[hdm_metric])
-             model.compile(optimizer=optimizer, loss=hmloss, metrics=[hdm_metric])
+             model.compile(optimizer=optimizer, loss=hmloss, metrics=[hdm_metric], jit_compile=useXLA)
        #--------------------------------------------------------------------------------------------------------------------------------
 
         #Printout data/size summaries in screen
@@ -751,6 +803,7 @@ if __name__ == '__main__':
 
         #Epochs can be set to zero to just do post training training
         #--------------------------------------------------------------------------------------------------------------------------------
+        check_vram_and_suggest_batch_size(cfg)
         if (cfg['epochs']>0):
           history = model.fit(
                                distributedTrainingDataset,
@@ -763,6 +816,7 @@ if __name__ == '__main__':
                                callbacks        = [tensorboard_callback, early_stopping, checkpointer, lr_callback, data_augmentation] #batch_logger
                              )
         #--------------------------------------------------------------------------------------------------------------------------------
+        checkpointer.write_completion_status()
         print(bcolors.WARNING,"Recompiling model using defaults to make it more portable across frameworks..",bcolors.ENDC)
         model.compile(optimizer="adam", loss="mse")
 
@@ -849,6 +903,22 @@ if __name__ == '__main__':
        print("Done Dumping Validation Samples ")
    #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
+
+   # Accumulate tensorboard logs
+   #--------------------------------------------------------------------------------------------------------------------------------
+   import shutil
+   os.makedirs("logs", exist_ok=True)
+   tensorboard_src = "2d_pose_estimation/tensorboard"
+   if os.path.isdir(tensorboard_src):
+       for item in os.listdir(tensorboard_src):
+           src = os.path.join(tensorboard_src, item)
+           dst = os.path.join("logs", item)
+           if os.path.isdir(src):
+               shutil.copytree(src, dst, dirs_exist_ok=True)
+           else:
+               shutil.copy2(src, dst)
+       print(bcolors.OKGREEN, "Tensorboard logs copied to logs/", bcolors.ENDC)
+   #--------------------------------------------------------------------------------------------------------------------------------
 
    print('You can see a summary using :\n tensorboard --logdir=2d_pose_estimation/tensorboard --bind_all && firefox http://127.0.0.1:6006')
 

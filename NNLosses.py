@@ -193,7 +193,7 @@ AdamWCautious.__doc__ = AdamWCautious.__doc__.replace(
 # Define the ConditionalModelCheckpoint class
 #-------------------------------------------------------------------------------
 class ConditionalModelCheckpoint(tf.keras.callbacks.Callback):
-    def __init__(self, monitor, mode, filepath, save_best_only, save_weights_only, start_from_epoch, verbose=1):
+    def __init__(self, monitor, mode, filepath, save_best_only, save_weights_only, start_from_epoch, verbose=1, total_epochs=None):
         super().__init__()
         #----------------------------------------
         self.OKGREEN = '\033[92m'
@@ -216,6 +216,18 @@ class ConditionalModelCheckpoint(tf.keras.callbacks.Callback):
         elif self.mode == 'max':
             self.best = -float('inf')
         #----------------------------------------
+        # Epoch timing for ETA estimation
+        if total_epochs is None:
+            try:
+                import json
+                with open("configuration.json", "r") as _f:
+                    _cfg = json.load(_f)
+                total_epochs = int(_cfg.get("epochs", 0))
+            except Exception:
+                total_epochs = 0
+        self.total_epochs   = total_epochs
+        self._epoch_times   = []   # list of (epoch_index, end_timestamp)
+        #----------------------------------------
 
     def reset(self):
         print(self.WARNING,"Resetting Checkpointer",self.ENDC)
@@ -227,15 +239,75 @@ class ConditionalModelCheckpoint(tf.keras.callbacks.Callback):
         elif self.mode == 'max':
             self.best = -float('inf')
 
+    def _write_status(self, epoch, logs, preamble=None):
+        import datetime
+        now = datetime.datetime.now()
+        self._epoch_times.append((epoch, now.timestamp()))
+
+        # Compute ETA using average seconds-per-epoch over recorded history
+        eta_str = "N/A"
+        if self.total_epochs > 0 and len(self._epoch_times) >= 2:
+            epochs_recorded = self._epoch_times[-1][0] - self._epoch_times[0][0]
+            if epochs_recorded > 0:
+                elapsed = self._epoch_times[-1][1] - self._epoch_times[0][1]
+                secs_per_epoch = elapsed / epochs_recorded
+                remaining_epochs = self.total_epochs - (epoch + 1)
+                if remaining_epochs > 0:
+                    eta_ts = now + datetime.timedelta(seconds=secs_per_epoch * remaining_epochs)
+                    eta_str = eta_ts.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    eta_str = "Done"
+
+        lines = []
+        if preamble is not None:
+            lines.append(preamble)
+            lines.append("")
+        lines.append("Updated : %s" % now.strftime("%Y-%m-%d %H:%M:%S"))
+        lines.append("Epoch   : %d / %d" % (epoch + 1, self.total_epochs) if self.total_epochs > 0 else "Epoch   : %d" % (epoch + 1))
+        lines.append("ETA     : %s" % eta_str)
+        lines.append("Monitor : %s" % self.monitor)
+        lines.append("")
+        if self.bestEpoch is not None:
+            lines.append("Best epoch : %d" % (self.bestEpoch + 1))
+            lines.append("Best %-10s: %.6f" % (self.monitor, self.best))
+            lines.append("")
+            lines.append("Best epoch metrics:")
+            for k, v in sorted(self.bestLog.items()):
+                try:
+                    lines.append("  %-30s %.6f" % (k, float(v)))
+                except (TypeError, ValueError):
+                    lines.append("  %-30s %s" % (k, v))
+        else:
+            lines.append("Best epoch : (none yet)")
+        lines.append("")
+        lines.append("Current epoch metrics:")
+        for k, v in sorted(logs.items()):
+            try:
+                lines.append("  %-30s %.6f" % (k, float(v)))
+            except (TypeError, ValueError):
+                lines.append("  %-30s %s" % (k, v))
+        try:
+            with open("status.txt", "w") as f:
+                f.write("\n".join(lines) + "\n")
+        except Exception:
+            pass
+
+    def write_completion_status(self):
+        """Write a final status.txt indicating training is complete, including best-epoch results."""
+        epoch = self.bestEpoch if self.bestEpoch is not None else 0
+        logs  = self.bestLog   if self.bestLog   is not None else {}
+        self._write_status(epoch, logs, preamble="*** TRAINING COMPLETE ***")
+
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
         current = logs.get(self.monitor)
-        
+
         if epoch + 1 < self.start_from_epoch:
             if self.verbose > 0:
                 print(self.OKBLUE,end="")
                 print("Skipping checkpointing at epoch ",epoch + 1,", starting from epoch ",self.start_from_epoch,end="")
                 print(self.ENDC)
+            self._write_status(epoch, logs)
             return
 
         if current is None:
@@ -264,6 +336,7 @@ class ConditionalModelCheckpoint(tf.keras.callbacks.Callback):
             self.bestEpoch = epoch
             self.bestLog   = logs
             self._save_model(epoch)
+        self._write_status(epoch, logs)
 
     def _save_model(self, epoch):
         if self.save_weights_only:

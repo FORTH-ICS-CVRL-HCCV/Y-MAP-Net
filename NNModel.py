@@ -609,44 +609,42 @@ def convnext_block(input, name, num_filters, activation='gelu', dropoutRate=0.0)
 
     return x
 #-------------------------------------------------------------------------------
-def conv_block(input, name, num_filters, activation='leaky_relu', dropoutRate=0.0):
+def conv_block(input, name, num_filters, activation='leaky_relu', dropoutRate=0.0, repetitions=2):
     # Save input for residual connection
     shortcut = input
 
-    x = Conv2D(num_filters, 3, padding="same", name="conv2D_In_%s_%u_%s" % (name,num_filters,activation))(input)
-    x = BatchNormalization()(x)
-    x = Activation(activation)(x)
+    x = input
+    for r in range(repetitions):
+        x = Conv2D(num_filters, 3, padding="same", name="conv2D_%s_%u_%s_r%u" % (name, num_filters, activation, r))(x)
+        x = BatchNormalization()(x)
+        x = Activation(activation)(x)
 
-    x = Conv2D(num_filters, 3, padding="same", name="conv2D_Out_%s_%u_%s" % (name,num_filters,activation))(x)
-    x = BatchNormalization()(x)
-    x = Activation(activation)(x)
-
-    # Optionally add dropout
+    # Optionally add dropout (applied once after all repetitions, before the residual)
     if dropoutRate > 0.0:
-        x = SpatialDropout2D(dropoutRate, name="dropout_%s_%u_%u" % (name,num_filters, int(dropoutRate * 100)))(x)
+        x = SpatialDropout2D(dropoutRate, name="dropout_%s_%u_%u" % (name, num_filters, int(dropoutRate * 100)))(x)
 
     # Residual connection: if the input and output dimensions match, add them
     if shortcut.shape[-1] == num_filters:
-        x = Add(name="residual_In_%s_%u_%s" % (name,num_filters,activation))([shortcut, x])
+        x = Add(name="residual_In_%s_%u_%s" % (name, num_filters, activation))([shortcut, x])
     else:
         # If dimensions do not match, apply a 1x1 convolution to match them
         shortcut = Conv2D(num_filters, kernel_size=1, padding='same')(shortcut)
-        x = Add(name="residual_In_%s_%u_%s" % (name,num_filters,activation))([shortcut, x])
+        x = Add(name="residual_In_%s_%u_%s" % (name, num_filters, activation))([shortcut, x])
 
     return x
 #-------------------------------------------------------------------------------
-def encoder_block(input, num_filters, activation, dropoutRate=0.0,depth=None):
+def encoder_block(input, num_filters, activation, dropoutRate=0.0, depth=None, conv_repetitions=2):
     #x = convnext_block(input, "encoder", num_filters, activation="gelu", dropoutRate=dropoutRate)
     if depth==None:
        name = "encoder"
     else:
        name = "encoder_d%u" % depth
 
-    x = conv_block(input, name, num_filters, activation=activation, dropoutRate=dropoutRate)
+    x = conv_block(input, name, num_filters, activation=activation, dropoutRate=dropoutRate, repetitions=conv_repetitions)
     p = AveragePooling2D((2, 2))(x)  # Use AveragePooling2D
     return x, p
 #-------------------------------------------------------------------------------
-def decoder_block(input, skip_features, num_filters, activation, namePrefix="decoder", level=0):
+def decoder_block(input, skip_features, num_filters, activation, namePrefix="decoder", level=0, conv_repetitions=2):
     # Include level in every name so clamped filter counts (numKeypoints floor)
     # on multiple levels don't produce duplicate layer names.
     tag = "%s_L%u_%u" % (namePrefix, level, num_filters)
@@ -669,7 +667,7 @@ def decoder_block(input, skip_features, num_filters, activation, namePrefix="dec
     x_concat = Concatenate(name="concat_%s" % tag)([x, skip_features])
 
     # Pass through the convolution block after concatenation
-    x_conv = conv_block(x_concat, tag, num_filters, activation=activation)
+    x_conv = conv_block(x_concat, tag, num_filters, activation=activation, repetitions=conv_repetitions)
 
     # Add residual connection (input `x` before conv_block) back to the output of the conv_block
     x_residual = Add(name="residual_%s" % tag)([x, x_conv])
@@ -692,6 +690,76 @@ def bridge_block(input, num_filters, activation, layers = 3):
       x = Conv2D(num_filters, 3, padding="same", dilation_rate=4, name="BridgeFinish")(x)
       x = BatchNormalization()(x)
       x = Activation(activation)(x)
+
+    return x
+#-------------------------------------------------------------------------------
+def aspp_bridge_block(input, num_filters, activation, num_layers=3):
+    """
+    ASPP-style bridge that replaces the simple dilated-conv bridge.
+
+    Parallel branches capture multi-scale context at the bottleneck, plus a
+    global average-pooling branch that broadcasts a scene-level context vector
+    back to the spatial map.  This is particularly beneficial for monocular
+    depth and surface-normal estimation, which require understanding global
+    scene layout that the encoder skip-connections alone cannot provide.
+
+    num_layers controls how many dilated branches are included (min 2):
+      2 → 1×1 + 3×3 dil=1 + global
+      3 → + 3×3 dil=2       (default)
+      4 → + 3×3 dil=4
+    All branches output num_filters channels, are concatenated, then projected
+    back to num_filters with a residual connection from the input.
+    """
+    spatial_h = int(input.shape[1]) if input.shape[1] is not None else 2
+    spatial_w = int(input.shape[2]) if input.shape[2] is not None else 2
+
+    # Branch 1: 1×1 — dense channel projection
+    b1 = Conv2D(num_filters, 1, padding='same', name='aspp_b1')(input)
+    b1 = BatchNormalization()(b1)
+    b1 = Activation(activation)(b1)
+
+    # Branch 2: 3×3 standard conv
+    b2 = Conv2D(num_filters, 3, padding='same', dilation_rate=1, name='aspp_b2')(input)
+    b2 = BatchNormalization()(b2)
+    b2 = Activation(activation)(b2)
+
+    branches = [b1, b2]
+
+    # Branch 3: 3×3 dil=2
+    if num_layers >= 3:
+        b3 = Conv2D(num_filters, 3, padding='same', dilation_rate=2, name='aspp_b3')(input)
+        b3 = BatchNormalization()(b3)
+        b3 = Activation(activation)(b3)
+        branches.append(b3)
+
+    # Branch 4: 3×3 dil=4
+    if num_layers >= 4:
+        b4 = Conv2D(num_filters, 3, padding='same', dilation_rate=4, name='aspp_b4')(input)
+        b4 = BatchNormalization()(b4)
+        b4 = Activation(activation)(b4)
+        branches.append(b4)
+
+    # Global context branch: pool to 1×1 → conv → bilinear upsample back
+    # AveragePooling2D with spatial pool_size collapses to 1×1 when pool_size == input spatial dims.
+    b_global = AveragePooling2D(pool_size=(spatial_h, spatial_w), name='aspp_gap')(input)
+    b_global = Conv2D(num_filters, 1, padding='same', name='aspp_global_conv')(b_global)
+    b_global = BatchNormalization()(b_global)
+    b_global = Activation(activation)(b_global)
+    b_global = UpSampling2D(size=(spatial_h, spatial_w), interpolation='bilinear', name='aspp_global_up')(b_global)
+    branches.append(b_global)
+
+    # Concatenate all branches and project back to num_filters
+    x = Concatenate(name='aspp_concat')(branches)
+    x = Conv2D(num_filters, 1, padding='same', name='aspp_project')(x)
+    x = BatchNormalization()(x)
+    x = Activation(activation)(x)
+
+    # Residual: project input to num_filters if channel count differs
+    if input.shape[-1] != num_filters:
+        shortcut = Conv2D(num_filters, 1, padding='same', name='aspp_shortcut')(input)
+    else:
+        shortcut = input
+    x = Add(name='aspp_residual')([x, shortcut])
 
     return x
 #-------------------------------------------------------------------------------
@@ -725,7 +793,12 @@ def build_unet(inputHeight,
                nextTokenStrength=0.5,
                quantize=False,
                serial="",
-               useDescriptors=False):
+               useDescriptors=False,
+               depth_channel_start=-1,
+               depth_channel_end=-1,
+               useASPPBridge=False,
+               useDepthRefinementHead=False,
+               convBlockRepetitions=2):
 
     #Uncomment to go "single
     ###if (num16BitHeatmaps>0):
@@ -750,14 +823,18 @@ def build_unet(inputHeight,
         thisLayerFilters = int(baseChannels * (encoderGrowthBase**i))
         if (thisLayerFilters<numKeypoints):
               thisLayerFilters = numKeypoints #Always have at least the number of outputs to not strangle them
-        s, p = encoder_block(p, thisLayerFilters, activation, dropoutRate=dropoutRate, depth=i)
+        s, p = encoder_block(p, thisLayerFilters, activation, dropoutRate=dropoutRate, depth=i, conv_repetitions=convBlockRepetitions)
         encoder_layers.append(s)
 
     # UNET Bridge layer
-    #b = conv_block(p, "bridge", int(bridgeRatio * baseChannels * (encoderGrowthBase**encoderRepetitions)), activation=activation) #<- Standard one layer bridge
     if (forceBridgeSize==0):
           forceBridgeSize = int(bridgeRatio * baseChannels * (encoderGrowthBase**encoderRepetitions))
-    b = bridge_block(p, forceBridgeSize, activation=activation, layers=midSectionRepetitions)           #<- CHANGE More complex bridge
+    if useASPPBridge:
+        # ASPP-style bridge: parallel multi-scale branches + global context pooling.
+        # Better global scene understanding for depth and normals prediction.
+        b = aspp_bridge_block(p, forceBridgeSize, activation=activation, num_layers=midSectionRepetitions)
+    else:
+        b = bridge_block(p, forceBridgeSize, activation=activation, layers=midSectionRepetitions)
 
 
     if (useDescriptors):
@@ -769,7 +846,7 @@ def build_unet(inputHeight,
         thisLayerFilters = int(baseChannels * (decoderGrowthBase**(encoderRepetitions-i-1)))
         if (thisLayerFilters<numKeypoints):
               thisLayerFilters = numKeypoints #Always have at least the number of outputs to not strangle them
-        d = decoder_block(decoder_layers[-1], encoder_layers[-(i+1)], thisLayerFilters, activation, level=i)
+        d = decoder_block(decoder_layers[-1], encoder_layers[-(i+1)], thisLayerFilters, activation, level=i, conv_repetitions=convBlockRepetitions)
         decoder_layers.append(d)
 
     #Final layer calculations 
@@ -795,8 +872,40 @@ def build_unet(inputHeight,
       pixelwise = Conv2D(pixelwiseChannels, kernel_size=(1, 1), activation=activation, name="pixelwise")(decoder_layers[-1]) #activation = None ?
     else:
       pixelwise = decoder_layers[-1]
-   
-    heatmap_output      = Conv2D(filters=numKeypoints, kernel_size=1, padding="same", activation="tanh", name="hm_tanh_8bit")(pixelwise) # Why where there -> strides=(stride_amount, stride_amount)
+
+    # Depth / Normals dedicated refinement head (optional)
+    # -------------------------------------------------------
+    # Two extra 3×3 dilated convolutions produce refined features specifically
+    # for the depth and normals channels before the final 1×1 projection.
+    # The output is split into three Conv2D projections (pre-depth, depth,
+    # post-depth) which are concatenated back to numKeypoints channels.
+    # This avoids tensor slicing/Lambda layers and remains fully serialisable.
+    depth_ref_enabled = (
+        useDepthRefinementHead
+        and depth_channel_start >= 0
+        and depth_channel_end > depth_channel_start
+        and depth_channel_end <= numKeypoints
+    )
+    if depth_ref_enabled:
+        num_depth_ch = depth_channel_end - depth_channel_start
+        num_pre_ch   = depth_channel_start
+        num_post_ch  = numKeypoints - depth_channel_end
+        drh_channels = max(128, int(pixelwiseChannels // 2) if pixelwiseChannels > 0 else 128)
+
+        drh = Conv2D(drh_channels, 3, padding='same', dilation_rate=2, name='drh_conv1')(pixelwise)
+        drh = BatchNormalization(name='drh_bn1')(drh)
+        drh = Activation(activation, name='drh_act1')(drh)
+        drh = Conv2D(drh_channels, 3, padding='same', dilation_rate=4, name='drh_conv2')(drh)
+        drh = BatchNormalization(name='drh_bn2')(drh)
+        drh = Activation(activation, name='drh_act2')(drh)
+
+        out_pre   = Conv2D(num_pre_ch,    1, padding='same', activation='tanh', name='hm_tanh_pre')(pixelwise)
+        out_depth = Conv2D(num_depth_ch,  1, padding='same', activation='tanh', name='hm_tanh_depth')(drh)
+        out_post  = Conv2D(num_post_ch,   1, padding='same', activation='tanh', name='hm_tanh_post')(pixelwise)
+        heatmap_output = Concatenate(axis=-1, name='hm_tanh_8bit')([out_pre, out_depth, out_post])
+        print(f"Depth refinement head: drh_channels={drh_channels}, depth ch {depth_channel_start}–{depth_channel_end-1}")
+    else:
+        heatmap_output = Conv2D(filters=numKeypoints, kernel_size=1, padding="same", activation="tanh", name="hm_tanh_8bit")(pixelwise)
     # Maintain the desired output dimensions
     if (outputHeight != heatmap_output.shape[1]) or (outputWidth != heatmap_output.shape[2]):
             print("Incompatible final skip ", heatmap_output.shape[1], ",", heatmap_output.shape[2])
@@ -825,7 +934,7 @@ def build_unet(inputHeight,
                 if (crop_height >= 0) and (crop_width >= 0):
                     heatmaps_16bit = Cropping2D(cropping=((crop_height // 2, crop_height - (crop_height // 2)), (crop_width // 2, crop_width - (crop_width // 2))), name=f"final_crop_16bit")(heatmaps_16bit)
         scale_factor_16b = 32767 #/ scale_factor # This should be something around ~273
-        heatmaps_16bit = keras.layers.Rescaling(scale=scale_factor_16b, name="hm_16b")(heatmaps_16bit) 
+        heatmaps_16bit = keras.layers.Rescaling(scale=scale_factor_16b, name="hm_16b", dtype='float32')(heatmaps_16bit)
         print("Final 16-bit Scale Factor is ",scale_factor_16b) #32767.0
 
     # Token output (if it is enabled..)

@@ -267,7 +267,70 @@ def getOptimizerFromCFG(cfg, globalClipNorm=None):
       optimizer = tf.keras.optimizers.AdamW(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=clip_value,global_clipnorm=global_clip)
    else:
       raise ValueError("Unknown optimizer (",cfg['optimizer'],")")
+
+   if cfg.get('mixedPrecision', False):
+      from tensorflow.keras import mixed_precision
+      optimizer = mixed_precision.LossScaleOptimizer(optimizer)
+
    return optimizer
+#============================================================================================
+def check_vram_and_suggest_batch_size(cfg, threshold_pct=80.0):
+    """
+    Queries VRAM usage across all visible GPUs and prints a suggestion to
+    increase batchSize if utilization is below threshold_pct.
+
+    Returns a list of dicts with keys: gpu_index, used_mb, total_mb, utilization_pct
+    """
+    import subprocess, json
+    try:
+        result = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=index,memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            print("check_vram_and_suggest_batch_size: nvidia-smi failed")
+            return []
+    except FileNotFoundError:
+        print("check_vram_and_suggest_batch_size: nvidia-smi not found")
+        return []
+
+    from tools import bcolors
+    stats = []
+    for line in result.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) != 3:
+            continue
+        gpu_idx, used_mb, total_mb = int(parts[0]), int(parts[1]), int(parts[2])
+        utilization_pct = 100.0 * used_mb / total_mb if total_mb > 0 else 0.0
+        stats.append(dict(gpu_index=gpu_idx, used_mb=used_mb, total_mb=total_mb, utilization_pct=utilization_pct))
+        print(bcolors.OKGREEN,
+              f"GPU {gpu_idx}: {used_mb} MiB / {total_mb} MiB  ({utilization_pct:.1f}% VRAM used)",
+              bcolors.ENDC)
+
+    low_gpus = [s for s in stats if s['utilization_pct'] < threshold_pct]
+    if low_gpus:
+        current_batch = cfg.get('batchSize', '?')
+        headroom_pcts = [threshold_pct - s['utilization_pct'] for s in low_gpus]
+        avg_headroom  = sum(headroom_pcts) / len(headroom_pcts)
+        # Rough estimate: headroom maps linearly to batch size budget
+        if isinstance(current_batch, int) and current_batch > 0:
+            suggested = int(current_batch * (1.0 + avg_headroom / 100.0))
+            # Round down to nearest multiple of 4 for alignment
+            suggested = max(current_batch + 1, (suggested // 4) * 4)
+            print(bcolors.WARNING,
+                  f"VRAM utilization is below {threshold_pct:.0f}% on {len(low_gpus)} GPU(s). "
+                  f"Consider increasing batchSize from {current_batch} to ~{suggested} "
+                  f"to improve GPU utilization.",
+                  bcolors.ENDC)
+        else:
+            print(bcolors.WARNING,
+                  f"VRAM utilization is below {threshold_pct:.0f}% on {len(low_gpus)} GPU(s). "
+                  f"Consider increasing batchSize.",
+                  bcolors.ENDC)
+
+    return stats
 #============================================================================================
 def check_glove_embeddings_correctly_normalized(array):
    #print(array)

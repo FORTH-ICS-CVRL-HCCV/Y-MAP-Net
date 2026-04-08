@@ -145,7 +145,6 @@ def getCaptureDeviceFromPath(videoFilePath, videoWidth, videoHeight, videoFramer
 # =============================================================================
 # System utilities
 # =============================================================================
-
 def save_and_upload_frame(frame, url):
     print("Saving frame")
     cv2.imwrite('frame.jpg', frame)
