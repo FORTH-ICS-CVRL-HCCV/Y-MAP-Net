@@ -99,6 +99,8 @@ def build_arg_parser():
     p.add_argument("--eco",            type=float, default=4.0, metavar="THRESHOLD",
                    help="Skip network run when mean pixel diff of the 256x256 input is below "
                         "THRESHOLD (0 = disabled). Try 5.0-15.0 for static scenes.")
+    p.add_argument("--vram",           type=int,   default=4800, metavar="MB",
+                   help="GPU VRAM limit in MB for TensorFlow (default: 4800)")
     return p
 
 # =============================================================================
@@ -387,6 +389,7 @@ def main_pose_estimation(args):
         depth_iterations=args.depth_iterations,
         estimate_person_id=not args.no_person_id,
         resolve_skeleton=not args.no_skeleton,
+        vram_limit=args.vram,
     )
     # noise is [0,1]; add_noise_to_image expects the same range
     estimator.addedNoise = noise

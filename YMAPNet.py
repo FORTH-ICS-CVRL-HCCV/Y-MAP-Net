@@ -1490,7 +1490,7 @@ class YMAPNet:
     def __init__(self, modelPath, threshold=30, keypoint_threshold=50.0, engine="tensorflow", profiling = False, illustrate=False,
                        pruneTokens=False, monitor=list(), window_arrangement=list(),
                        screen_w=3840, screen_h=2400, depth_iterations=10,
-                       estimate_person_id=True, resolve_skeleton=True):
+                       estimate_person_id=True, resolve_skeleton=True, vram_limit=4800):
         self.model_path     = '2d_pose_estimation'
         self.cfg            = loadJSONConfiguration("%s/configuration.json" % self.model_path)
         self.serial         = self.cfg["serial"]
@@ -1509,7 +1509,8 @@ class YMAPNet:
                                              targetWidth    = self.cfg['outputWidth'],
                                              targetHeight   = self.cfg['outputHeight'],
                                              outputChannels = self.cfg['outputChannels'],
-                                             pruneTokens    = pruneTokens
+                                             pruneTokens    = pruneTokens,
+                                             VRAMLimit      = vram_limit
                                             )
         #---------------------------------------------------------------------
         """

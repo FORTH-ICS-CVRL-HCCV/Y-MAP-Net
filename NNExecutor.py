@@ -166,7 +166,6 @@ class TFExecutor():
 
 
                self.limitVRAMUse = VRAMLimit
-               #self.limitVRAMUse = 4800 #<- The network should only need 4.1GB
  
                import os
                os.environ['TF_ENABLE_GPU_GARBAGE_COLLECTION']='false'
@@ -1003,7 +1002,8 @@ class NNExecutor():
                outputChannels = 18,
                numberOfThreads= 4,
                profiling      = False,
-               pruneTokens    = False
+               pruneTokens    = False,
+               VRAMLimit      = None
               ):
                 defaultModelDir  = "2d_pose_estimation/"
                 self.hz    = 0.0
@@ -1033,7 +1033,8 @@ class NNExecutor():
                                                 targetWidth    = targetWidth,
                                                 targetHeight   = targetHeight,
                                                 outputChannels = outputChannels,
-                                                pruneTokens    = pruneTokens
+                                                pruneTokens    = pruneTokens,
+                                                VRAMLimit      = VRAMLimit
                                                 )
                 elif (engine=="tf-lite") or (engine=="tflite"):
                         if (modelPath==defaultModelDir):
