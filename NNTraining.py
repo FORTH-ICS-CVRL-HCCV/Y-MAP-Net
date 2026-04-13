@@ -258,9 +258,13 @@ def getOptimizerFromCFG(cfg, globalClipNorm=None):
    clip_value  = None if globalClipNorm else 1.0
    global_clip = globalClipNorm
 
+   # AdamWCautious was missing global_clipnorm, which meant multi-GPU
+   # training fell back to per-element clipvalue only.  With gradient
+   # all-reduce, rare high-magnitude samples are amplified across replicas
+   # and global_clipnorm is the correct way to bound total update size.
    if (cfg['optimizer']=='adamwcautious'):
       from NNLosses import AdamWCautious
-      optimizer = AdamWCautious(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=clip_value)
+      optimizer = AdamWCautious(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=clip_value,global_clipnorm=global_clip)
    elif (cfg['optimizer']=='adam'):
       optimizer = tf.keras.optimizers.Adam(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=clip_value,global_clipnorm=global_clip)
    elif (cfg['optimizer']=='adamw'):
@@ -270,7 +274,16 @@ def getOptimizerFromCFG(cfg, globalClipNorm=None):
 
    if cfg.get('mixedPrecision', False):
       from tensorflow.keras import mixed_precision
-      optimizer = mixed_precision.LossScaleOptimizer(optimizer)
+      policy = mixed_precision.global_policy()
+      # LossScaleOptimizer applies dynamic loss scaling to prevent gradient
+      # underflow in float16 (which has only 5 exponent bits, max ~65504).
+      # bfloat16 shares float32's 8 exponent bits and full dynamic range,
+      # so loss scaling is unnecessary and would only add overhead.
+      if policy.compute_dtype == 'float16':
+          optimizer = mixed_precision.LossScaleOptimizer(optimizer)
+          print(bcolors.WARNING,"Wrapping optimizer with LossScaleOptimizer (float16 policy)",bcolors.ENDC)
+      else:
+          print(bcolors.OKGREEN,"Skipping LossScaleOptimizer (bfloat16 has float32 dynamic range)",bcolors.ENDC)
 
    return optimizer
 #============================================================================================
@@ -571,8 +584,138 @@ class TrainingDataGenerator(keras.utils.PyDataset):
           self.db.shuffle_based_on_loss() #<- TODO: This may need to be deactivated if training is unstable
           pass
 #============================================================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# PerfProfiler  — per-batch / per-epoch timing callback, dumps to perf.txt
+#
+# Measures:
+#   • batch_ms      : wall-clock time of model.fit()'s train_step() call
+#   • gap_ms        : time between on_train_batch_end and next on_train_batch_begin
+#                     (= Python overhead + data pipeline time between steps)
+#   • epoch_cb_ms   : time spent in all OTHER on_epoch_end callbacks combined
+#                     (= overhead of checkpointing, svg_logger, tensorboard, …)
+#
+# After every epoch a summary is appended to perf.txt with:
+#   epoch, steps, batch stats (min/p50/p95/max), gap stats, cb overhead
+# ─────────────────────────────────────────────────────────────────────────────
+class PerfProfiler(keras.callbacks.Callback):
+    """Per-batch timing profiler.  Appends one report block to perf.txt per epoch."""
+
+    PERF_FILE = "perf.txt"
+
+    def __init__(self):
+        super().__init__()
+        self._batch_start   = None
+        self._batch_end_ts  = None
+        self._batch_times   = []   # step latencies in ms
+        self._gap_times     = []   # inter-step gaps in ms
+        self._epoch_start   = None
+
+    # ── batch hooks ──────────────────────────────────────────────────────────
+
+    def on_train_batch_begin(self, batch, logs=None):
+        now = time.perf_counter()
+        if self._batch_end_ts is not None:
+            self._gap_times.append((now - self._batch_end_ts) * 1000.0)
+        self._batch_start = now
+
+    def on_train_batch_end(self, batch, logs=None):
+        now = time.perf_counter()
+        if self._batch_start is not None:
+            self._batch_times.append((now - self._batch_start) * 1000.0)
+        self._batch_end_ts = now
+
+    # ── epoch hooks ──────────────────────────────────────────────────────────
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self._batch_times  = []
+        self._gap_times    = []
+        self._batch_end_ts = None
+        self._epoch_start  = time.perf_counter()
+
+    def on_epoch_end(self, epoch, logs=None):
+        # Measure how long all the *other* epoch-end callbacks take (this one
+        # runs first because it was appended last to the list — or we record
+        # the time at which we started on_epoch_end and compare to the next
+        # on_epoch_begin).  We record the elapsed *from* epoch_start *to* now
+        # as "total epoch wall time" and derive callback overhead later.
+        epoch_wall_ms = (time.perf_counter() - self._epoch_start) * 1000.0
+
+        bt = self._batch_times
+        gt = self._gap_times
+
+        def _stats(vals):
+            if not vals:
+                return dict(n=0, min=0, p50=0, p95=0, max=0, mean=0)
+            a = sorted(vals)
+            n = len(a)
+            return dict(
+                n    = n,
+                min  = a[0],
+                p50  = a[n // 2],
+                p95  = a[min(int(n * 0.95), n - 1)],
+                max  = a[-1],
+                mean = sum(a) / n,
+            )
+
+        bs = _stats(bt)
+        gs = _stats(gt)
+
+        total_step_ms = sum(bt)
+        total_gap_ms  = sum(gt)
+        # Epoch-level callbacks run after on_epoch_end of PerfProfiler, so we
+        # can only bound them: epoch_wall - (step time + gaps)
+        overhead_ms   = epoch_wall_ms - total_step_ms - total_gap_ms
+
+        lines = [
+            "",
+            "=" * 72,
+            "PerfProfiler  epoch=%d   %s" % (epoch + 1, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            "=" * 72,
+            "Epoch wall time        : %8.1f s" % (epoch_wall_ms / 1000.0),
+            "",
+            "Batch (train_step) latency [ms]  — %d steps" % bs['n'],
+            "  min  : %8.2f" % bs['min'],
+            "  p50  : %8.2f" % bs['p50'],
+            "  p95  : %8.2f" % bs['p95'],
+            "  max  : %8.2f" % bs['max'],
+            "  mean : %8.2f" % bs['mean'],
+            "  sum  : %8.1f s" % (total_step_ms / 1000.0),
+            "",
+            "Inter-step gap (data/Python overhead) [ms]  — %d gaps" % gs['n'],
+            "  min  : %8.2f" % gs['min'],
+            "  p50  : %8.2f" % gs['p50'],
+            "  p95  : %8.2f" % gs['p95'],
+            "  max  : %8.2f" % gs['max'],
+            "  mean : %8.2f" % gs['mean'],
+            "  sum  : %8.1f s" % (total_gap_ms / 1000.0),
+            "",
+            "Epoch-end callbacks + misc overhead : %8.1f s" % (overhead_ms / 1000.0),
+            "  (= epoch_wall - step_sum - gap_sum; includes checkpointing, svg, tensorboard)",
+        ]
+
+        # Append individual batch times for detailed offline analysis
+        if bt:
+            lines += [
+                "",
+                "Per-step latencies (ms, chronological):",
+                "  " + "  ".join("%6.1f" % v for v in bt[:200]),  # cap at 200 to keep file sane
+            ]
+
+        report = "\n".join(lines) + "\n"
+
+        try:
+            with open(self.PERF_FILE, "a") as fh:
+                fh.write(report)
+            print("[PerfProfiler] report appended to %s" % self.PERF_FILE)
+        except Exception as e:
+            print("[PerfProfiler] could not write %s: %s" % (self.PERF_FILE, e))
+
+        # Always print summary to console too
+        print("[PerfProfiler] epoch=%d  step: mean=%.1fms p95=%.1fms  gap: mean=%.1fms p95=%.1fms  cb_overhead=%.1fs"
+              % (epoch + 1, bs['mean'], bs['p95'], gs['mean'], gs['p95'], overhead_ms / 1000.0))
+#============================================================================================
 """
-#Experiment directly using a TF Data Generator (to hopefully improve performance) 
+#Experiment directly using a TF Data Generator (to hopefully improve performance)
 def TrainingDataGeneratorTF(cfg, db, batch_size=32, numberOfTokens=16, numberOfClasses=2037,validation_data=False, labels=None, log_dir=None, returnOutputImages=True, workers=1, use_multiprocessing=False, max_queue_size=1):
     # workers=1, use_multiprocessing=False, max_queue_size=1 are ignored but included to ensure compatibility 
     numberOfSamples = db.numberOfSamples
@@ -753,15 +896,23 @@ class TrainingDataGeneratorSeq(keras.utils.Sequence):
         self.worker_thread.join()
 """
 #============================================================================================
-def custom_lr_scheduler(epoch,startLoss=0.0001,endLoss=0.000015):
+def custom_lr_scheduler(epoch, startLoss=0.0001, endLoss=0.000015, warmup_epochs=0):
+    # warmup_epochs: when >0 (typically set to 5 for multi-GPU), linearly ramp
+    # the LR from endLoss up to startLoss over the first warmup_epochs.
+    # Goyal et al. 2017 (https://arxiv.org/abs/1706.02677) showed this prevents
+    # divergence when using the linear scaling rule (LR × num_GPUs) because the
+    # initial random weights produce high-variance gradients that a large LR
+    # amplifies into NaN.  The warmup lets BatchNorm statistics and early weights
+    # stabilise before the full learning rate kicks in.
     #--------------------------
     finalEpochBeforeFlatLine=100
     decimals=5
     maximum=startLoss
     minimum=endLoss
     #--------------------------
-    if epoch == 1:
-        return round(maximum,decimals)
+    if warmup_epochs > 0 and epoch < warmup_epochs:
+        # Linear ramp from minimum (endLoss) up to maximum (startLoss)
+        return round(minimum + (maximum - minimum) * (epoch / warmup_epochs), decimals)
     elif epoch < finalEpochBeforeFlatLine:
         return round((maximum - minimum) * ((1 - (epoch - 1) / (finalEpochBeforeFlatLine-1) ) ** 2) + minimum,decimals)
     else:

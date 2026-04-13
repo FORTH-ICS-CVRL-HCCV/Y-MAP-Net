@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Training Status</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #111;
+      color: #ddd;
+      font-family: monospace;
+      padding: 1.5rem;
+    }
+    h1 {
+      font-size: 1rem;
+      font-weight: normal;
+      color: #888;
+      margin-bottom: 1rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    #svg-container {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 4px;
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+      text-align: center;
+    }
+    #svg-container img {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 0 auto;
+    }
+    #txt-container {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 4px;
+      padding: 1rem;
+    }
+    #txt-container h2 {
+      font-size: 0.75rem;
+      font-weight: normal;
+      color: #555;
+      margin-bottom: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    #status-pre {
+      white-space: pre-wrap;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      color: #ccc;
+    }
+    /* Iframe is only shown when both fetch and XHR are unavailable (file:// Chrome).
+       invert(1) flips the browser's default white-on-black to dark-on-light so the
+       text stays readable against our dark page. */
+    #status-iframe {
+      display: none;
+      width: 100%;
+      height: 200px;
+      border: none;
+      background: transparent;
+      filter: invert(1) hue-rotate(180deg);
+    }
+    #refresh-note {
+      font-size: 0.7rem;
+      color: #444;
+      margin-top: 1rem;
+      text-align: right;
+    }
+    #refresh-note span { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Training Status</h1>
+
+  <div id="svg-container">
+    <img id="status-svg" src="status.svg" alt="Training status chart">
+  </div>
+
+  <div id="txt-container">
+    <h2>status.txt</h2>
+    <pre id="status-pre">Loading…</pre>
+    <iframe id="status-iframe" src="status.txt" title="status.txt"></iframe>
+  </div>
+
+  <p id="refresh-note"></p>
+
+  <script>
+    // ── Adaptive refresh ────────────────────────────────────────────────────
+    // When served over HTTP we detect each epoch by comparing the SVG content
+    // to its previous value.  Once we have two epoch timestamps we can estimate
+    // the epoch duration and schedule the next check ~30 s before we expect the
+    // next update instead of hammering the server on a fixed timer.
+
+    var FALLBACK_INTERVAL = 60000; // ms – used until epoch timing is known
+    var PRE_EPOCH_BUFFER  = 30000; // ms – check this early before expected epoch
+    var MIN_CHECK         = 15000; // ms – never poll faster than this
+
+    var prevSvgText   = null;   // last seen SVG content (null = first load)
+    var epochLog      = [];     // timestamps (ms) when we detected each new epoch
+    var nextCheckAt   = 0;
+    var countdownTick = null;
+    var refreshTimer  = null;
+
+    function isServed() {
+      return window.location.protocol !== 'file:';
+    }
+
+    // ── Fetch helpers ───────────────────────────────────────────────────────
+
+    // Try fetch(), fall back to XHR, fall back to iframe.
+    function fetchText(url, onSuccess, onFail) {
+      if (typeof fetch !== 'undefined') {
+        fetch(url)
+          .then(function(r) {
+            if (!r.ok) throw new Error(r.status);
+            return r.text();
+          })
+          .then(onSuccess)
+          .catch(function() {
+            xhrText(url, onSuccess, onFail);
+          });
+      } else {
+        xhrText(url, onSuccess, onFail);
+      }
+    }
+
+    function xhrText(url, onSuccess, onFail) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url, true);
+      xhr.onload = function() {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          onSuccess(xhr.responseText);
+        } else {
+          onFail();
+        }
+      };
+      xhr.onerror = onFail;
+      try { xhr.send(); } catch(e) { onFail(); }
+    }
+
+    // ── Loaders ─────────────────────────────────────────────────────────────
+
+    function loadTxt() {
+      fetchText(
+        'status.txt?t=' + Date.now(),
+        function(text) {
+          var pre = document.getElementById('status-pre');
+          var ifr = document.getElementById('status-iframe');
+          pre.textContent     = text;
+          pre.style.display   = 'block';
+          ifr.style.display   = 'none';
+        },
+        function() {
+          // Both fetch and XHR blocked – use iframe (filtered to stay dark).
+          document.getElementById('status-pre').style.display  = 'none';
+          document.getElementById('status-iframe').style.display = 'block';
+        }
+      );
+    }
+
+    function loadSvg() {
+      document.getElementById('status-svg').src = 'status.svg?t=' + Date.now();
+    }
+
+    // ── Epoch-aware check ────────────────────────────────────────────────────
+
+    function checkAndSchedule() {
+      refreshTimer = null;
+
+      fetchText(
+        'status.svg?t=' + Date.now(),
+        function(svgText) {
+          var now = Date.now();
+
+          if (prevSvgText === null) {
+            // Very first load – just display, no epoch recorded yet.
+            prevSvgText = svgText;
+            loadSvg();
+            loadTxt();
+          } else if (svgText !== prevSvgText) {
+            // SVG changed → a new epoch just finished.
+            prevSvgText = svgText;
+            epochLog.push(now);
+            if (epochLog.length > 20) epochLog.shift(); // keep last 20
+            loadSvg();
+            loadTxt();
+          }
+
+          scheduleNext();
+        },
+        function() {
+          // Could not reach server – retry on fallback cadence.
+          scheduleNext();
+        }
+      );
+    }
+
+    function avgEpochMs() {
+      if (epochLog.length < 2) return null;
+      var diffs = [];
+      for (var i = 1; i < epochLog.length; i++) {
+        diffs.push(epochLog[i] - epochLog[i - 1]);
+      }
+      return diffs.reduce(function(a, b) { return a + b; }, 0) / diffs.length;
+    }
+
+    function scheduleNext() {
+      var delay = FALLBACK_INTERVAL;
+      var avg   = avgEpochMs();
+
+      if (avg !== null && epochLog.length >= 1) {
+        var lastEpoch    = epochLog[epochLog.length - 1];
+        var nextExpected = lastEpoch + avg;
+        // Aim to check PRE_EPOCH_BUFFER ms before the expected epoch end.
+        delay = Math.max(MIN_CHECK, nextExpected - PRE_EPOCH_BUFFER - Date.now());
+      }
+
+      nextCheckAt = Date.now() + delay;
+      refreshTimer = setTimeout(checkAndSchedule, delay);
+      startCountdown();
+    }
+
+    // ── Countdown display ────────────────────────────────────────────────────
+
+    function startCountdown() {
+      if (countdownTick) clearInterval(countdownTick);
+      countdownTick = setInterval(updateNote, 1000);
+      updateNote();
+    }
+
+    function updateNote() {
+      var note = document.getElementById('refresh-note');
+      if (!isServed()) {
+        note.textContent = 'Open via HTTP for live updates';
+        clearInterval(countdownTick);
+        return;
+      }
+
+      var remaining = Math.max(0, Math.round((nextCheckAt - Date.now()) / 1000));
+      var avg = avgEpochMs();
+      var epochInfo = avg !== null
+        ? '  |  epoch ≈ ' + fmtSec(avg / 1000)
+        : '';
+
+      note.innerHTML = 'Next check in <span>' + fmtSec(remaining) + '</span>' + epochInfo;
+
+      if (remaining <= 0) clearInterval(countdownTick);
+    }
+
+    function fmtSec(s) {
+      s = Math.round(s);
+      if (s < 60)   return s + 's';
+      var m = Math.floor(s / 60), r = s % 60;
+      return m + 'm ' + (r < 10 ? '0' : '') + r + 's';
+    }
+
+    // ── Boot ─────────────────────────────────────────────────────────────────
+
+    if (isServed()) {
+      checkAndSchedule();
+    } else {
+      // file:// – single static load, no polling.
+      loadTxt();
+      loadSvg();
+      document.getElementById('refresh-note').textContent =
+        'Open via HTTP for live updates';
+    }
+  </script>
+</body>
+</html>

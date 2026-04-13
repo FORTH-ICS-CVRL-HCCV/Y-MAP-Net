@@ -821,7 +821,8 @@ def evaluate():
         threshold         = 0,
         keypoint_threshold= 50.0,   # match webcam default — controls peak detection threshold
         engine            = 'tensorflow',
-        profiling         = False
+        profiling         = False,
+        compileModel      = False    # skip optimizer state loading — not needed for evaluation
     )
 
     # -----------------------------------------------------------------------

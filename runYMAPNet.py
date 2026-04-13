@@ -96,9 +96,11 @@ def build_arg_parser():
     p.add_argument("--pose-match",     action="store_true",
                    dest="pose_match",
                    help="Enable real-time pose matching demo (press R to capture reference)")
-    p.add_argument("--eco",            type=float, default=4.0, metavar="THRESHOLD",
+    p.add_argument("--eco",            type=float, default=[4.0], nargs="+", metavar=("THRESHOLD", "MAX_SKIP"),
                    help="Skip network run when mean pixel diff of the 256x256 input is below "
-                        "THRESHOLD (0 = disabled). Try 5.0-15.0 for static scenes.")
+                        "THRESHOLD (0 = disabled). Try 5.0-15.0 for static scenes. "
+                        "Optional second value MAX_SKIP forces a network run after that many "
+                        "consecutive skipped frames (default: 10, e.g. --eco 8.0 30).")
     p.add_argument("--vram",           type=int,   default=4800, metavar="MB",
                    help="GPU VRAM limit in MB for TensorFlow (default: 4800)")
     return p
@@ -390,9 +392,11 @@ def main_pose_estimation(args):
         estimate_person_id=not args.no_person_id,
         resolve_skeleton=not args.no_skeleton,
         vram_limit=args.vram,
+        compileModel=False,          # skip optimizer state loading — not needed for inference
     )
     # noise is [0,1]; add_noise_to_image expects the same range
     estimator.addedNoise = noise
+    estimator.show = show
 
     tiler = PoseEstimatorTiler(
         estimator,
@@ -445,7 +449,9 @@ def main_pose_estimation(args):
             if estimator.addedNoise != 0.0:
                 frame = add_noise_to_image(frame, noise_magnitude=estimator.addedNoise)
 
-            estimator.process(frame, static_frame_threshold=args.eco)
+            _eco_threshold = args.eco[0]
+            _eco_max_skip  = int(args.eco[1]) if len(args.eco) > 1 else 20
+            estimator.process(frame, static_frame_threshold=_eco_threshold, eco_max_skip=_eco_max_skip)
 
             if args.fallen_person_detector:
                 _fp_result = _run_fallen_person_detector(estimator)

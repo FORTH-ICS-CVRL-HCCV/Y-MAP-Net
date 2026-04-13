@@ -1,44 +1,57 @@
 #!/usr/bin/env python3
-"""Minimal HTTP server that serves the current training status from status.txt."""
+"""Minimal HTTP server that serves the training status dashboard."""
 
 import argparse
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-STATUS_FILE = "status.txt"
+ROUTES = {
+    "/":            ("status.html", "text/html; charset=utf-8"),
+    "/status.html": ("status.html", "text/html; charset=utf-8"),
+    "/status.svg":  ("status.svg",  "image/svg+xml"),
+    "/status.txt":  ("status.txt",  "text/plain; charset=utf-8"),
+}
 
 
 class StatusHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
-        if os.path.exists(STATUS_FILE):
-            with open(STATUS_FILE, "r") as f:
-                body = f.read()
-            status = 200
-        else:
-            body = "No status available yet — training has not started or status.txt has not been written.\n"
-            status = 503
+        # Strip query-string cache-busters (?t=…) before routing.
+        path = self.path.split("?")[0]
 
-        encoded = body.encode("utf-8")
+        if path not in ROUTES:
+            self._send(404, "text/plain; charset=utf-8", b"Not found\n")
+            return
+
+        filename, content_type = ROUTES[path]
+        if not os.path.exists(filename):
+            msg = f"{filename} not found — training has not started yet.\n"
+            self._send(503, "text/plain; charset=utf-8", msg.encode())
+            return
+
+        with open(filename, "rb") as f:
+            body = f.read()
+        self._send(200, content_type, body)
+
+    def _send(self, status, content_type, body: bytes):
         self.send_response(status)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(encoded)
+        self.wfile.write(body)
 
     def log_message(self, fmt, *args):
-        # Suppress per-request console noise; comment out to re-enable.
         pass
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Serve training status over HTTP.")
+    parser = argparse.ArgumentParser(description="Serve training status dashboard.")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=6005, help="Bind port (default: 6005)")
     args = parser.parse_args()
 
     server = HTTPServer((args.host, args.port), StatusHandler)
-    print(f"Status server running at http://{args.host}:{args.port}/")
+    print(f"Status dashboard at http://{args.host}:{args.port}/")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

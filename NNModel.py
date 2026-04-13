@@ -27,14 +27,14 @@ def retrieveModelOutputDimensions(model):
     print("Output Shape is ", output_size)
     return output_shape[1],output_shape[2],output_shape[3]
 #----------------------------------------------------------------------------------------
-def load_keypoints_model(model_path):
+def load_keypoints_model(model_path, compile=True):
     from tools import bcolors
     from NNLosses import HeatmapDistanceMetric, GloVeMSELoss, HeatmapCoreLoss, WeightedBinaryCrossEntropy, HeatmapDistanceMetricPartial, CustomTopKCategoricalAccuracy
     print(bcolors.OKGREEN,"Loading %s model.. " % model_path,bcolors.ENDC)
     try:
        #Regular keras loading until V3 that breaks
        import keras
-       doModelCompilation = True #<- Does this have any effect on loading speed?
+       doModelCompilation = compile #<- Does this have any effect on loading speed?
 
        print("Keras is NOW loading the saved model..")
        start      = time.time()
@@ -45,6 +45,7 @@ def load_keypoints_model(model_path):
                                                        ,'WeightedBinaryCrossEntropy':WeightedBinaryCrossEntropy
                                                        ,'HeatmapCoreLoss':HeatmapCoreLoss
                                                        ,'CustomTopKCategoricalAccuracy':CustomTopKCategoricalAccuracy
+                                                       ,'BilinearUpsampling2D':BilinearUpsampling2D
                                                      }, compile=doModelCompilation)#, safe_mode=True)
        seconds    = time.time() - start
        print("Loading the model took ",seconds," seconds..")
@@ -209,6 +210,55 @@ def test_model_IO(model):
     except Exception as e:
         raise ValueError('Failed testing model IO')
 #-------------------------------------------------------------------------------
+class BilinearUpsampling2D(tf.keras.layers.Layer):
+    """UpSampling2D with bilinear interpolation, safe under mixed precision.
+
+    Under float32 this delegates to Keras's native UpSampling2D which uses a
+    static-size CUDA kernel (same fast path as using UpSampling2D directly).
+
+    Under bfloat16/float16 Keras's built-in bilinear upsampling calls into
+    NumPy which rejects non-float32 dtypes ("data type not inexact").  For
+    those dtypes we cast to float32, resize with tf.image.resize, then restore
+    the original dtype — keeping the rest of the graph in the compute dtype.
+    """
+    def __init__(self, size=(2, 2), **kwargs):
+        super(BilinearUpsampling2D, self).__init__(**kwargs)
+        self.size = size
+        # Stored sublayer for float32 inputs: uses Keras's optimised static-size
+        # CUDA kernel.  Creating it once here avoids allocating a new layer
+        # object on every call() invocation.
+        # dtype='float32' pins this sublayer's compute dtype to float32.
+        # Keras's autocast machinery will cast any bfloat16/float16 inputs to
+        # float32 before UpSampling2D.call() runs — so numpy.finfo(bfloat16)
+        # is never reached, even under a global mixed_bfloat16 policy.
+        self._upsample_f32 = UpSampling2D(size=size, interpolation='bilinear', dtype='float32')
+
+    def build(self, input_shape):
+        # Pre-build the sublayer from the shape alone (dtype-agnostic), so
+        # Keras 3 never needs to trace call() with a bfloat16 KerasTensor to
+        # auto-build it.
+        self._upsample_f32.build(input_shape)
+        super().build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        h = None if input_shape[1] is None else input_shape[1] * self.size[0]
+        w = None if input_shape[2] is None else input_shape[2] * self.size[1]
+        return (input_shape[0], h, w, input_shape[3])
+
+    def call(self, inputs):
+        # _upsample_f32 has dtype='float32', so Keras autocasts inputs to fp32
+        # before the CUDA kernel runs.  We cast the fp32 output back to the
+        # caller's dtype so the rest of the graph stays in bfloat16/float16.
+        x = self._upsample_f32(inputs)
+        if x.dtype != inputs.dtype:
+            x = tf.cast(x, inputs.dtype)
+        return x
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({'size': self.size})
+        return config
+#-------------------------------------------------------------------------------
 class ReshapeTiles(tf.keras.layers.Layer):
     def __init__(self, tile_height, tile_width, tile_depth, **kwargs):
         super(ReshapeTiles, self).__init__(**kwargs)
@@ -289,6 +339,11 @@ class PositionalEncodingLayer(tf.keras.layers.Layer):
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
 def add_token_output(bridge_output, input_layer, numTokens, activation='leaky_relu', dropoutRate=0.2, nextTokenStrength=0.7, layer_width=1228, D=300, depth=7, dropoutDepth=4, use_learnable_residuals=False):
+    # Only force float32 on output layers when the backbone is computing in a
+    # lower-precision dtype (e.g. bfloat16 under mixed precision).  When the
+    # global policy is already float32, dtype=None lets Keras use its default
+    # path — no extra cast nodes are inserted into the graph or gradient tape.
+    _out_dtype = 'float32' if keras.mixed_precision.global_policy().compute_dtype != 'float32' else None
     """
     Adds a token output branch to the network based on the bridge output and input layer,
     including convolutional and max-pooling layers before the dense layers.
@@ -385,7 +440,7 @@ def add_token_output(bridge_output, input_layer, numTokens, activation='leaky_re
 
 
         #This should be a tanh activation but in order for the appended network to have tanh try linear
-        glove_output = layers.Dense(D, activation='tanh', name="t%02u"%i)(x_token)
+        glove_output = layers.Dense(D, activation='tanh', name="t%02u"%i, dtype=_out_dtype)(x_token)
         prev_glove   = glove_output
         #glove_output = layers.Multiply()([glove_output, scaling_factor])
         glove_outputs.append(glove_output)
@@ -420,6 +475,7 @@ def add_token_output(bridge_output, input_layer, numTokens, activation='leaky_re
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
 def append_final_multihot_layer(glove_outputs, bridge_output=None, D=300, TokensOut=8 ,Classes=2037, layer_width = 2048, multihot_layer_width=0, depth = 2, activation='leaky_relu', dropoutRate=0.2, use_attention=False):
+    _out_dtype = 'float32' if keras.mixed_precision.global_policy().compute_dtype != 'float32' else None
     # multihot_layer_width=0 means fall back to layer_width (bridge-derived dim_product).
     # Set to a positive value (e.g. 1024) to decouple the classification head width
     # from the bridge bottleneck, which is typically too narrow for 17K-class multi-label.
@@ -458,12 +514,15 @@ def append_final_multihot_layer(glove_outputs, bridge_output=None, D=300, Tokens
     #x = layers.Dense(layer_width, activation='linear', name="tokens_scale")(x)
 
     # Add a single Dense layer of size D * maxtokens as the final output #NOT TokensOut
-    token_output = layers.Dense(Classes, activation='sigmoid', name="tokens_multihot")(x)
+    # dtype=_out_dtype: only force float32 under mixed precision; when the global
+    # policy is already float32, dtype=None avoids inserting spurious cast nodes.
+    token_output = layers.Dense(Classes, activation='sigmoid', name="tokens_multihot", dtype=_out_dtype)(x)
  
     return token_output
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
 def append_descriptor_layer(bridge_layer=None, layer_width = 768, activation='leaky_relu', dropoutRate=0.1, depth = 1):
+    _out_dtype = 'float32' if keras.mixed_precision.global_policy().compute_dtype != 'float32' else None
     # Concatenate all glove outputs into a single vector
     concatenated_output = layers.Flatten()(bridge_layer)
     x = concatenated_output  
@@ -474,7 +533,7 @@ def append_descriptor_layer(bridge_layer=None, layer_width = 768, activation='le
           x = layers.Dropout(dropoutRate)(x)
  
     # Add a single Dense layer of size D * maxtokens as the final output #NOT TokensOut
-    token_output = layers.Dense(layer_width, activation='linear', name="descriptors")(x)
+    token_output = layers.Dense(layer_width, activation='linear', name="descriptors", dtype=_out_dtype)(x)
  
     return token_output
 #-------------------------------------------------------------------------------
@@ -745,7 +804,7 @@ def aspp_bridge_block(input, num_filters, activation, num_layers=3):
     b_global = Conv2D(num_filters, 1, padding='same', name='aspp_global_conv')(b_global)
     b_global = BatchNormalization()(b_global)
     b_global = Activation(activation)(b_global)
-    b_global = UpSampling2D(size=(spatial_h, spatial_w), interpolation='bilinear', name='aspp_global_up')(b_global)
+    b_global = BilinearUpsampling2D(size=(spatial_h, spatial_w), name='aspp_global_up')(b_global)
     branches.append(b_global)
 
     # Concatenate all branches and project back to num_filters
@@ -890,9 +949,20 @@ def build_unet(inputHeight,
         num_depth_ch = depth_channel_end - depth_channel_start
         num_pre_ch   = depth_channel_start
         num_post_ch  = numKeypoints - depth_channel_end
-        drh_channels = max(128, int(pixelwiseChannels // 2) if pixelwiseChannels > 0 else 128)
+        # Keep drh_channels small: the 3x3 dilated convs run at full output
+        # resolution (e.g. 256x256), so channel count dominates FLOP cost.
+        # A 1x1 bottleneck entry reduces pixelwiseChannels → drh_channels first
+        # so the expensive 3x3 dilated kernels never see the fat feature map.
+        # pixelwiseChannels=512 → drh_channels=64 cuts DRH cost ~16x vs the old
+        # max(128, pixelwiseChannels//2)=256 design without the bottleneck.
+        drh_channels = max(64, int(pixelwiseChannels // 8) if pixelwiseChannels > 0 else 64)
 
-        drh = Conv2D(drh_channels, 3, padding='same', dilation_rate=2, name='drh_conv1')(pixelwise)
+        # 1x1 bottleneck: collapse pixelwiseChannels → drh_channels before 3x3 dilated convs
+        drh = Conv2D(drh_channels, 1, padding='same', name='drh_entry')(pixelwise)
+        drh = BatchNormalization(name='drh_entry_bn')(drh)
+        drh = Activation(activation, name='drh_entry_act')(drh)
+
+        drh = Conv2D(drh_channels, 3, padding='same', dilation_rate=2, name='drh_conv1')(drh)
         drh = BatchNormalization(name='drh_bn1')(drh)
         drh = Activation(activation, name='drh_act1')(drh)
         drh = Conv2D(drh_channels, 3, padding='same', dilation_rate=4, name='drh_conv2')(drh)
@@ -903,7 +973,8 @@ def build_unet(inputHeight,
         out_depth = Conv2D(num_depth_ch,  1, padding='same', activation='tanh', name='hm_tanh_depth')(drh)
         out_post  = Conv2D(num_post_ch,   1, padding='same', activation='tanh', name='hm_tanh_post')(pixelwise)
         heatmap_output = Concatenate(axis=-1, name='hm_tanh_8bit')([out_pre, out_depth, out_post])
-        print(f"Depth refinement head: drh_channels={drh_channels}, depth ch {depth_channel_start}–{depth_channel_end-1}")
+        print(f"Depth refinement head: bottleneck {pixelwiseChannels if pixelwiseChannels > 0 else '?'}→{drh_channels} "
+              f"(3x3 dil=2, 3x3 dil=4) @ full res, depth ch {depth_channel_start}–{depth_channel_end-1}")
     else:
         heatmap_output = Conv2D(filters=numKeypoints, kernel_size=1, padding="same", activation="tanh", name="hm_tanh_8bit")(pixelwise)
     # Maintain the desired output dimensions
@@ -918,7 +989,10 @@ def build_unet(inputHeight,
                heatmap_output = Cropping2D(cropping=((crop_height // 2, crop_height - (crop_height // 2)), (crop_width // 2, crop_width - (crop_width // 2))) , name="final_crop")(heatmap_output)
     #Scale back to min/max Heatmap values ( [-120..120] )
     scale_factor   = max(abs(minHeatmapValue),abs(maxHeatmapValue))
-    heatmap_output = keras.layers.Rescaling(scale=scale_factor,name="hm")(heatmap_output) #int8_scaling / heatmap_output
+    # Only force float32 under mixed precision; when global policy is already
+    # float32, dtype=None avoids inserting spurious cast nodes in the graph.
+    _out_dtype = 'float32' if keras.mixed_precision.global_policy().compute_dtype != 'float32' else None
+    heatmap_output = keras.layers.Rescaling(scale=scale_factor, name="hm", dtype=_out_dtype)(heatmap_output)
     print("Final Scale Factor is ",scale_factor)
 
     # 16Bit output (if it is enabled..)

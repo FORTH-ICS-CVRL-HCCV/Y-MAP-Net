@@ -239,18 +239,90 @@ class ConditionalModelCheckpoint(tf.keras.callbacks.Callback):
         elif self.mode == 'max':
             self.best = -float('inf')
 
+    @staticmethod
+    def _collect_system_stats():
+        """Return (cpu_pct, ram_used_gb, ram_total_gb, gpu_rows) where gpu_rows is a list of
+        (gpu_id, vram_mib) tuples for processes owned by the current PID (including children)."""
+        import subprocess, os, re
+        cpu_pct      = None
+        ram_used_gb  = None
+        ram_total_gb = None
+        gpu_rows     = []
+
+        try:
+            import psutil
+            proc        = psutil.Process(os.getpid())
+            cpu_pct     = psutil.cpu_percent(interval=None)
+            vm          = psutil.virtual_memory()
+            ram_used_gb = vm.used  / (1024 ** 3)
+            ram_total_gb= vm.total / (1024 ** 3)
+        except Exception:
+            pass
+
+        try:
+            # Collect current PID and all child PIDs to match against nvidia-smi output
+            import os, psutil
+            own_pids = {os.getpid()}
+            try:
+                own_pids.update(c.pid for c in psutil.Process(os.getpid()).children(recursive=True))
+            except Exception:
+                pass
+
+            smi = subprocess.check_output(
+                ["nvidia-smi", "--query-compute-apps=pid,gpu_uuid,used_memory", "--format=csv,noheader,nounits"],
+                stderr=subprocess.DEVNULL, timeout=5
+            ).decode()
+            # Also get GPU index from uuid
+            uuid_map = {}
+            try:
+                uuid_out = subprocess.check_output(
+                    ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
+                    stderr=subprocess.DEVNULL, timeout=5
+                ).decode()
+                for line in uuid_out.strip().splitlines():
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) == 2:
+                        uuid_map[parts[1]] = int(parts[0])
+            except Exception:
+                pass
+
+            gpu_total = {}  # gpu_id -> total MiB used by our processes
+            for line in smi.strip().splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) != 3:
+                    continue
+                try:
+                    pid  = int(parts[0])
+                    uuid = parts[1]
+                    mib  = int(parts[2])
+                except ValueError:
+                    continue
+                if pid not in own_pids:
+                    continue
+                gpu_id = uuid_map.get(uuid, uuid)
+                gpu_total[gpu_id] = gpu_total.get(gpu_id, 0) + mib
+
+            gpu_rows = sorted(gpu_total.items())
+        except Exception:
+            pass
+
+        return cpu_pct, ram_used_gb, ram_total_gb, gpu_rows
+
     def _write_status(self, epoch, logs, preamble=None):
         import datetime
         now = datetime.datetime.now()
         self._epoch_times.append((epoch, now.timestamp()))
 
-        # Compute ETA using average seconds-per-epoch over recorded history
+        # Compute ETA and time-per-epoch using average seconds-per-epoch over recorded history
         eta_str = "N/A"
+        epoch_time_str = "N/A"
         if self.total_epochs > 0 and len(self._epoch_times) >= 2:
             epochs_recorded = self._epoch_times[-1][0] - self._epoch_times[0][0]
             if epochs_recorded > 0:
                 elapsed = self._epoch_times[-1][1] - self._epoch_times[0][1]
                 secs_per_epoch = elapsed / epochs_recorded
+                mins, secs = divmod(int(secs_per_epoch), 60)
+                epoch_time_str = "%dm %02ds" % (mins, secs) if mins else "%ds" % secs
                 remaining_epochs = self.total_epochs - (epoch + 1)
                 if remaining_epochs > 0:
                     eta_ts = now + datetime.timedelta(seconds=secs_per_epoch * remaining_epochs)
@@ -258,15 +330,26 @@ class ConditionalModelCheckpoint(tf.keras.callbacks.Callback):
                 else:
                     eta_str = "Done"
 
+        cpu_pct, ram_used_gb, ram_total_gb, gpu_rows = self._collect_system_stats()
+
         lines = []
         if preamble is not None:
             lines.append(preamble)
             lines.append("")
-        lines.append("Updated : %s" % now.strftime("%Y-%m-%d %H:%M:%S"))
-        lines.append("Epoch   : %d / %d" % (epoch + 1, self.total_epochs) if self.total_epochs > 0 else "Epoch   : %d" % (epoch + 1))
-        lines.append("ETA     : %s" % eta_str)
-        lines.append("Monitor : %s" % self.monitor)
+        lines.append("Updated    : %s" % now.strftime("%Y-%m-%d %H:%M:%S"))
+        lines.append("Epoch      : %d / %d" % (epoch + 1, self.total_epochs) if self.total_epochs > 0 else "Epoch      : %d" % (epoch + 1))
+        lines.append("Epoch time : %s" % epoch_time_str)
+        lines.append("ETA        : %s" % eta_str)
+        lines.append("Monitor    : %s" % self.monitor)
         lines.append("")
+        if cpu_pct is not None:
+            lines.append("CPU        : %.1f%%" % cpu_pct)
+        if ram_used_gb is not None:
+            lines.append("RAM        : %.1f / %.1f GB" % (ram_used_gb, ram_total_gb))
+        for gpu_id, vram_mib in gpu_rows:
+            lines.append("GPU %-2s VRAM : %d MiB" % (str(gpu_id), vram_mib))
+        if cpu_pct is not None or gpu_rows:
+            lines.append("")
         if self.bestEpoch is not None:
             lines.append("Best epoch : %d" % (self.bestEpoch + 1))
             lines.append("Best %-10s: %.6f" % (self.monitor, self.best))
@@ -588,7 +671,7 @@ class RSquaredMetric(Metric):
 
     def update_state(self, y_true, y_pred, sample_weight=None):
         # Ensure both y_true and y_pred are cast to float32
-        float_type = keras.backend.floatx()
+        float_type = tf.float32  # Always accumulate losses/metrics in float32 for numerical stability under mixed precision
         y_true = tf.cast(y_true, float_type)
         y_pred = tf.cast(y_pred, float_type)
 
@@ -618,7 +701,7 @@ class HeatmapDistanceMetric(Metric):
         self.total_pixels         = self.add_weight(name='total_pixels', initializer='zeros')
 
     def update_state(self, y_true, y_pred, sample_weight=None):
-        float_type = keras.backend.floatx()
+        float_type = tf.float32  # Always accumulate losses/metrics in float32 for numerical stability under mixed precision
         y_true = tf.cast(y_true, float_type) * self.scale
         y_pred = tf.cast(y_pred, float_type) * self.scale
 
@@ -814,7 +897,7 @@ class VanillaMSELossSimple(keras.losses.Loss):
 
     def call(self, y_true, y_pred):
         # Ensure both y_true and y_pred are cast to float32
-        float_type = keras.backend.floatx()
+        float_type = tf.float32  # Always accumulate losses/metrics in float32 for numerical stability under mixed precision
         y_true = tf.cast(y_true, float_type)
         y_pred = tf.cast(y_pred, float_type)
 
@@ -841,7 +924,7 @@ class VanillaMSELossFast(keras.losses.Loss):
 
     def call(self, y_true, y_pred):
         # Ensure both y_true and y_pred are cast to float32
-        float_type = keras.backend.floatx()
+        float_type = tf.float32  # Always accumulate losses/metrics in float32 for numerical stability under mixed precision
 
         #Regular loss
         # Calculate MSE for heatmaps 0-33 (except segmentation masks)
@@ -918,7 +1001,7 @@ class HeatmapCoreLoss(keras.losses.Loss):
     #@tf.function(reduce_retracing=True) #<-Be careful this might cause performance hit if not enough GPU memory present 
     def call(self, y_true, y_pred):
         # Ensure both y_true and y_pred are cast to float32
-        float_type = keras.backend.floatx()
+        float_type = tf.float32  # Always accumulate losses/metrics in float32 for numerical stability under mixed precision
         y_true_cast = tf.cast(y_true, float_type) * self.scale
         y_pred_cast = tf.cast(y_pred, float_type) * self.scale
         #At this point values are converted 0.0 - 1.0 
@@ -1098,7 +1181,7 @@ class GloVeMSELoss(keras.losses.Loss):
         #tf.control_dependencies([ass1,ass2])
 
         # Ensure both y_true and y_pred are cast to float32
-        float_type = keras.backend.floatx()
+        float_type = tf.float32  # Always accumulate losses/metrics in float32 for numerical stability under mixed precision
 
         # Extract the embedding vectors (elements 1 to 51)
         y_true_glove = tf.cast(y_true, float_type) #If upper is uncommented set to 1:
@@ -1118,6 +1201,11 @@ class GloVeCosineLoss(keras.losses.Loss):
         self.weight = weight
 
     def call(self, y_true, y_pred):
+        # Cast to float32 only when needed: l2_normalize on low-precision vectors risks underflow
+        if y_true.dtype != tf.float32:
+            y_true = tf.cast(y_true, tf.float32)
+            y_pred = tf.cast(y_pred, tf.float32)
+
         y_true = tf.nn.l2_normalize(y_true, axis=-1)
         y_pred = tf.nn.l2_normalize(y_pred, axis=-1)
 
@@ -1169,6 +1257,14 @@ class GloVeHybridLoss(keras.losses.Loss):
         self.norm_reg_weight = norm_reg_weight
 
     def call(self, y_true, y_pred):
+        # Cast to float32 only when needed: l2_normalize and tf.norm on
+        # low-precision 300-dim vectors can underflow (norm → 0 → NaN).
+        # In float32 mode the inputs are already float32 so no cast is needed
+        # and none is inserted into the graph (dtype is static in tf.function).
+        if y_true.dtype != tf.float32:
+            y_true = tf.cast(y_true, tf.float32)
+            y_pred = tf.cast(y_pred, tf.float32)
+
         # --- MSE term: penalises element-wise distance (anchors magnitude) ---
         mse_loss = tf.reduce_mean(tf.square(y_true - y_pred), axis=-1)
 
@@ -1205,6 +1301,11 @@ class DescriptorLoss(keras.losses.Loss):
         self.norm_reg_weight = norm_reg_weight
 
     def call(self, y_true, y_pred):
+        # Cast to float32 only when needed — same rationale as GloVeHybridLoss.
+        if y_true.dtype != tf.float32:
+            y_true = tf.cast(y_true, tf.float32)
+            y_pred = tf.cast(y_pred, tf.float32)
+
         mse_loss    = tf.reduce_mean(tf.square(y_true - y_pred), axis=-1)
         y_true_norm = tf.nn.l2_normalize(y_true, axis=-1)
         y_pred_norm = tf.nn.l2_normalize(y_pred, axis=-1)
@@ -1230,7 +1331,7 @@ class MultiHotLoss(keras.losses.Loss):
         #tf.control_dependencies([ass1,ass2])
 
         # Ensure both y_true and y_pred are cast to float32
-        float_type = keras.backend.floatx()
+        float_type = tf.float32  # Always accumulate losses/metrics in float32 for numerical stability under mixed precision
         y_true_onehot = tf.cast(y_true, float_type) #[0:2037]
         y_pred_onehot = tf.cast(y_pred, float_type) #[0:2037]
  
@@ -1257,7 +1358,7 @@ class WeightedBinaryCrossEntropyManual(keras.losses.Loss):
     def call(self, y_true, y_pred):
 
         # Ensure both y_true and y_pred are cast to float32
-        float_type = keras.backend.floatx()
+        float_type = tf.float32  # Always accumulate losses/metrics in float32 for numerical stability under mixed precision
         y_true = tf.cast(y_true, float_type)
         y_pred = tf.cast(y_pred, float_type)
 
@@ -1285,9 +1386,8 @@ class WeightedBinaryCrossEntropy(keras.losses.Loss):
         self.weight = weight
 
     def call(self, y_true, y_pred):
-
         # Ensure both y_true and y_pred are cast to float32
-        float_type = keras.backend.floatx()
+        float_type = tf.float32  # Always accumulate losses/metrics in float32 for numerical stability under mixed precision
         y_true = tf.cast(y_true, float_type)
         y_pred = tf.cast(y_pred, float_type)
 
@@ -1349,7 +1449,7 @@ class WeightedFocalLoss(keras.losses.Loss):
     def call(self, y_true, y_pred):
 
         # Ensure both y_true and y_pred are cast to float32
-        float_type = keras.backend.floatx()
+        float_type = tf.float32  # Always accumulate losses/metrics in float32 for numerical stability under mixed precision
         y_true = tf.cast(y_true, float_type)
         y_pred = tf.cast(y_pred, float_type)
 
@@ -1418,7 +1518,7 @@ class DSSIMLoss(keras.losses.Loss):
         return patches
 
     def call(self, y_true, y_pred):
-        float_type = keras.backend.floatx()
+        float_type = tf.float32  # Always accumulate losses/metrics in float32 for numerical stability under mixed precision
         y_true = tf.cast(y_true, float_type)
         y_pred = tf.cast(y_pred, float_type)
         kernel = [self.kernel_size, self.kernel_size]

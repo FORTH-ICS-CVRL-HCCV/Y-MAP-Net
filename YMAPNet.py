@@ -546,7 +546,9 @@ def detect_fallen_person(person_mask, normal_x, normal_y, normal_z, floor_mask,
                           floor_overlap_threshold=0.20,
                           normal_horiz_threshold=0.45,
                           furniture_overlap_threshold=0.25,
-                          min_bbox_area=400):
+                          min_bbox_area=400,
+                          dismiss_higher_angle_than=40,
+                          dilation_kernel_size=5):
     """
     Heuristically determine whether the visible person has fallen.
 
@@ -575,6 +577,12 @@ def detect_fallen_person(person_mask, normal_x, normal_y, normal_z, floor_mask,
                                   which the person is considered on furniture (not fallen)
         min_bbox_area           : minimum bounding-box area in heatmap pixels below which
                                   the detection is ignored (person too small / distant)
+        dismiss_higher_angle_than : if orientation_deg exceeds this value, clamp it to 0
+                                  (suppresses spurious horizontal readings from noisy blobs).
+                                  Set to 0 to disable.
+        dilation_kernel_size      : odd integer size of the square dilation kernel applied to
+                                  floor and furniture binary masks before overlap computation.
+                                  Set to 0 to disable.
 
     Returns a dict with:
         is_fallen           bool   -- overall verdict (majority vote of sub-signals)
@@ -594,11 +602,28 @@ def detect_fallen_person(person_mask, normal_x, normal_y, normal_z, floor_mask,
     fl_bin = (floor_mask  > floor_threshold ).astype(np.uint8)
     fu_bin = (furniture_mask > furniture_threshold).astype(np.uint8) if furniture_mask is not None else None
 
+    if dilation_kernel_size > 0:
+        dil_kernel = np.ones((dilation_kernel_size, dilation_kernel_size), np.uint8)
+        fl_bin = cv2.dilate(fl_bin, dil_kernel, iterations=1)
+        if fu_bin is not None:
+            fu_bin = cv2.dilate(fu_bin, dil_kernel, iterations=1)
+
     person_pixel_count = int(p_bin.sum())
     if person_pixel_count == 0:
         return dict(is_fallen=False, aspect_ratio=0.0, orientation_deg=0.0,
                     floor_overlap=0.0, normal_horiz_frac=0.0, furniture_overlap=0.0,
                     centroid_y_frac=0.0, person_pixel_count=0, signals={})
+
+    # ── filter to largest connected component ────────────────────────────────
+    #    Prevents a large real person blob + a small spurious false detection on
+    #    the opposite side of the image from merging into an artificially wide
+    #    bounding box that would falsely trigger the wide_bbox signal.
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(p_bin, connectivity=8)
+    if num_labels > 2:  # background + at least 2 foreground blobs
+        areas = stats[1:, cv2.CC_STAT_AREA]          # exclude background (label 0)
+        dominant_label = int(np.argmax(areas)) + 1   # +1 to re-index past background
+        p_bin = (labels == dominant_label).astype(np.uint8)
+        person_pixel_count = int(p_bin.sum())
 
     # ── 1. bounding-box aspect ratio ──────────────────────────────────────────
     ys, xs = np.where(p_bin)
@@ -625,6 +650,9 @@ def detect_fallen_person(person_mask, normal_x, normal_y, normal_z, floor_mask,
     else:
         theta_rad = 0.5 * np.arctan2(2.0 * mu11, mu20 - mu02)  # from horizontal
         orientation_deg = abs(np.degrees(theta_rad))            # 0=vertical, 90=horizontal
+
+    if dismiss_higher_angle_than > 0 and orientation_deg > dismiss_higher_angle_than:
+        orientation_deg = 0.0
 
     # centroid
     cx = M["m10"] / max(M["m00"], 1)
@@ -1490,7 +1518,7 @@ class YMAPNet:
     def __init__(self, modelPath, threshold=30, keypoint_threshold=50.0, engine="tensorflow", profiling = False, illustrate=False,
                        pruneTokens=False, monitor=list(), window_arrangement=list(),
                        screen_w=3840, screen_h=2400, depth_iterations=10,
-                       estimate_person_id=True, resolve_skeleton=True, vram_limit=4800):
+                       estimate_person_id=True, resolve_skeleton=True, vram_limit=4800, compileModel=True):
         self.model_path     = '2d_pose_estimation'
         self.cfg            = loadJSONConfiguration("%s/configuration.json" % self.model_path)
         self.serial         = self.cfg["serial"]
@@ -1510,7 +1538,8 @@ class YMAPNet:
                                              targetHeight   = self.cfg['outputHeight'],
                                              outputChannels = self.cfg['outputChannels'],
                                              pruneTokens    = pruneTokens,
-                                             VRAMLimit      = vram_limit
+                                             VRAMLimit      = vram_limit,
+                                             compileModel   = compileModel
                                             )
         #---------------------------------------------------------------------
         """
@@ -1609,6 +1638,7 @@ class YMAPNet:
         #---------------------------------------------------------------------
         
         self.denoised = None
+        self.show = True  # Set to False for headless runs to suppress GUI-only output
 
         #Legacy heatmap IDs
         self.chanDepth     = 29
@@ -1748,7 +1778,8 @@ class YMAPNet:
      self.description = decodeOneHotDescriptionToString(self.vocabulary, self.multihot_labels, K = 21)
 
 
-     if (self.description):
+     #Spams CLI — only print in headless runs (GUI shows it via compose_visualization)
+     if (self.description) and (not self.show):
                print("\n\nDescription : ",self.description)
     
 
@@ -1792,7 +1823,7 @@ class YMAPNet:
               sys.exit(0)
 
 
-    def process(self,frame,borders=False,static_frame_threshold=0.0):
+    def process(self,frame,borders=False,static_frame_threshold=0.0,eco_max_skip=10):
             self.input_image, keypointXMultiplier, keypointYMultiplier, keypointXOffset, keypointYOffset = preprocess_image(frame,target_size=self.input_size,add_borders=borders)
 
             self.keypointXMultiplier = keypointXMultiplier
@@ -1804,13 +1835,16 @@ class YMAPNet:
             # to the previous frame, reuse the last results and skip the network run.
             if static_frame_threshold > 0.0:
                 if hasattr(self, '_prev_input_image') and self._prev_input_image is not None:
-                    
                     frame_diff = np.mean(np.abs(self.input_image.astype(np.float32) - self._prev_input_image.astype(np.float32)))
-                    if frame_diff < static_frame_threshold:
+                    _skipped = getattr(self, '_eco_skipped_frames', 0)
+                    if frame_diff < static_frame_threshold and (eco_max_skip <= 0 or _skipped < eco_max_skip):
+                        self._eco_skipped_frames = _skipped + 1
                         return  # reuse self.keypoints_predictions / heatmapsOut etc. from last run
-                self._prev_input_image = self.input_image.copy()
+                self._prev_input_image   = self.input_image.copy()
+                self._eco_skipped_frames = 0
             else:
-                self._prev_input_image = None
+                self._prev_input_image   = None
+                self._eco_skipped_frames = 0
 
             #if (borders==True):
             #   frame = self.input_image

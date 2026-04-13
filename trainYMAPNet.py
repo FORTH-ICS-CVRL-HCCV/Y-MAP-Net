@@ -25,6 +25,12 @@ if (len(sys.argv)>1):
 # Set CUDA_VISIBLE_DEVICES to an empty string to force TensorFlow to use the CPU
 if (not useGPU):
      os.environ['CUDA_VISIBLE_DEVICES'] = '' # <- Force CPU
+# Persist XLA/cuDNN autotuning results across runs so the first-step
+# algorithm benchmarking only happens once.
+# XLA_PERSISTENT_CACHE_PATH must point to an existing directory or it is silently ignored.
+_xla_cache_dir = 'xla_cache'
+os.makedirs(_xla_cache_dir, exist_ok=True)
+os.environ['XLA_PERSISTENT_CACHE_PATH'] = _xla_cache_dir
 #----------------------------------------------
 try:
  import cv2
@@ -138,7 +144,7 @@ def createSelectedModel(cfg,testModel=True):
 #============================================================================================
 #============================================================================================
 #============================================================================================
-from NNTraining import logTrainingHistory,logText,logSomeInputsAndOutputs,printTFVersion, TrainingDataGenerator, getOptimizerFromCFG, custom_lr_scheduler, custom_lr_schedulerWarmup, DataAugmentation, weighted_token_loss, extract_validation_losses, check_vram_and_suggest_batch_size
+from NNTraining import logTrainingHistory,logText,logSomeInputsAndOutputs,printTFVersion, TrainingDataGenerator, PerfProfiler, getOptimizerFromCFG, custom_lr_scheduler, custom_lr_schedulerWarmup, DataAugmentation, weighted_token_loss, extract_validation_losses, check_vram_and_suggest_batch_size
 #============================================================================================
 #============================================================================================
 # Status server helpers
@@ -182,6 +188,39 @@ if __name__ == '__main__':
    seed(1)
    tf.random.set_seed(2)
 
+   # --profile : quick benchmark mode — loads only the validation set (typically
+   # ~5 000 samples that fit in RAM) and uses it as training data so a single
+   # epoch completes in minutes rather than hours.  Identifies GPU compute
+   # regressions without waiting for a full training run.
+   # Forces  cfg['streamValidation'] = 1  locally (config file is NOT modified).
+   profileMode = '--profile' in sys.argv
+
+   # --config Key Value  : override one config entry after loading configuration.json.
+   # The value string is coerced to the most specific Python type automatically:
+   #   "true"/"false"  → bool,  integer strings → int,  float strings → float,
+   #   everything else → str.
+   # Multiple --config pairs are all applied before anything else reads cfg.
+   # Example:  python3 trainYMAPNet.py --config epochs 1 --config mixedPrecision true
+   _cli_overrides = {}
+   _argv = sys.argv[1:]
+   i = 0
+   while i < len(_argv):
+       if _argv[i] == '--config' and i + 2 <= len(_argv) - 1:
+           _key   = _argv[i + 1]
+           _raw   = _argv[i + 2]
+           # Type coercion: bool > int > float > str
+           if   _raw.lower() == 'true':  _val = True
+           elif _raw.lower() == 'false': _val = False
+           else:
+               try:    _val = int(_raw)
+               except ValueError:
+                   try:    _val = float(_raw)
+                   except ValueError: _val = _raw
+           _cli_overrides[_key] = _val
+           i += 3
+       else:
+           i += 1
+
    #Have dataset variables on main scope
    dataset_generator = None
    shuffleData       = True
@@ -203,19 +242,37 @@ if __name__ == '__main__':
         from createJSONConfiguration import createJSONConfiguration
         cfg = createJSONConfiguration(jsonPath,useRAMfs=useRAMfs)
 
+   if _cli_overrides:
+       print(bcolors.WARNING, "Applying CLI config overrides (--config):", bcolors.ENDC)
+       for _k, _v in _cli_overrides.items():
+           _old = cfg.get(_k, '<unset>')
+           cfg[_k] = _v
+           print(bcolors.WARNING, "  %-30s %s  →  %s" % (_k, repr(_old), repr(_v)), bcolors.ENDC)
+
+   if profileMode:
+       # Force validation streaming and doValidation so dbValidation is always
+       # loaded as a streamed generator (small set, fits in RAM).
+       # Neither change is written back to 2d_pose_estimation/configuration.json.
+       cfg['streamValidation'] = 1
+       cfg['doValidation']     = True
+       print(bcolors.WARNING, "[PROFILE MODE] --profile active: forcing doValidation=True, "
+             "streamValidation=1 — validation DB will be reused as training data "
+             "for a fast 1-epoch timing benchmark.", bcolors.ENDC)
+
    ourDType       = tf.float32
    useXLA         = cfg.get('xlaJitCompile', False)
    if (cfg['mixedPrecision']):
-      print(bcolors.WARNING,"Using mixed precision mode!",bcolors.ENDC)
-      ##policy = keras.mixed_precision.Policy('mixed_float16')
-      #policy = keras.mixed_precision.Policy('float16')
-      #keras.mixed_precision.set_global_policy(policy)
-      #print(bcolors.WARNING,'Compute dtype:', policy.compute_dtype,bcolors.ENDC)  # Should print 'float16'
-      #print(bcolors.WARNING,'Variable dtype:', policy.variable_dtype,bcolors.ENDC)  # Should print 'float32'
-      #ourDType=tf.float16
       from tensorflow.keras import mixed_precision
-      # Enables mixed precision (e.g., float16 on GPU)
-      mixed_precision.set_global_policy("mixed_float16")
+      # bfloat16 has the same dynamic range as float32 (8 exponent bits),
+      # so no overflow/underflow and no LossScaleOptimizer needed.
+      # Ampere+ GPUs (RTX A6000, A100, etc.) have native bfloat16 Tensor Cores
+      # with the same throughput as float16 Tensor Cores.
+      mp_policy = cfg.get('mixedPrecisionPolicy', 'mixed_bfloat16')
+      mixed_precision.set_global_policy(mp_policy)
+      policy = mixed_precision.global_policy()
+      print(bcolors.WARNING,"Using mixed precision mode!  Policy:",mp_policy,bcolors.ENDC)
+      print(bcolors.WARNING,'Compute dtype:', policy.compute_dtype,bcolors.ENDC)
+      print(bcolors.WARNING,'Variable dtype:', policy.variable_dtype,bcolors.ENDC)
 
    if (useXLA):
       print(bcolors.WARNING,"Using XLA JIT compilation!",bcolors.ENDC)
@@ -307,14 +364,48 @@ if __name__ == '__main__':
    use_strategy = (numberOfGPUs > 1)
    strategy      = None
    if use_strategy:
+       # Enable memory growth ONLY for multi-GPU.  For single-GPU, TF's default
+       # behaviour (pre-allocate all VRAM once) is faster: the BFC allocator
+       # avoids repeated cudaMalloc/GPU-sync calls and fragmentation that the
+       # grow-on-demand strategy causes on every step of a large model.
+       # For multi-GPU we need growth so that each replica doesn't claim 100%
+       # VRAM on its device before the others have had a chance to allocate.
+       # Must be set before MirroredStrategy() which initialises NCCL.
+       if useGPU:
+           for gpu in tf.config.list_physical_devices('GPU'):
+               try:
+                   tf.config.experimental.set_memory_growth(gpu, True)
+               except RuntimeError as e:
+                   print(bcolors.WARNING, f"Could not set memory growth for {gpu}: {e}", bcolors.ENDC)
+
+       perGpuBatch = cfg['batchSize']
        # Scale the global batch so each GPU still processes cfg['batchSize']
        # samples per step. All DataLoaders are created AFTER this point so
        # they inherit the updated value automatically.
        cfg['batchSize'] = cfg['batchSize'] * numberOfGPUs
-       strategy = tf.distribute.MirroredStrategy(devices=cfg['GPUsUsedForTraining'])
+
+       # Linear scaling rule (Goyal et al. 2017, https://arxiv.org/abs/1706.02677):
+       # When the global batch grows by N×, the learning rate should also grow
+       # by N× to keep the same effective weight update magnitude per sample.
+       # Without this, multi-GPU training converges slower — the larger batch
+       # reduces gradient noise, and the unchanged LR underutilizes that benefit.
+       # We scale both learningRateStart and learningRateEnd since they feed the
+       # LR scheduler (custom_lr_scheduler), and also learningRate which is the
+       # optimizer's initial LR (overridden from epoch 1, but used for warmup).
+       cfg['learningRate']      = cfg['learningRate']      * numberOfGPUs
+       cfg['learningRateStart'] = cfg['learningRateStart'] * numberOfGPUs
+       cfg['learningRateEnd']   = cfg['learningRateEnd']   * numberOfGPUs
+
+       # NCCL is the fastest all-reduce backend for NVIDIA multi-GPU.
+       # Set explicitly to avoid fallback to the slower ring/hierarchical copy.
+       strategy = tf.distribute.MirroredStrategy(
+           devices=cfg['GPUsUsedForTraining'],
+           cross_device_ops=tf.distribute.NcclAllReduce()
+       )
        print(bcolors.OKGREEN, f"MirroredStrategy: {numberOfGPUs} GPUs — "
              f"global batch={cfg['batchSize']} "
-             f"({cfg['batchSize']//numberOfGPUs} per GPU)", bcolors.ENDC)
+             f"({perGpuBatch} per GPU) — "
+             f"LR scaled {numberOfGPUs}× to {cfg['learningRateStart']}", bcolors.ENDC)
    else:
        device = cfg['GPUsUsedForTraining'][0] if numberOfGPUs == 1 else '/device:CPU:0'
        print(bcolors.OKGREEN, f"Single-device training on {device} (no strategy overhead)", bcolors.ENDC)
@@ -358,6 +449,8 @@ if __name__ == '__main__':
         print(bcolors.OKGREEN,"Cleaning previous training artifacts.. ",bcolors.ENDC)
         os.system("rm 2d_pose_estimation/evaluation*.json 2d_pose_estimation/sample_report*.json 2d_pose_estimation/loss_history.txt")
         os.system("rm -rf 2d_pose_estimation/tensorboard") #Always clean tensorboard from now on
+
+
 
 
         #Command line parameter modifiers after loading the model
@@ -466,7 +559,23 @@ if __name__ == '__main__':
         #try streaming it which is very slow due to I/O operations but can work on small VRAM systems
         #or load it all in memory and use regular TF mechanisms to train on it
         #----------------------------------------------------------------
-        if True: #(checkIfFileExists(cfg['COCOTrainingJSONPath'])):
+        if profileMode:
+             # ── PROFILE MODE: reuse validation DB as training data ──────────────
+             # dbValidation was loaded above with ~5000 samples and fits in RAM.
+             # We redirect training to it so a 1-epoch run completes in minutes.
+             # No config file is modified; this is entirely local to this run.
+             # WARNING: this is a benchmarking shortcut — loss values are meaningless.
+             print(bcolors.WARNING, "[PROFILE MODE] Redirecting training to dbValidation "
+                   "(%d samples) — loss values are irrelevant, this is a timing benchmark only."
+                   % dbValidation.numberOfSamples, bcolors.ENDC)
+             dbTrain               = dbValidation
+             outLabels             = dbTrain.get_labels()
+             dataset_generator     = TrainingDataGenerator(cfg=cfg, db=dbTrain, batch_size=cfg['batchSize'], labels=outLabels, numberOfTokens=cfg["tokensOut"], numberOfClasses=cfg["tokensClasses"],
+                                                           log_dir=log_dir, workers=1, use_multiprocessing=False, max_queue_size=queueSize)
+             trainingDatasetLength = dbTrain.numberOfSamples
+             shuffleData           = False
+        else:
+         if True: #(checkIfFileExists(cfg['COCOTrainingJSONPath'])):
              dbTrain = DataLoader(
                                        (cfg['inputHeight'],cfg['inputWidth'],cfg['inputChannels']),
                                        (cfg['outputHeight'],cfg['outputWidth'],cfg['outputChannels']),
@@ -499,12 +608,12 @@ if __name__ == '__main__':
                   trainingDatasetLength = dbTrain.numberOfSamples
                   shuffleData           = False #<- shuffling is done inside the generator
              else:
-                  shuffleData           = True 
+                  shuffleData           = True
                   print(bcolors.WARNING,"Only streaming training data is supported any more to simplify code..!",bcolors.ENDC)
                   sys.exit(1)
         #----------------------------------------------------------------
 
-        steps_per_epoch = dbTrain.numberOfSamples // int(cfg['batchSize'])
+        steps_per_epoch = trainingDatasetLength // int(cfg['batchSize'])
 
         if cfg.get('outputDescriptors', False):
             desc_dim = dbTrain.get_descriptor_number_of_elements()
@@ -513,14 +622,34 @@ if __name__ == '__main__':
                 "Rebuild libDataLoader.so with -DUSE_DINOV2_FEATURES and verify .dinov2 files exist alongside each dataset."
             )
 
+        # Enrich cfg with model metrics before logging
+        trainable_params     = int(np.sum([np.prod(v.shape) for v in model.trainable_weights]))
+        non_trainable_params = int(np.sum([np.prod(v.shape) for v in model.non_trainable_weights]))
+        cfg['model_trainable_params']     = trainable_params
+        cfg['model_non_trainable_params'] = non_trainable_params
+        cfg['model_total_params']         = trainable_params + non_trainable_params
+        cfg['model_trainable_params_M']   = round(trainable_params     / 1e6, 3)
+        cfg['model_total_params_M']       = round((trainable_params + non_trainable_params) / 1e6, 3)
+        cfg['steps_per_epoch']            = steps_per_epoch
+        cfg['training_samples']           = trainingDatasetLength
+        print(f"Model parameters — trainable: {trainable_params:,}  non-trainable: {non_trainable_params:,}  total: {trainable_params+non_trainable_params:,}")
+
         # Print the shapes of inputs and outputs
         print("Training Configuration :", cfg)
         logText(cfg,log_dir)
+        
+        os.system("cat 2d_pose_estimation/configuration.json > status.txt") #Clear Status.txt with configuration until it gets updated
+        from plotTrainingProgressToSVG import writeStatusSVGPlaceholder
+        writeStatusSVGPlaceholder('status.svg')
 
         # Define Learning Rate Scheduler callback
         #lr_callback = keras.optimizers.schedules.CosineDecay(initial_learning_rate=cfg['learningRate'], decay_steps=cfg['epochs'] * steps_per_epoch)
         #lr_callback = tf.keras.callbacks.LearningRateScheduler(custom_lr_scheduler) <- This is not configurable
-        lr_callback = tf.keras.callbacks.LearningRateScheduler(lambda epoch: custom_lr_scheduler(epoch,cfg['learningRateStart'],cfg['learningRateEnd']))
+        # With multi-GPU the LR is scaled by numberOfGPUs (linear scaling rule).
+        # A 5-epoch warmup ramps the LR from endLoss to startLoss to prevent
+        # divergence from the large initial learning rate on random weights.
+        lr_warmup = 5 if use_strategy else 0
+        lr_callback = tf.keras.callbacks.LearningRateScheduler(lambda epoch: custom_lr_scheduler(epoch,cfg['learningRateStart'],cfg['learningRateEnd'],warmup_epochs=lr_warmup))
 
         #Early Stopping / Checkpointing
         whatToMonitor = cfg['earlyStoppingMonitor']
@@ -554,8 +683,17 @@ if __name__ == '__main__':
                                                   save_best_only=True,
                                                   save_weights_only=True,
                                                   start_from_epoch=cfg['earlyStoppingStart'],
-                                                  verbose=1
+                                                  verbose=1,
+                                                  total_epochs=cfg['epochs']
                                                  )
+        #-------------------------------------------------------------------------
+        from plotTrainingProgressToSVG import SVGLogger
+        svg_logger = SVGLogger(
+                               output_path  = "status.svg",
+                               monitor      = whatToMonitor,
+                               mode         = howToMonitor,
+                               total_epochs = cfg['epochs'],
+                              )
         #-------------------------------------------------------------------------
         # Create a distributed dataset from the tensorflow datasets
         #--------------------------------------------------------------------------------------------------------------------------------
@@ -676,30 +814,29 @@ if __name__ == '__main__':
              metrics = dict()
 
              from NNLosses import TopKAccuracyMetric,CosineSimilarityMetric,MultiHotF1Metric
-             #if (not cfg['mixedPrecision']): #Mixed precision nowadays may also have float32 dtype
-             if (ourDType==tf.float32): #More relaxed check
-                for i in range(cfg["tokensOut"]):
-                         #metrics["t%02u"%i] = keras.metrics.CosineSimilarity(name='cossim', dtype=ourDType, axis=1) #<- TODO: implement my own version at some point to fix float16 compat
-                         metrics["t%02u"%i] = CosineSimilarityMetric(name='cossim', dtype=ourDType, axis=1) #<- TODO: implement my own version at some point to fix float16 compat
-                if cfg.get('outputDescriptors', False):
-                         metrics['descriptors'] = CosineSimilarityMetric(name='desc_cossim', dtype=ourDType, axis=1)
+             # Safe under mixed precision: all output heads now emit float32
+             # (dtype='float32' on the output Dense/Rescaling layers) and all
+             # metrics below cast their inputs to float32 internally.
+             for i in range(cfg["tokensOut"]):
+                      metrics["t%02u"%i] = CosineSimilarityMetric(name='cossim', dtype=tf.float32, axis=1)
+             if cfg.get('outputDescriptors', False):
+                      metrics['descriptors'] = CosineSimilarityMetric(name='desc_cossim', dtype=tf.float32, axis=1)
 
-                # NOTE: 'accuracy' resolves to BinaryAccuracy for sigmoid outputs.
-                # With alpha=0.75 focal loss the model tends to predict many positives,
-                # making BinaryAccuracy uninformative (driven by FP rate).
-                # MultiHotF1Metric gives an honest per-sample micro-F1 at two operating points:
-                #   f1_thr05   — hard threshold 0.5 (standard, but sensitive to sigmoid calibration)
-                #   f1_top20   — treats top-20 predicted classes as positive (threshold-free,
-                #                more robust early in training when output scale is still shifting)
-                metrics['tokens_multihot']   = [
-                                                 MultiHotF1Metric(name="f1_thr05",  threshold=0.5,  top_k=None, dtype=ourDType),
-                                                 MultiHotF1Metric(name="f1_top20",  threshold=None, top_k=20,   dtype=ourDType),
-                                                 TopKAccuracyMetric(name="top3_accuracy",k=3, dtype=ourDType),   #<- Custom topk metric compatible with fp16
-                                                 TopKAccuracyMetric(name="top5_accuracy",k=5, dtype=ourDType)    #<- Custom topk metric compatible with fp16
-                                               ]
-             else:
-                print(bcolors.WARNING,"Disabling captioning metrics since they are not currently compatible with non float32 training :( ",bcolors.ENDC)
-                #metrics['tokens_multihot']   = [ CustomTopKCategoricalAccuracy(name="top3_accuracy",k=3), CustomTopKCategoricalAccuracy(name="top5_accuracy",k=5) ] #<- TODO: implement my own version to fix float16 compat
+             # NOTE: 'accuracy' resolves to BinaryAccuracy for sigmoid outputs.
+             # With alpha=0.75 focal loss the model tends to predict many positives,
+             # making BinaryAccuracy uninformative (driven by FP rate).
+             # MultiHotF1Metric gives an honest per-sample micro-F1 at two operating points:
+             #   f1_thr05   — hard threshold 0.5 (standard, but sensitive to sigmoid calibration)
+             #   f1_top20   — treats top-20 predicted classes as positive (threshold-free,
+             #                more robust early in training when output scale is still shifting)
+             metrics['tokens_multihot']   = [
+                                              #These metrics take ~20min / epoch (?)
+                                              #MultiHotF1Metric(name="f1_thr05",  threshold=0.5,  top_k=None, dtype=tf.float32),
+                                              #MultiHotF1Metric(name="f1_top20",  threshold=None, top_k=20,   dtype=tf.float32),
+                                              TopKAccuracyMetric(name="top1_accuracy",k=1, dtype=tf.float32),
+                                              TopKAccuracyMetric(name="top3_accuracy",k=3, dtype=tf.float32),
+                                              TopKAccuracyMetric(name="top5_accuracy",k=5, dtype=tf.float32)
+                                            ]
 
 
              metrics['hm_16b'] = [
@@ -708,7 +845,7 @@ if __name__ == '__main__':
 
              metrics['hm'] = [
                               hdm_metric,
-                              NonZeroCorrectPixelMetric(name="hdm_not0",         accuracyThreshold=HDM_THRESHOLD,start=0),
+                              #NonZeroCorrectPixelMetric(name="hdm_not0",         accuracyThreshold=HDM_THRESHOLD,start=0),
                               HeatmapDistanceMetricPartial(name="hdm_joints",    threshold=HDM_THRESHOLD,start=0, end=17),
                               NonZeroCorrectPixelMetric(name="hdm_not0_joints",  accuracyThreshold=HDM_THRESHOLD,start=0,end=17),
                               HeatmapDistanceMetricPartial(name="hdm_PAFs",      threshold=HDM_THRESHOLD,start=17,end=29),
@@ -771,7 +908,9 @@ if __name__ == '__main__':
         print(bcolors.OKGREEN,"Starting training.. ",bcolors.ENDC)
         #--------------------------------------------------------------------------------------------------------------------------------
         distributedValidationDataset = None
-        if (not onlyTrainingData):
+        if profileMode:
+         print(bcolors.WARNING,"[PROFILE MODE] Validation disabled.",bcolors.ENDC)
+        elif (not onlyTrainingData):
          if (cfg['streamValidation']):
           print(bcolors.OKGREEN,"Streaming validation dataset from filesystem..",bcolors.ENDC) 
           distributedValidationDataset = validation_generator
@@ -794,8 +933,10 @@ if __name__ == '__main__':
 
         data_augmentation = DataAugmentation(cfg,dbTrain)
         if (startEpoch!=0):
-             print(bcolors.OKGREEN,"Readjusting everything to start from epoch ",startEpoch," ..",bcolors.ENDC) 
+             print(bcolors.OKGREEN,"Readjusting everything to start from epoch ",startEpoch," ..",bcolors.ENDC)
              data_augmentation.on_epoch_end(startEpoch)
+
+        perf_profiler = PerfProfiler() if profileMode else None
 
         #If you want to use this also enable LOG_THREADING_INFORMATION=True in NNTraining.py
         #from NNTraining import BatchLoggerCallback
@@ -813,14 +954,23 @@ if __name__ == '__main__':
                                initial_epoch    = startEpoch,
                                shuffle          = shuffleData,
                                #steps_per_epoch  = steps_per_epoch, #<- Disable if not using Tensorflow Data Generator
-                               callbacks        = [tensorboard_callback, early_stopping, checkpointer, lr_callback, data_augmentation] #batch_logger
+                               callbacks        = [cb for cb in [perf_profiler, tensorboard_callback, early_stopping, checkpointer, lr_callback, data_augmentation, svg_logger] if cb is not None] #batch_logger
                              )
         #--------------------------------------------------------------------------------------------------------------------------------
+        if profileMode:
+            print(bcolors.WARNING, "[PROFILE MODE] Benchmark complete — skipping model save, evaluation and packaging.", bcolors.ENDC)
+            sys.exit(0)
         checkpointer.write_completion_status()
-        print(bcolors.WARNING,"Recompiling model using defaults to make it more portable across frameworks..",bcolors.ENDC)
-        model.compile(optimizer="adam", loss="mse")
 
    #Exit the multi GPU strategy scope here!
+
+   # Recompile OUTSIDE the strategy scope so the saved model carries a plain
+   # (non-distributed) optimizer.  If done inside the scope the optimizer is
+   # wrapped in MirroredStrategy's distribution logic, which makes the saved
+   # .keras file depend on the strategy and fail to load on a single-GPU or
+   # CPU-only machine.
+   print(bcolors.WARNING,"Recompiling model using defaults to make it more portable across frameworks..",bcolors.ENDC)
+   model.compile(optimizer="adam", loss="mse")
     
    # Perform any model optimizations requested by configuration and then save and package everything
    #--------------------------------------------------------------------------------------------------------------------------------
@@ -883,6 +1033,15 @@ if __name__ == '__main__':
    os.system("python3 evaluateYMAPNet.py --output 2d_pose_estimation/evaluation.json")
    #--------------------------------------------------------------------------------------------------------------------------------
 
+   #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+   if (not onlyTrainingData):
+       weight_val_array = dbValidation.get_token_frequencies()
+       extract_validation_losses(model, validation_generator, dbValidation)
+       dbValidation.dump_sample_report("2d_pose_estimation/sample_report_validation.json")
+       print("Done Dumping Validation Samples ")
+   #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+
    # Package output
    #--------------------------------------------------------------------------------------------------------------------------------
    print(bcolors.OKGREEN,"Training complete..",bcolors.ENDC)
@@ -894,14 +1053,6 @@ if __name__ == '__main__':
    else:
      print("Not packaging model")
    #--------------------------------------------------------------------------------------------------------------------------------
-
-   #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-   if (not onlyTrainingData):
-       weight_val_array = dbValidation.get_token_frequencies()
-       extract_validation_losses(model, validation_generator, dbValidation)
-       dbValidation.dump_sample_report("2d_pose_estimation/sample_report_validation.json")
-       print("Done Dumping Validation Samples ")
-   #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 
    # Accumulate tensorboard logs

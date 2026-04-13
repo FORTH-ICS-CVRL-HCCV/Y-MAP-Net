@@ -149,7 +149,8 @@ class TFExecutor():
                VRAMLimit      = None,
                fp16           = False,
                profiling      = False,
-               pruneTokens    = False
+               pruneTokens    = False,
+               compileModel   = True
               ):
                self.input_size           = (inputWidth,inputHeight)
                self.output_size          = (targetWidth,targetHeight)
@@ -240,7 +241,7 @@ class TFExecutor():
                    #self.model.summary()
                else:
                    from NNModel import load_keypoints_model
-                   self.model,self.input_size,self.output_size,self.numberOfHeatmaps = load_keypoints_model(modelPath)
+                   self.model,self.input_size,self.output_size,self.numberOfHeatmaps = load_keypoints_model(modelPath, compile=compileModel)
                
                #self.model.export("2d_pose_estimation", "tf_saved_model")    #Debug models
 
@@ -1003,7 +1004,8 @@ class NNExecutor():
                numberOfThreads= 4,
                profiling      = False,
                pruneTokens    = False,
-               VRAMLimit      = None
+               VRAMLimit      = None,
+               compileModel   = True
               ):
                 defaultModelDir  = "2d_pose_estimation/"
                 self.hz    = 0.0
@@ -1034,7 +1036,8 @@ class NNExecutor():
                                                 targetHeight   = targetHeight,
                                                 outputChannels = outputChannels,
                                                 pruneTokens    = pruneTokens,
-                                                VRAMLimit      = VRAMLimit
+                                                VRAMLimit      = VRAMLimit,
+                                                compileModel   = compileModel
                                                 )
                 elif (engine=="tf-lite") or (engine=="tflite"):
                         if (modelPath==defaultModelDir):
