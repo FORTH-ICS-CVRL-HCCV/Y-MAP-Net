@@ -148,6 +148,7 @@ int main(int argc, char** argv) {
     double       total_preprocess_ms = 0.0;
     double       total_forward_ms    = 0.0;
     double       total_post_ms       = 0.0;
+    double       total_nn_ms         = 0.0;  // pre + fwd + post (no display)
 
     auto loop_start = Clock::now();
 
@@ -189,6 +190,7 @@ int main(int argc, char** argv) {
         std::vector<Keypoint> kps = detect_keypoints(
             heatmap.data(), W, H, OCH, cfg.threshold, sx, sy);
         total_post_ms += ms_since(t_post);
+        total_nn_ms   += ms_since(t_pre);  // pre + fwd + post
 
         ++frame_count;
 
@@ -201,11 +203,12 @@ int main(int argc, char** argv) {
             cv::Mat vis = frame.clone();
             draw_skeleton(vis, kps, cfg.threshold);
 
-            // FPS overlay
-            double elapsed = ms_since(loop_start);
-            double fps = frame_count * 1000.0 / (elapsed > 0.0 ? elapsed : 1.0);
+            // FPS overlay: NN fps (pre+fwd+post) and loop fps (wall)
+            double elapsed   = ms_since(loop_start);
+            double loop_fps  = frame_count * 1000.0 / (elapsed > 0.0 ? elapsed : 1.0);
+            double nn_fps    = frame_count * 1000.0 / (total_nn_ms > 0.0 ? total_nn_ms : 1.0);
             char buf[64];
-            std::snprintf(buf, sizeof(buf), "%.1f fps", fps);
+            std::snprintf(buf, sizeof(buf), "NN %.1f  loop %.1f fps", nn_fps, loop_fps);
             cv::putText(vis, buf, {10, 25}, cv::FONT_HERSHEY_SIMPLEX,
                         0.7, {0, 255, 0}, 2, cv::LINE_AA);
 
@@ -222,12 +225,13 @@ int main(int argc, char** argv) {
     // -----------------------------------------------------------------------
     if (frame_count > 0) {
         double elapsed_s = ms_since(loop_start) / 1000.0;
+        double nn_fps    = frame_count * 1000.0 / (total_nn_ms > 0.0 ? total_nn_ms : 1.0);
         printf("\n--- Performance (%d frames) ---\n", frame_count);
-        printf("  Wall time      : %.2f s  (%.1f fps)\n",
-               elapsed_s, frame_count / elapsed_s);
+        printf("  NN fps         : %.1f  (pre+fwd+post only)\n", nn_fps);
+        printf("  Loop fps       : %.1f  (wall, incl. display)\n", frame_count / elapsed_s);
+        printf("  Wall time      : %.2f s\n", elapsed_s);
         printf("  Preprocess     : %.2f ms/frame\n", total_preprocess_ms / frame_count);
-        printf("  Forward pass   : %.2f ms/frame\n",
-               total_forward_ms / frame_count);
+        printf("  Forward pass   : %.2f ms/frame\n", total_forward_ms / frame_count);
         printf("  Postprocess    : %.2f ms/frame\n", total_post_ms / frame_count);
     }
 
