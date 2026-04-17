@@ -393,6 +393,7 @@ def main_pose_estimation(args):
         resolve_skeleton=not args.no_skeleton,
         vram_limit=args.vram,
         compileModel=False,          # skip optimizer state loading — not needed for inference
+        show = show
     )
     # noise is [0,1]; add_noise_to_image expects the same range
     estimator.addedNoise = noise

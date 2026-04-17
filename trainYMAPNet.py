@@ -125,8 +125,10 @@ def createSelectedModel(cfg,testModel=True):
                                           quantize           = cfg['quantizeModel'],
                                           serial             = cfg['serial'],
                                           useDescriptors     = cfg['outputDescriptors'],
-                                          useASPPBridge           = cfg.get('useASPPBridge', False),
-                                          useDepthRefinementHead  = cfg.get('useDepthRefinementHead', False),
+                                          useASPPBridge             = cfg.get('useASPPBridge', False),
+                                          useDepthRefinementHead    = cfg.get('useDepthRefinementHead', False),
+                                          useCoordConv              = cfg.get('useCoordConv', False),
+                                          useBottleneckAttention    = cfg.get('useBottleneckAttention', False),
                                           depth_channel_start     = _resolve_depth_channel_start(cfg),
                                           depth_channel_end       = _resolve_depth_channel_end(cfg),
                                           convBlockRepetitions    = cfg.get('convBlockRepetitions', 2)
@@ -628,8 +630,8 @@ if __name__ == '__main__':
         cfg['model_trainable_params']     = trainable_params
         cfg['model_non_trainable_params'] = non_trainable_params
         cfg['model_total_params']         = trainable_params + non_trainable_params
-        cfg['model_trainable_params_M']   = round(trainable_params     / 1e6, 3)
-        cfg['model_total_params_M']       = round((trainable_params + non_trainable_params) / 1e6, 3)
+        #cfg['model_trainable_params_M']   = round(trainable_params     / 1e6, 3)
+        #cfg['model_total_params_M']       = round((trainable_params + non_trainable_params) / 1e6, 3)
         cfg['steps_per_epoch']            = steps_per_epoch
         cfg['training_samples']           = trainingDatasetLength
         print(f"Model parameters — trainable: {trainable_params:,}  non-trainable: {non_trainable_params:,}  total: {trainable_params+non_trainable_params:,}")
@@ -1029,8 +1031,9 @@ if __name__ == '__main__':
            pass
    import gc
    gc.collect()
-   print(bcolors.OKGREEN, "Running post-training evaluation (evaluateYMAPNet.py)...", bcolors.ENDC)
-   os.system("python3 evaluateYMAPNet.py --output 2d_pose_estimation/evaluation.json")
+   #--------------------------------------------------------------------------------------------------------------------------------
+   #print(bcolors.OKGREEN, "Running post-training evaluation (evaluateYMAPNet.py)...", bcolors.ENDC)
+   #os.system("python3 evaluateYMAPNet.py --output 2d_pose_estimation/evaluation.json")
    #--------------------------------------------------------------------------------------------------------------------------------
 
    #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>

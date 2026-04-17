@@ -814,7 +814,8 @@ def visualize_normals(cfg, heatmapsOut):
        normalZ          =  heatmapsOut[32] #20
         
        normalXYZ = cv2.merge([normalX, normalY, normalZ])
-       cv2.imshow('Combined Normals', normalXYZ)
+       _h, _w = normalXYZ.shape[:2]
+       cv2.imshow('Combined Normals', cv2.resize(normalXYZ, (int(_w * 1.5), int(_h * 1.5))))
 #----------------------------------------------------------------------------------------
 #----------------------------------------------------------------------------------------
 def calculateRelativeValue(y,h,value,minimum,maximum):
@@ -1108,8 +1109,8 @@ def visualize_heatmaps(cfg, instanceLabels, imageIn, frameNumber, heatmapsOut, k
            heatmap = cv2.resize(heatmap, (new_width, new_height))
           elif i>=29: #17
            #original_height, original_width = heatmap.shape[:2] 
-           #new_width  = int(original_width  * 0.75) #1.25
-           #new_height = int(original_height * 0.75) #1.25
+           #new_width  = int(original_width  * 1.25) #1.25
+           #new_height = int(original_height * 1.25) #1.25
            #heatmap = cv2.resize(heatmap, (new_width, new_height))
            pass
  
@@ -1117,9 +1118,14 @@ def visualize_heatmaps(cfg, instanceLabels, imageIn, frameNumber, heatmapsOut, k
         title = label_heatmap(cfg,i,keypoint_names,instanceLabels)
 
         if (drawPAFs and i>=17 and i<=28) or  (drawJoints and i<=17) or ((i>=29) and ((showClassHeatmaps) or (i<=33)) ): # 17 / 20
-         cv2.imshow(title, heatmap)
+         _BIG_HM = {"Depthmap", "Very Close", "Person"}
+         _disp = heatmap
+         if title in _BIG_HM:
+             _h, _w = _disp.shape[:2]
+             _disp = cv2.resize(_disp, (int(_w * 1.5), int(_h * 1.5)))
+         cv2.imshow(title, _disp)
          if (frameNumber==1):
-             hm_specs.append((title, heatmap.shape[1], heatmap.shape[0]))
+             hm_specs.append((title, _disp.shape[1], _disp.shape[0]))
 
         i=i+1
 
@@ -1265,8 +1271,6 @@ def decodeOneHotDescriptionToString(vocabulary, onehot):
     
     return description
 """
-
-
 #----------------------------------------------------------------------------------------
 def decodeClassesDescriptionToString(vocabulary, classscores):
     if (vocabulary is None) or (classscores is None):
@@ -1518,7 +1522,7 @@ class YMAPNet:
     def __init__(self, modelPath, threshold=30, keypoint_threshold=50.0, engine="tensorflow", profiling = False, illustrate=False,
                        pruneTokens=False, monitor=list(), window_arrangement=list(),
                        screen_w=3840, screen_h=2400, depth_iterations=10,
-                       estimate_person_id=True, resolve_skeleton=True, vram_limit=4800, compileModel=True):
+                       estimate_person_id=True, resolve_skeleton=True, vram_limit=4800, compileModel=True, show=True):
         self.model_path     = '2d_pose_estimation'
         self.cfg            = loadJSONConfiguration("%s/configuration.json" % self.model_path)
         self.serial         = self.cfg["serial"]
@@ -1638,7 +1642,7 @@ class YMAPNet:
         #---------------------------------------------------------------------
         
         self.denoised = None
-        self.show = True  # Set to False for headless runs to suppress GUI-only output
+        self.show = show  # Set to False for headless runs to suppress GUI-only output
 
         #Legacy heatmap IDs
         self.chanDepth     = 29
@@ -1900,7 +1904,7 @@ class YMAPNet:
                self.description = decodeOneHotDescriptionToString(self.vocabulary, self.multihot_labels)
 
 
-             if (self.description):
+             if (self.description) and (not self.show):
                print("\n\nDescription : ",self.description)
 
 
@@ -2083,12 +2087,14 @@ class YMAPNet:
             selected_joints  = self.heatmapsOut[0:17]  # Slicing to get heatmaps 0 through 16
             union_joints     = np.max(selected_joints, axis=0)
             if show:
-              cv2.imshow('Joint Heatmap Union', union_joints)
+              _h, _w = union_joints.shape[:2]
+              cv2.imshow('Joint Heatmap Union', cv2.resize(union_joints, (int(_w * 1.5), int(_h * 1.5))))
 
             selected_pafs    = self.heatmapsOut[17:29]  # Slicing to get heatmaps 0 through 16
             union_pafs       = np.max(selected_pafs, axis=0)
             if show:
-              cv2.imshow('PAFs Union', union_pafs)
+              _h, _w = union_pafs.shape[:2]
+              cv2.imshow('PAFs Union', cv2.resize(union_pafs, (int(_w * 1.5), int(_h * 1.5))))
 
             selected_segms   = np.stack(self.heatmapsOut[39:61], axis=0)  # Slicing to get heatmaps
             union_segms      = np.max(selected_segms, axis=0)
@@ -2096,7 +2102,8 @@ class YMAPNet:
             if show:
               #print(f"DEBUG selected_segms: dtype={selected_segms.dtype}, min={np.min(selected_segms)}, max={np.max(selected_segms)}")
               #print(f"DEBUG union_segms: dtype={union_segms.dtype}, min={np.min(union_segms)}, max={np.max(union_segms)}")
-              cv2.imshow('Class segmentation Union', union_segms)
+              _h, _w = union_segms.shape[:2]
+              cv2.imshow('Class segmentation Union', cv2.resize(union_segms, (int(_w * 1.5), int(_h * 1.5))))
               cv2.imshow('Unsegmented', (not_segmented * 255).astype(np.uint8))
 
             human_segms      = None
@@ -2128,7 +2135,8 @@ class YMAPNet:
               improved_depth   = apply_bilateral_filter(improved_depth)
               #improved_depth = integrate_normals(normalX, normalY, normalZ, initial_depth=depthmap, iterations=5000)
               if show:
-                 cv2.imshow('Improved Depth', improved_depth)
+                 _h, _w = improved_depth.shape[:2]
+                 cv2.imshow('Improved Depth', cv2.resize(improved_depth, (int(_w * 1.5), int(_h * 1.5))))
                  #print("Improved Depth 8 bit MIN: ",np.min(improved_depth))
                  #print("Improved Depth 8 bit MAX: ",np.max(improved_depth))
 
@@ -2269,9 +2277,9 @@ class YMAPNet:
                         if img_arr.ndim >= 2:
                             primary_specs.append((name, img_arr.shape[1], img_arr.shape[0]))
 
-                def _pro(name, img):
+                def _pro(name, img, scale=1.0):
                     if img is not None and img.ndim >= 2:
-                        processed_specs.append((name, img.shape[1], img.shape[0]))
+                        processed_specs.append((name, int(img.shape[1] * scale), int(img.shape[0] * scale)))
 
                 # ── primary outputs (Monitor 1) ───────────────────────────────
                 _pri("Overlay",           visRGB)
@@ -2290,14 +2298,14 @@ class YMAPNet:
                     _pri("Monitor Visualization", monVis)
 
                 # ── processed maps (Monitor 2) ────────────────────────────────
-                _pro("Depthmap",                self.heatmapsOut[self.chanDepth] if len(self.heatmapsOut) > self.chanDepth else None)
-                _pro("Joint Heatmap Union",     union_joints)
-                _pro("PAFs Union",              union_pafs)
-                _pro("Class segmentation Union",union_segms)
+                _pro("Depthmap",                self.heatmapsOut[self.chanDepth] if len(self.heatmapsOut) > self.chanDepth else None, scale=1.5)
+                _pro("Joint Heatmap Union",     union_joints,  scale=1.5)
+                _pro("PAFs Union",              union_pafs,    scale=1.5)
+                _pro("Class segmentation Union",union_segms,   scale=1.5)
                 _pro("Unsegmented",             not_segmented)
                 if normals_on:
-                    _pro("Improved Depth",      improved_depth)
-                    _pro("Combined Normals",    self.heatmapsOut[self.chanNormalX])
+                    _pro("Improved Depth",      improved_depth,                      scale=1.5)
+                    _pro("Combined Normals",    self.heatmapsOut[self.chanNormalX],   scale=1.5)
                     _pro("Normals X",           self.heatmapsOut[self.chanNormalX])
                     _pro("Normals Y",           self.heatmapsOut[self.chanNormalY])
                     _pro("Normals Z",           self.heatmapsOut[self.chanNormalZ])

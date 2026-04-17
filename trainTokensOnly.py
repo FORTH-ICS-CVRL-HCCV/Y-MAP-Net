@@ -337,7 +337,8 @@ if __name__ == '__main__':
                                                   save_best_only=True,
                                                   save_weights_only=True,
                                                   start_from_epoch=0,
-                                                  verbose=1
+                                                  verbose=1,
+                                                  total_epochs=cfg['epochs']
                                                  )
         #-------------------------------------------------------------------------
 

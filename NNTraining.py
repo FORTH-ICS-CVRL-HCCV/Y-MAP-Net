@@ -255,7 +255,11 @@ def getOptimizerFromCFG(cfg, globalClipNorm=None):
    # per-element clipvalue. With all-reduce, rare high-weight samples have
    # num_gpus x more gradient impact than single-GPU (diluted by fewer replicas
    # than samples); global_clipnorm bounds the total update size regardless.
-   clip_value  = None if globalClipNorm else 1.0
+   wd          = float(cfg.get('weightDecay', 0.0))
+   beta_1      = float(cfg.get('optimizerBeta1', 0.9))
+   beta_2      = float(cfg.get('optimizerBeta2', 0.999))
+   epsilon     = float(cfg.get('optimizerEpsilon', 1e-7))
+   clip_value  = None if globalClipNorm else float(cfg.get('optimizerClipValue', 1.0))
    global_clip = globalClipNorm
 
    # AdamWCautious was missing global_clipnorm, which meant multi-GPU
@@ -264,11 +268,11 @@ def getOptimizerFromCFG(cfg, globalClipNorm=None):
    # and global_clipnorm is the correct way to bound total update size.
    if (cfg['optimizer']=='adamwcautious'):
       from NNLosses import AdamWCautious
-      optimizer = AdamWCautious(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=clip_value,global_clipnorm=global_clip)
+      optimizer = AdamWCautious(learning_rate=float(cfg['learningRate']),beta_1=beta_1,beta_2=beta_2,epsilon=epsilon,weight_decay=wd or None,clipnorm=None,clipvalue=clip_value,global_clipnorm=global_clip)
    elif (cfg['optimizer']=='adam'):
-      optimizer = tf.keras.optimizers.Adam(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=clip_value,global_clipnorm=global_clip)
+      optimizer = tf.keras.optimizers.Adam(learning_rate=float(cfg['learningRate']),beta_1=beta_1,beta_2=beta_2,epsilon=epsilon,clipnorm=None,clipvalue=clip_value,global_clipnorm=global_clip)
    elif (cfg['optimizer']=='adamw'):
-      optimizer = tf.keras.optimizers.AdamW(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=clip_value,global_clipnorm=global_clip)
+      optimizer = tf.keras.optimizers.AdamW(learning_rate=float(cfg['learningRate']),weight_decay=wd,beta_1=beta_1,beta_2=beta_2,epsilon=epsilon,clipnorm=None,clipvalue=clip_value,global_clipnorm=global_clip)
    else:
       raise ValueError("Unknown optimizer (",cfg['optimizer'],")")
 
@@ -1068,8 +1072,8 @@ class DataAugmentation(keras.callbacks.Callback):
             oldPS=self.db.PAFSize
             """
             #Go up and down
-            self.db.gradientSize,self.db.PAFSize = jointGradientScheduler(epoch, 
-                                                                          warmup_epochs=self.cfg["earlyStoppingStart"],
+            self.db.gradientSize,self.db.PAFSize = jointGradientScheduler(epoch,
+                                                                          warmup_epochs=self.cfg.get("heatmapGradientWarmupEpochs", self.cfg["earlyStoppingStart"]),
                                                                           mature_epochs=(self.cfg["epochs"] - self.cfg["epochs"]//5), total_epochs=self.cfg["epochs"],
                                                                           max_joints_gradient=self.cfg["heatmapGradientSize"],
                                                                           min_joints_gradient=self.cfg["heatmapGradientSizeMinimum"],
@@ -1082,8 +1086,8 @@ class DataAugmentation(keras.callbacks.Callback):
             #self.db.PAFSize      = self.cfg["heatmapPAFSizeMinimum"]
 
             #Decay to minimum after warmup epochs
-            self.db.gradientSize,self.db.PAFSize = jointGradientSchedulerSimple(epoch, 
-                                                                                warmup_epochs=self.cfg["earlyStoppingStart"],
+            self.db.gradientSize,self.db.PAFSize = jointGradientSchedulerSimple(epoch,
+                                                                                warmup_epochs=self.cfg.get("heatmapGradientWarmupEpochs", self.cfg["earlyStoppingStart"]),
                                                                                 max_joints_gradient=self.cfg["heatmapGradientSize"],
                                                                                 min_joints_gradient=self.cfg["heatmapGradientSizeMinimum"],
                                                                                 max_paf_gradient=self.cfg["heatmapPAFSize"],

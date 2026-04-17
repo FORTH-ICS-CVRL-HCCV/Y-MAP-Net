@@ -631,6 +631,25 @@ def build_resnethybrid_cnn(input_shape, #num_classes,
     return model
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
+class CoordConv2D(tf.keras.layers.Layer):
+    """Appends normalized (x, y) coordinate channels to the feature map.
+    Gives the model explicit spatial position information with zero trainable parameters.
+    Liu et al. 2018 - https://arxiv.org/abs/1807.03247
+    """
+    def call(self, x):
+        shape  = tf.shape(x)
+        h, w   = shape[1], shape[2]
+        xs = tf.cast(tf.linspace(-1.0, 1.0, w), x.dtype)
+        ys = tf.cast(tf.linspace(-1.0, 1.0, h), x.dtype)
+        x_grid, y_grid = tf.meshgrid(xs, ys)           # [H, W] each
+        ones   = tf.ones_like(x[:, :, :, :1])
+        x_grid = x_grid[None, :, :, None] * ones       # [B, H, W, 1]
+        y_grid = y_grid[None, :, :, None] * ones       # [B, H, W, 1]
+        return tf.concat([x, x_grid, y_grid], axis=-1) # [B, H, W, C+2]
+
+    def get_config(self):
+        return super().get_config()
+#-------------------------------------------------------------------------------
 class AddGaussianNoise(tf.keras.layers.Layer):
     def __init__(self, stddev, **kwargs):
         super(AddGaussianNoise, self).__init__()
@@ -732,6 +751,37 @@ def decoder_block(input, skip_features, num_filters, activation, namePrefix="dec
     x_residual = Add(name="residual_%s" % tag)([x, x_conv])
 
     return x_residual
+#-------------------------------------------------------------------------------
+def bottleneck_attention_block(x, num_heads=8, name='bottleneck_attn'):
+    """
+    Spatial self-attention applied at the UNet bottleneck (after the bridge block).
+
+    At 7 encoder stages on a 256×256 input, the bridge operates at 2×2 spatial
+    resolution — only 4 spatial tokens. MHA is essentially free here but gives
+    the model global relational reasoning that convolutions cannot: e.g. left
+    wrist <-> right shoulder interdependencies for pose estimation.
+
+    Uses pre-norm convention (LayerNorm before attention) for training stability.
+    Compatible with ASPP bridge, XLA, and mixed precision.
+    """
+    static_h = int(x.shape[1])
+    static_w = int(x.shape[2])
+    static_c = int(x.shape[3])
+    seq_len  = static_h * static_w
+    key_dim  = max(8, static_c // num_heads)
+
+    # [B, H, W, C] → [B, H*W, C]
+    seq = Reshape((seq_len, static_c), name=f'{name}_flatten')(x)
+
+    # Pre-norm → self-attention → residual
+    seq_norm = keras.layers.LayerNormalization(name=f'{name}_ln')(seq)
+    attn_out = keras.layers.MultiHeadAttention(
+        num_heads=num_heads, key_dim=key_dim, name=f'{name}_mha'
+    )(seq_norm, seq_norm)
+    seq = Add(name=f'{name}_residual')([seq, attn_out])
+
+    # [B, H*W, C] → [B, H, W, C]
+    return Reshape((static_h, static_w, static_c), name=f'{name}_unflatten')(seq)
 #-------------------------------------------------------------------------------
 #A more powerful block in the bridge, such as dilated convolutions or even an atrous spatial pyramid pooling (ASPP) module, which can capture multi-scale context better.
 def bridge_block(input, num_filters, activation, layers = 3):
@@ -857,6 +907,8 @@ def build_unet(inputHeight,
                depth_channel_end=-1,
                useASPPBridge=False,
                useDepthRefinementHead=False,
+               useCoordConv=False,
+               useBottleneckAttention=False,
                convBlockRepetitions=2):
 
     #Uncomment to go "single
@@ -871,9 +923,12 @@ def build_unet(inputHeight,
     inputs       = Input(input_shape, name="input")
     after_input  = keras.layers.Rescaling(scale=1.0/255.0, name="float_scaling")(inputs)
 
-    #Fixed : https://github.com/keras-team/keras/issues/19589 ?     
+    #Fixed : https://github.com/keras-team/keras/issues/19589 ?
     if (gaussianNoiseSTD>0.0):
         after_input = AddGaussianNoise(gaussianNoiseSTD, name='training_gaussian_noise')(after_input)
+
+    if useCoordConv:
+        after_input = CoordConv2D(name='coord_conv')(after_input)
 
     # Encoder blocks
     encoder_layers = []
@@ -895,6 +950,8 @@ def build_unet(inputHeight,
     else:
         b = bridge_block(p, forceBridgeSize, activation=activation, layers=midSectionRepetitions)
 
+    if useBottleneckAttention:
+        b = bottleneck_attention_block(b, num_heads=8)
 
     if (useDescriptors):
        descriptor_outputs = append_descriptor_layer(bridge_layer=b, layer_width = 768) 
