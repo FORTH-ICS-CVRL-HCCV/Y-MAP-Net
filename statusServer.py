@@ -6,10 +6,10 @@ import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 ROUTES = {
-    "/":            ("status.html", "text/html; charset=utf-8"),
+    "/": ("status.html", "text/html; charset=utf-8"),
     "/status.html": ("status.html", "text/html; charset=utf-8"),
-    "/status.svg":  ("status.svg",  "image/svg+xml"),
-    "/status.txt":  ("status.txt",  "text/plain; charset=utf-8"),
+    "/status.svg": ("status.svg", "image/svg+xml"),
+    "/status.txt": ("status.txt", "text/plain; charset=utf-8"),
 }
 
 

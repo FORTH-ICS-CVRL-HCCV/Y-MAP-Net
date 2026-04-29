@@ -6,21 +6,19 @@ illustrationFrames = 0
 #bkg = cv2.imread("illustration/composite_bkg.png")
 logo = cv2.imread("illustration/logo.png")
 
-
 # Open background video
 background_video_path = "illustration/DISABLEDbg5.mp4"
 if os.path.exists(background_video_path):
-     background_video = cv2.VideoCapture(background_video_path)
-     if not background_video.isOpened():
+    background_video = cv2.VideoCapture(background_video_path)
+    if not background_video.isOpened():
         raise FileNotFoundError(f"Unable to open background video: {bg_video_path}")
 else:
-     background_video = None
+    background_video = None
 
 os.system("rm composite_*.png")
 
 
-
-def get_next_background(video,bg_size):
+def get_next_background(video, bg_size):
     """
     Retrieves the next frame from the video. If the video ends, it restarts.
     """
@@ -49,6 +47,7 @@ def convert_to_three_channel(image):
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     return image
 
+
 def load_images_and_labels(filenames):
     """
     Loads images from disk and assigns labels based on filenames.
@@ -59,26 +58,26 @@ def load_images_and_labels(filenames):
     """
     # Filepaths for images
 
-    
-    labelMap =  {'overlay':'RGB+Pose',
-                 'normals':'Normals',
-                 'depth':'Depth',
-                 'improved_depth':'Depth Improved',
-                 'pafs_union':'PAFs',
-                 'class_union':'Class Union',
-                 'joint_heatmap_union':'Joint Heatmap Union',
-                 'hm33':'Text',
-                 'hm34':'Person',
-                 'hm35':'Vehicle',
-                 'hm36':'Animal',
-                 'hm37':'Object',
-                 'hm38':'Furniture',
-                 'hm39':'Appliance',
-                 'hm40':'Material',
-                 'hm41':'Obstacle',
-                 'hm42':'Building',
-                 'hm43':'Nature'
-                 }
+    labelMap = {
+        'overlay': 'RGB+Pose',
+        'normals': 'Normals',
+        'depth': 'Depth',
+        'improved_depth': 'Depth Improved',
+        'pafs_union': 'PAFs',
+        'class_union': 'Class Union',
+        'joint_heatmap_union': 'Joint Heatmap Union',
+        'hm33': 'Text',
+        'hm34': 'Person',
+        'hm35': 'Vehicle',
+        'hm36': 'Animal',
+        'hm37': 'Object',
+        'hm38': 'Furniture',
+        'hm39': 'Appliance',
+        'hm40': 'Material',
+        'hm41': 'Obstacle',
+        'hm42': 'Building',
+        'hm43': 'Nature'
+    }
 
     # Load images and labels
     images = []
@@ -89,39 +88,39 @@ def load_images_and_labels(filenames):
             images.append(img)
             labelFromFilename = filename.split('.')[0]
             if labelFromFilename in labelMap:
-               label = labelMap[labelFromFilename]
+                label = labelMap[labelFromFilename]
             else:
-               label = labelFromFilename
-            
+                label = labelFromFilename
+
             labels.append(label)  # Label as filename without extension
         else:
             print(f"Warning: {filename} could not be loaded.")
-    
 
     return images, labels
 
 
-def calculateRelativeValueIllustration(y,h,value,minimum,maximum):
-    if (maximum==minimum):
-       return int(y + (h/2)) 
+def calculateRelativeValueIllustration(y, h, value, minimum, maximum):
+    if (maximum == minimum):
+        return int(y + (h / 2))
     #-------------------------------------------------
     #TODO IMPROVE THIS!
     vRange = (maximum - minimum)
-    return int( y + (h/2) - ( value / vRange ) * (h/2) )
+    return int(y + (h / 2) - (value / vRange) * (h / 2))
 
-def drawSinglePlotValueListIllustration(valueListRAW,color,itemName,image,x,y,w,h,minimumValue=None,maximumValue=None):
+
+def drawSinglePlotValueListIllustration(valueListRAW, color, itemName, image, x, y, w, h, minimumValue=None,
+                                        maximumValue=None):
     import cv2
     import numpy as np
 
- 
     #Make sure to only display last items of list that fit
-    margin=10 
+    margin = 10
     #--------------------------------------------
-    if (len(valueListRAW) > w+margin ):
-       itemsToRemove = len(valueListRAW) - w
-       valueList = valueListRAW[itemsToRemove:]
+    if (len(valueListRAW) > w + margin):
+        itemsToRemove = len(valueListRAW) - w
+        valueList = valueListRAW[itemsToRemove:]
     else:
-       valueList = valueListRAW
+        valueList = valueListRAW
     #--------------------------------------------
 
     #Auto Scale Y Axis if there is no minimum/maximum
@@ -132,61 +131,62 @@ def drawSinglePlotValueListIllustration(valueListRAW,color,itemName,image,x,y,w,
         maximumValue = max(valueList)
     #--------------------------------------------
 
-    
-    if (minimumValue==maximumValue):
-      color = (40,40,40) #Dead plot
+    if (minimumValue == maximumValue):
+        color = (40, 40, 40)  #Dead plot
 
     listMaxValue = np.max(valueList)
-    if (listMaxValue>maximumValue):
-          maximumValue=listMaxValue*2 #Adapt to maximum
+    if (listMaxValue > maximumValue):
+        maximumValue = listMaxValue * 2  #Adapt to maximum
 
     #---------------------------------------------------------------------------------------
-    cv2.line(image, pt1=(x,y+h), pt2=(x+w,y+h), color=color, thickness=1) #X-Axis
-    cv2.line(image, pt1=(x,y),   pt2=(x,y+h),   color=color, thickness=1)            #Y-Axis
+    cv2.line(image, pt1=(x, y + h), pt2=(x + w, y + h), color=color, thickness=1)  #X-Axis
+    cv2.line(image, pt1=(x, y), pt2=(x, y + h), color=color, thickness=1)  #Y-Axis
     #---------------------------------------------------------------------------------------
 
-    font = cv2.FONT_HERSHEY_SIMPLEX 
-    org = (x,y) 
-    fontScale = 0.3 
-    tColor = (123,123,123)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    org = (x, y)
+    fontScale = 0.3
+    tColor = (123, 123, 123)
     thickness = 1
-    message =  '%s' % (itemName) 
-    image = cv2.putText(image, message , (x-1,y-1), font, fontScale, (0,0,0) , thickness, cv2.LINE_AA)
-    image = cv2.putText(image, message , org, font, fontScale, color, thickness, cv2.LINE_AA)
-    message =  'Max %0.2f ' % (maximumValue) 
-    org = (x,y+10) 
-    image = cv2.putText(image, message , (x-1,y+10-1), font, fontScale, (0,0,0) , thickness, cv2.LINE_AA)
-    image = cv2.putText(image, message , org, font, fontScale, color, thickness, cv2.LINE_AA)
-    message =  'Min %0.2f ' % (minimumValue) 
-    org = (x,y+h+10) 
-    image = cv2.putText(image, message , (x-1,y+h+10-1), font, fontScale, (0,0,0) , thickness, cv2.LINE_AA)
-    image = cv2.putText(image, message , org, font, fontScale, color, thickness, cv2.LINE_AA)
-    
-    if (len(valueList)>2):
-      for frameID in range(1,len(valueList)):
-            #-------------------------------------------------------------------------------------
-            previousValue = calculateRelativeValueIllustration(y,h,valueList[frameID-1],minimumValue,maximumValue)
-            nextValue     = calculateRelativeValueIllustration(y,h,valueList[frameID],minimumValue,maximumValue)
-            #-------------------------------------------------------------------------------------
-            jointPointPrev = (int(x+ frameID-1),      previousValue )
-            jointPointNext = (int(x+ frameID),        nextValue )
-            if (itemName=="hip_yrotation"):  
-                color=(0,0,255) 
-            
-            cv2.line(image, pt1=jointPointPrev, pt2=jointPointNext, color=color, thickness=1)  
+    message = '%s' % (itemName)
+    image = cv2.putText(image, message, (x - 1, y - 1), font, fontScale, (0, 0, 0), thickness, cv2.LINE_AA)
+    image = cv2.putText(image, message, org, font, fontScale, color, thickness, cv2.LINE_AA)
+    message = 'Max %0.2f ' % (maximumValue)
+    org = (x, y + 10)
+    image = cv2.putText(image, message, (x - 1, y + 10 - 1), font, fontScale, (0, 0, 0), thickness, cv2.LINE_AA)
+    image = cv2.putText(image, message, org, font, fontScale, color, thickness, cv2.LINE_AA)
+    message = 'Min %0.2f ' % (minimumValue)
+    org = (x, y + h + 10)
+    image = cv2.putText(image, message, (x - 1, y + h + 10 - 1), font, fontScale, (0, 0, 0), thickness, cv2.LINE_AA)
+    image = cv2.putText(image, message, org, font, fontScale, color, thickness, cv2.LINE_AA)
 
-    org = (int(x+len(valueList)), calculateRelativeValueIllustration(y,h,valueList[len(valueList)-1],minimumValue,maximumValue) ) 
-    message =  '%0.2f' % (valueList[len(valueList)-1]) 
-    image = cv2.putText(image, message , org, font, fontScale, (0,0,0), thickness, cv2.LINE_AA)
+    if (len(valueList) > 2):
+        for frameID in range(1, len(valueList)):
+            #-------------------------------------------------------------------------------------
+            previousValue = calculateRelativeValueIllustration(y, h, valueList[frameID - 1], minimumValue, maximumValue)
+            nextValue = calculateRelativeValueIllustration(y, h, valueList[frameID], minimumValue, maximumValue)
+            #-------------------------------------------------------------------------------------
+            jointPointPrev = (int(x + frameID - 1), previousValue)
+            jointPointNext = (int(x + frameID), nextValue)
+            if (itemName == "hip_yrotation"):
+                color = (0, 0, 255)
 
-    org = (1+int(x+len(valueList)), 1+calculateRelativeValueIllustration(y,h,valueList[len(valueList)-1],minimumValue,maximumValue) ) 
-    image = cv2.putText(image, message , org, font, fontScale, color, thickness, cv2.LINE_AA)
+            cv2.line(image, pt1=jointPointPrev, pt2=jointPointNext, color=color, thickness=1)
+
+    org = (int(x + len(valueList)),
+           calculateRelativeValueIllustration(y, h, valueList[len(valueList) - 1], minimumValue, maximumValue))
+    message = '%0.2f' % (valueList[len(valueList) - 1])
+    image = cv2.putText(image, message, org, font, fontScale, (0, 0, 0), thickness, cv2.LINE_AA)
+
+    org = (1 + int(x + len(valueList)),
+           1 + calculateRelativeValueIllustration(y, h, valueList[len(valueList) - 1], minimumValue, maximumValue))
+    image = cv2.putText(image, message, org, font, fontScale, color, thickness, cv2.LINE_AA)
 
 
 #python3 run2DPoseEstimator.py --illustrate --from /media/ammar/MAGICIAN16TB/Magician/tofas.mp4 --crop 89 50 480 450
-def compose_visualization(images, labels, description=None, bg_size=(1920, 1080), img_size=(256, 256), 
-                          text_color=(255, 255, 255), margin=20, save=True, frameRate=None, 
-                          relative_border_size=0.1, simpleBackground=None, corner_radius=20):  
+def compose_visualization(images, labels, description=None, bg_size=(1920, 1080), img_size=(256, 256),
+                          text_color=(255, 255, 255), margin=20, save=True, frameRate=None, relative_border_size=0.1,
+                          simpleBackground=None, corner_radius=20):
     """
     Creates a composited image with visualizations placed inside rounded rectangles.
 
@@ -210,12 +210,12 @@ def compose_visualization(images, labels, description=None, bg_size=(1920, 1080)
     global background_video
     if background_video is None:
         #If no background video was found set it to (255,255,255) white / (0,0,0) black
-        simpleBackground=255
+        simpleBackground = 255
 
     if simpleBackground is None:
         composite = get_next_background(background_video, (bg_size[0], bg_size[1]))
-        composite = cv2.GaussianBlur(composite, (5, 5), 1) #Smooth background to make it less prevalent
-        composite = cv2.GaussianBlur(composite, (5, 5), 1) #Smooth background to make it less prevalent
+        composite = cv2.GaussianBlur(composite, (5, 5), 1)  #Smooth background to make it less prevalent
+        composite = cv2.GaussianBlur(composite, (5, 5), 1)  #Smooth background to make it less prevalent
     else:
         composite = np.full((bg_size[1], bg_size[0], 3), simpleBackground, dtype=np.uint8)
 
@@ -225,7 +225,6 @@ def compose_visualization(images, labels, description=None, bg_size=(1920, 1080)
         mask = np.any(logo != [0, 0, 0], axis=-1)  # shape: (h, w), dtype: bool
         # Overlay the logo onto the composite using the mask
         composite[mask] = logo[mask]
-
 
     cols = bg_size[0] // (img_size[0] + margin)
     rows = (len(images) + cols - 1) // cols
@@ -284,7 +283,6 @@ def compose_visualization(images, labels, description=None, bg_size=(1920, 1080)
 
         cv2.putText(overlay, label, (text_x, text_y), font, font_scale, text_color, font_thickness, cv2.LINE_AA)
 
-
         if y + box_h <= bg_size[1] and x + box_w <= bg_size[0]:
             region = composite[y:y + box_h, x:x + box_w]
             mask_bool = mask[:, :, 0] > 0
@@ -298,22 +296,23 @@ def compose_visualization(images, labels, description=None, bg_size=(1920, 1080)
 
     if frameRate is not None:
         if type(frameRate) is list:
-          drawSinglePlotValueListIllustration(frameRate,(0,200,0),"Neural Network Framerate (Hz)",composite,1650,50,200,100,minimumValue=0,maximumValue=25)
+            drawSinglePlotValueListIllustration(frameRate, (0, 200, 0), "Neural Network Framerate (Hz)", composite,
+                                                1650, 50, 200, 100, minimumValue=0, maximumValue=25)
         else:
-          fr_text = "Framerate: %0.2f Hz" % frameRate
-          text_size = cv2.getTextSize(fr_text, font, font_scale, font_thickness)[0]
-          fx = bg_size[0] - text_size[0] - 40
-          fy = text_size[1] + 50
-          cv2.putText(composite, fr_text, (fx+2, fy+2), font, font_scale, text_color, font_thickness, cv2.LINE_AA)
-          cv2.putText(composite, fr_text, (fx, fy), font, font_scale, (0,0,0), font_thickness, cv2.LINE_AA)
+            fr_text = "Framerate: %0.2f Hz" % frameRate
+            text_size = cv2.getTextSize(fr_text, font, font_scale, font_thickness)[0]
+            fx = bg_size[0] - text_size[0] - 40
+            fy = text_size[1] + 50
+            cv2.putText(composite, fr_text, (fx + 2, fy + 2), font, font_scale, text_color, font_thickness, cv2.LINE_AA)
+            cv2.putText(composite, fr_text, (fx, fy), font, font_scale, (0, 0, 0), font_thickness, cv2.LINE_AA)
 
     if description is not None:
         desc_text = f"Caption: {description}"
         text_size = cv2.getTextSize(desc_text, font, font_scale, font_thickness)[0]
-        dx = 420 #(bg_size[0] - text_size[0]) // 2 #Not auto centering makes it less dizzying
+        dx = 420  #(bg_size[0] - text_size[0]) // 2 #Not auto centering makes it less dizzying
         dy = bg_size[1] - 100
-        cv2.putText(composite, desc_text, (dx+2, dy+2), font, font_scale, text_color, font_thickness, cv2.LINE_AA)
-        cv2.putText(composite, desc_text, (dx, dy), font, font_scale, (0,0,0) , font_thickness, cv2.LINE_AA)
+        cv2.putText(composite, desc_text, (dx + 2, dy + 2), font, font_scale, text_color, font_thickness, cv2.LINE_AA)
+        cv2.putText(composite, desc_text, (dx, dy), font, font_scale, (0, 0, 0), font_thickness, cv2.LINE_AA)
 
     if save:
         global illustrationFrames
@@ -323,22 +322,20 @@ def compose_visualization(images, labels, description=None, bg_size=(1920, 1080)
     return composite
 
 
-
 if __name__ == '__main__':
-  filenames = [
-        "overlay.png", "normals.png", "depth.png",  "improved_depth.png",  
-        "joint_heatmap_union.png", "pafs_union.png", "class_union.png",  
-        "hm33.png", "hm34.png", "hm35.png", "hm36.png", "hm37.png", "hm38.png",
-        "hm39.png", "hm40.png", "hm41.png", "hm42.png", "hm43.png"]
+    filenames = [
+        "overlay.png", "normals.png", "depth.png", "improved_depth.png", "joint_heatmap_union.png", "pafs_union.png",
+        "class_union.png", "hm33.png", "hm34.png", "hm35.png", "hm36.png", "hm37.png", "hm38.png", "hm39.png",
+        "hm40.png", "hm41.png", "hm42.png", "hm43.png"
+    ]
 
-  # Load images and labels
-  images, labels = load_images_and_labels(filenames)
+    # Load images and labels
+    images, labels = load_images_and_labels(filenames)
 
-  # Generate composite visualization
-  composite_image = compose_visualization(images, labels, save=True)
+    # Generate composite visualization
+    composite_image = compose_visualization(images, labels, save=True)
 
-  # Show the result
-  cv2.imshow("Composite Visualization", composite_image)
-  cv2.waitKey(0)
-  cv2.destroyAllWindows()
-
+    # Show the result
+    cv2.imshow("Composite Visualization", composite_image)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()

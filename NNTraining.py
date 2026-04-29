@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-
 """
 Author : "Ammar Qammaz"
 Copyright : "2024 Foundation of Research and Technology, Computer Science Department Greece, See license.txt"
@@ -20,159 +19,172 @@ import datetime
 import threading
 import queue
 
-LOG_THREADING_INFORMATION=False
+LOG_THREADING_INFORMATION = False
 tickBase = 0
 #----------------------------------------------
 useGPU = True
-if (len(sys.argv)>1):
-       #print('Argument List:', str(sys.argv))
-       for i in range(0, len(sys.argv)):
-           if (sys.argv[i]=="--cpu"):
-             useGPU = False
+if (len(sys.argv) > 1):
+    #print('Argument List:', str(sys.argv))
+    for i in range(0, len(sys.argv)):
+        if (sys.argv[i] == "--cpu"):
+            useGPU = False
 # Set CUDA_VISIBLE_DEVICES to an empty string to force TensorFlow to use the CPU
 if (not useGPU):
-     os.environ['CUDA_VISIBLE_DEVICES'] = '' # <- Force CPU
+    os.environ['CUDA_VISIBLE_DEVICES'] = ''  # <- Force CPU
 #----------------------------------------------
 try:
- import cv2
- import tensorflow as tf
- import keras
- from keras import callbacks 
- from keras.callbacks import TensorBoard
- from keras import layers, models
- from keras.models import Sequential
- 
- #C Dataloader
- sys.path.append('datasets/DataLoader')
- from DataLoader import DataLoader
- 
- from NNConverter import saveNNModel
+    import cv2
+    import tensorflow as tf
+    import keras
+    from keras import callbacks
+    from keras.callbacks import TensorBoard
+    from keras import layers, models
+    from keras.models import Sequential
+
+    #C Dataloader
+    sys.path.append('datasets/DataLoader')
+    from DataLoader import DataLoader
+
+    from NNConverter import saveNNModel
 except Exception as e:
- print("An exception occurred:", str(e))
- print("Issue:\n source venv/bin/activate")
- print("Before running this script")
- sys.exit(1)
+    print("An exception occurred:", str(e))
+    print("Issue:\n source venv/bin/activate")
+    print("Before running this script")
+    sys.exit(1)
 #-------------------------------------------------------------------------------
-from NNLosses import RSquaredMetric,HeatmapDistanceMetric,AdamWCautious
-from tools import bcolors,read_json_file,checkIfPathExists,checkIfFileExists,convert_bytes
+from NNLosses import RSquaredMetric, HeatmapDistanceMetric, AdamWCautious
+from tools import bcolors, read_json_file, checkIfPathExists, checkIfFileExists, convert_bytes
+
+
 #-------------------------------------------------------------------------------
 def logTrainingHistory(cfg, log_dir, log_name, history):
-  # Extract training and validation loss history
-  training_loss   = history.history['loss']
-  validation_loss = None 
-  if 'val_loss' in history.history:
-           validation_loss = history.history['val_loss']
+    # Extract training and validation loss history
+    training_loss = history.history['loss']
+    validation_loss = None
+    if 'val_loss' in history.history:
+        validation_loss = history.history['val_loss']
 
-  # Save loss history to a text file
-  with open('%s/%s' % (log_dir,log_name) , 'w') as f:
-    f.write('Training Loss:\n')
-    f.write('\n'.join(map(str, training_loss)))
-    if validation_loss:
-        f.write('\nValidation Loss:\n')
-        f.write('\n'.join(map(str, validation_loss)))
+    # Save loss history to a text file
+    with open('%s/%s' % (log_dir, log_name), 'w') as f:
+        f.write('Training Loss:\n')
+        f.write('\n'.join(map(str, training_loss)))
+        if validation_loss:
+            f.write('\nValidation Loss:\n')
+            f.write('\n'.join(map(str, validation_loss)))
 
-  print("Loss history saved")
+    print("Loss history saved")
+
+
 #-------------------------------------------------------------------------------
 def logText(cfg, log_dir, subject="TrainingParameters"):
     try:
-      # Create a summary writer
-      param_log = tf.summary.create_file_writer(log_dir)
+        # Create a summary writer
+        param_log = tf.summary.create_file_writer(log_dir)
 
-      with param_log.as_default():
-        # Convert the dictionary to a formatted string
-        params_str = "\n".join([f"{key}: {value}" for key, value in cfg.items()])
-        # Log the parameters as text
-        tf.summary.text(subject, params_str, step=0)
+        with param_log.as_default():
+            # Convert the dictionary to a formatted string
+            params_str = "\n".join([f"{key}: {value}" for key, value in cfg.items()])
+            # Log the parameters as text
+            tf.summary.text(subject, params_str, step=0)
     except Exception as e:
         print(f"Error storing logging parameters in tensorboard: {e}")
+
+
 #-------------------------------------------------------------------------------
-def logSomeInputsAndOutputs(inputs, outputs, outputs16B, labels, log_dir, samples, description="Validation Data", localSave=False):
+def logSomeInputsAndOutputs(inputs, outputs, outputs16B, labels, log_dir, samples, description="Validation Data",
+                            localSave=False):
     try:
-      # Create a summary writer
-      image_log = tf.summary.create_file_writer(log_dir)
+        # Create a summary writer
+        image_log = tf.summary.create_file_writer(log_dir)
 
-      with image_log.as_default():
+        with image_log.as_default():
 
-        sample_indices = np.random.choice(len(inputs), size=min(samples,len(inputs)), replace=False)
+            sample_indices = np.random.choice(len(inputs), size=min(samples, len(inputs)), replace=False)
 
-        for logID in sample_indices:
-            #Store the image as float32 [0..1] RGB to make sure tensorboard visualizes it correctly
-            image_as_float = inputs[logID].astype(np.float32)
-            image = image_as_float / 255.0
+            for logID in sample_indices:
+                #Store the image as float32 [0..1] RGB to make sure tensorboard visualizes it correctly
+                image_as_float = inputs[logID].astype(np.float32)
+                image = image_as_float / 255.0
 
-            # Convert input and output arrays to TensorFlow tensors
-            bgr_image_tensor = tf.convert_to_tensor([image], dtype=tf.float32)
+                # Convert input and output arrays to TensorFlow tensors
+                bgr_image_tensor = tf.convert_to_tensor([image], dtype=tf.float32)
 
-            # Swap BGR to RGB not needed 
-            #rgb_image_tensor = tf.reverse(bgr_image_tensor, axis=[-1])
+                # Swap BGR to RGB not needed
+                #rgb_image_tensor = tf.reverse(bgr_image_tensor, axis=[-1])
 
-            # Write input image summary
-            tf.summary.image(f"{description} Image {logID} Input", bgr_image_tensor , step=logID) #rgb_image_tensor
+                # Write input image summary
+                tf.summary.image(f"{description} Image {logID} Input", bgr_image_tensor, step=logID)  #rgb_image_tensor
 
-            # Write output image summary
-            numberOfHeatmaps = outputs.shape[3] #Should be 18 ?
-            for heatmapID in range(0,numberOfHeatmaps):
-               heatmap = outputs[logID,:,:,heatmapID]
-               #print(f"Heatmap {heatmapID} dimensions: {heatmap.shape}")
-               # Add batch and channel dimensions
-               heatmapS            = np.squeeze(heatmap)
-               heatmapS            = np.expand_dims(heatmapS, axis=-1)
-               heatmap_as_float    = (heatmapS.astype(np.float32) + 120.0) / 240.0
-               output_image_tensor = tf.convert_to_tensor([heatmap_as_float], dtype=tf.float32)
+                # Write output image summary
+                numberOfHeatmaps = outputs.shape[3]  #Should be 18 ?
+                for heatmapID in range(0, numberOfHeatmaps):
+                    heatmap = outputs[logID, :, :, heatmapID]
+                    #print(f"Heatmap {heatmapID} dimensions: {heatmap.shape}")
+                    # Add batch and channel dimensions
+                    heatmapS = np.squeeze(heatmap)
+                    heatmapS = np.expand_dims(heatmapS, axis=-1)
+                    heatmap_as_float = (heatmapS.astype(np.float32) + 120.0) / 240.0
+                    output_image_tensor = tf.convert_to_tensor([heatmap_as_float], dtype=tf.float32)
 
-               thisOutputlabel = "#%u" % heatmapID
-               if (heatmapID < len(labels)):
-                    thisOutputlabel = labels[heatmapID]
+                    thisOutputlabel = "#%u" % heatmapID
+                    if (heatmapID < len(labels)):
+                        thisOutputlabel = labels[heatmapID]
 
-               if (localSave):
-                 print("Saving local heatmap for sample ",logID)
-                 cv2.imwrite('heatmap_in_%u.png'%(logID),image_as_float)
-                 cv2.imwrite('heatmap_%u_%u.png'%(logID,heatmapID),heatmap_as_float)
-               tf.summary.image(f"{description} Image {logID} Output / {thisOutputlabel}", output_image_tensor, step=logID)
+                    if (localSave):
+                        print("Saving local heatmap for sample ", logID)
+                        cv2.imwrite('heatmap_in_%u.png' % (logID), image_as_float)
+                        cv2.imwrite('heatmap_%u_%u.png' % (logID, heatmapID), heatmap_as_float)
+                    tf.summary.image(f"{description} Image {logID} Output / {thisOutputlabel}", output_image_tensor,
+                                     step=logID)
 
-            numberOfHeatmaps = outputs16B.shape[3] #Should be 18 ?
-            for heatmapID in range(0,numberOfHeatmaps):
-               heatmap = outputs16B[logID,:,:,heatmapID]
-               #print(f"Heatmap {heatmapID} dimensions: {heatmap.shape}")
-               # Add batch and channel dimensions
-               heatmapS            = np.squeeze(heatmap)
-               heatmapS            = np.expand_dims(heatmapS, axis=-1)
-               heatmap_as_float    =  ( heatmapS.astype(np.float32) + 120.0) / 240.0
-               output_image_tensor = tf.convert_to_tensor([heatmap_as_float], dtype=tf.float32)
-               thisOutputlabel = "#%u-16BIT" % heatmapID
+                numberOfHeatmaps = outputs16B.shape[3]  #Should be 18 ?
+                for heatmapID in range(0, numberOfHeatmaps):
+                    heatmap = outputs16B[logID, :, :, heatmapID]
+                    #print(f"Heatmap {heatmapID} dimensions: {heatmap.shape}")
+                    # Add batch and channel dimensions
+                    heatmapS = np.squeeze(heatmap)
+                    heatmapS = np.expand_dims(heatmapS, axis=-1)
+                    heatmap_as_float = (heatmapS.astype(np.float32) + 120.0) / 240.0
+                    output_image_tensor = tf.convert_to_tensor([heatmap_as_float], dtype=tf.float32)
+                    thisOutputlabel = "#%u-16BIT" % heatmapID
 
-               if (localSave):
-                 print("Saving local heatmap for sample ",logID)
-                 cv2.imwrite('heatmap16B_%u_%u.png'%(logID,heatmapID),heatmap_as_float)
-               tf.summary.image(f"{description} Image {logID} Output / {thisOutputlabel}", output_image_tensor, step=logID)
-
-
+                    if (localSave):
+                        print("Saving local heatmap for sample ", logID)
+                        cv2.imwrite('heatmap16B_%u_%u.png' % (logID, heatmapID), heatmap_as_float)
+                    tf.summary.image(f"{description} Image {logID} Output / {thisOutputlabel}", output_image_tensor,
+                                     step=logID)
 
     except Exception as e:
         print(f"Error storing image in tensorboard: {e}")
         sys.exit(1)
+
+
 #<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 def get_tick_count_microseconds_mn():
     """Simulates GetTickCountMicrosecondsMN from C."""
     global tickBase
     rawTicks = int(time.time() * 1_000_000)
-    if (tickBase==0):
-         tickBase = rawTicks
+    if (tickBase == 0):
+        tickBase = rawTicks
 
     return rawTicks - tickBase
+
 
 def log_thread_progress(thread_label: str, start: int, part: str):
     global LOG_THREADING_INFORMATION
     if (LOG_THREADING_INFORMATION):
-      filename = f"thread_{thread_label}.log"
-      try:
-        with open(filename, "a") as fp:
-            timestamp = get_tick_count_microseconds_mn()
-            fp.write(f"{timestamp},{start},{part}\n")
-      except IOError:
-        pass  # You can handle the error if needed
+        filename = f"thread_{thread_label}.log"
+        try:
+            with open(filename, "a") as fp:
+                timestamp = get_tick_count_microseconds_mn()
+                fp.write(f"{timestamp},{start},{part}\n")
+        except IOError:
+            pass  # You can handle the error if needed
+
+
 #<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 class BatchLoggerCallback(keras.callbacks.Callback):
+
     def __init__(self, thread_id="gpu"):
         super().__init__()
         self.thread_id = thread_id
@@ -184,42 +196,46 @@ class BatchLoggerCallback(keras.callbacks.Callback):
 
     def on_train_batch_end(self, batch, logs=None):
         log_thread_progress(self.thread_id, 0, f"update_gpu_batch")
+
+
 #<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 def printTFVersion():
-       global useGPU
-       print("")
-       print("Tensorflow version : ",tf.__version__)
-       print("Keras version      : ",keras.__version__) #<- no longer available in TF-2.13
-       print("Numpy version      : ",np.__version__)
-       #-----------------------------
-       from tensorflow.python.platform import build_info as tf_build_info
-       print("TF/CUDA version    : ",tf_build_info.build_info['cuda_version'])
-       print("TF/CUDNN version   : ",tf_build_info.build_info['cudnn_version'])
-       print("Use GPU            : ",useGPU)
-       #-----------------------------
-       if useGPU:
-         physical_devices = tf.config.list_physical_devices('GPU')
-         if physical_devices:
-            for gpuID,gpu in enumerate(physical_devices):
-                print("GPU #",gpuID," Name:", gpu.name)
+    global useGPU
+    print("")
+    print("Tensorflow version : ", tf.__version__)
+    print("Keras version      : ", keras.__version__)  #<- no longer available in TF-2.13
+    print("Numpy version      : ", np.__version__)
+    #-----------------------------
+    from tensorflow.python.platform import build_info as tf_build_info
+    print("TF/CUDA version    : ", tf_build_info.build_info['cuda_version'])
+    print("TF/CUDNN version   : ", tf_build_info.build_info['cudnn_version'])
+    print("Use GPU            : ", useGPU)
+    #-----------------------------
+    if useGPU:
+        physical_devices = tf.config.list_physical_devices('GPU')
+        if physical_devices:
+            for gpuID, gpu in enumerate(physical_devices):
+                print("GPU #", gpuID, " Name:", gpu.name)
                 try:
                     # Note: The following code may not be available in older versions of TensorFlow
-                    memory_info = tf.config.experimental.get_memory_info('GPU:%u'%gpuID)
-                    print("GPU #",gpuID," Memory Currently Used (in MB):", memory_info['current'] / (1024**2))
-                    print("GPU #",gpuID," Memory Peak Used (in MB):", memory_info['peak'] / (1024**2))
+                    memory_info = tf.config.experimental.get_memory_info('GPU:%u' % gpuID)
+                    print("GPU #", gpuID, " Memory Currently Used (in MB):", memory_info['current'] / (1024**2))
+                    print("GPU #", gpuID, " Memory Peak Used (in MB):", memory_info['peak'] / (1024**2))
                 except Exception as e:
                     print(f"Error getting memory info for GPU #{gpuID}: {e}")
-         else:
+        else:
             print("No GPU available.")
-       print("Threads Available:")
-       os.system("cat /proc/cpuinfo | grep processor | wc -l")
-       os.system("lscpu")
-       os.system("numactl --hardware")
-       os.system("cat /proc/pressure/memory") #<- Memory Pressure
-       os.system("df -h /dev/shm")
-       os.system("df -h /")
-       os.system("free -h") #<- Memory In General
-       print("")
+    print("Threads Available:")
+    os.system("cat /proc/cpuinfo | grep processor | wc -l")
+    os.system("lscpu")
+    os.system("numactl --hardware")
+    os.system("cat /proc/pressure/memory")  #<- Memory Pressure
+    os.system("df -h /dev/shm")
+    os.system("df -h /")
+    os.system("free -h")  #<- Memory In General
+    print("")
+
+
 #-------------------------------------------------------------------------------
 """
 def getLossFromCFG(cfg):
@@ -246,50 +262,60 @@ def getLossFromCFG(cfg):
              hmloss=cfg['loss']
         return hmloss
 """
+
+
 #-------------------------------------------------------------------------------
 def getOptimizerFromCFG(cfg, globalClipNorm=None):
-   if not 'optimizer' in cfg:
-      raise ValueError("Did not find a declaration for optimizer in json configuration")
+    if not 'optimizer' in cfg:
+        raise ValueError("Did not find a declaration for optimizer in json configuration")
 
-   # When globalClipNorm is set (multi-GPU), use global norm clipping instead of
-   # per-element clipvalue. With all-reduce, rare high-weight samples have
-   # num_gpus x more gradient impact than single-GPU (diluted by fewer replicas
-   # than samples); global_clipnorm bounds the total update size regardless.
-   wd          = float(cfg.get('weightDecay', 0.0))
-   beta_1      = float(cfg.get('optimizerBeta1', 0.9))
-   beta_2      = float(cfg.get('optimizerBeta2', 0.999))
-   epsilon     = float(cfg.get('optimizerEpsilon', 1e-7))
-   clip_value  = None if globalClipNorm else float(cfg.get('optimizerClipValue', 1.0))
-   global_clip = globalClipNorm
+    # When globalClipNorm is set (multi-GPU), use global norm clipping instead of
+    # per-element clipvalue. With all-reduce, rare high-weight samples have
+    # num_gpus x more gradient impact than single-GPU (diluted by fewer replicas
+    # than samples); global_clipnorm bounds the total update size regardless.
+    wd = float(cfg.get('weightDecay', 0.0))
+    beta_1 = float(cfg.get('optimizerBeta1', 0.9))
+    beta_2 = float(cfg.get('optimizerBeta2', 0.999))
+    epsilon = float(cfg.get('optimizerEpsilon', 1e-7))
+    clip_value = None if globalClipNorm else float(cfg.get('optimizerClipValue', 1.0))
+    global_clip = globalClipNorm
 
-   # AdamWCautious was missing global_clipnorm, which meant multi-GPU
-   # training fell back to per-element clipvalue only.  With gradient
-   # all-reduce, rare high-magnitude samples are amplified across replicas
-   # and global_clipnorm is the correct way to bound total update size.
-   if (cfg['optimizer']=='adamwcautious'):
-      from NNLosses import AdamWCautious
-      optimizer = AdamWCautious(learning_rate=float(cfg['learningRate']),beta_1=beta_1,beta_2=beta_2,epsilon=epsilon,weight_decay=wd or None,clipnorm=None,clipvalue=clip_value,global_clipnorm=global_clip)
-   elif (cfg['optimizer']=='adam'):
-      optimizer = tf.keras.optimizers.Adam(learning_rate=float(cfg['learningRate']),beta_1=beta_1,beta_2=beta_2,epsilon=epsilon,clipnorm=None,clipvalue=clip_value,global_clipnorm=global_clip)
-   elif (cfg['optimizer']=='adamw'):
-      optimizer = tf.keras.optimizers.AdamW(learning_rate=float(cfg['learningRate']),weight_decay=wd,beta_1=beta_1,beta_2=beta_2,epsilon=epsilon,clipnorm=None,clipvalue=clip_value,global_clipnorm=global_clip)
-   else:
-      raise ValueError("Unknown optimizer (",cfg['optimizer'],")")
+    # AdamWCautious was missing global_clipnorm, which meant multi-GPU
+    # training fell back to per-element clipvalue only.  With gradient
+    # all-reduce, rare high-magnitude samples are amplified across replicas
+    # and global_clipnorm is the correct way to bound total update size.
+    if (cfg['optimizer'] == 'adamwcautious'):
+        from NNLosses import AdamWCautious
+        optimizer = AdamWCautious(learning_rate=float(cfg['learningRate']), beta_1=beta_1, beta_2=beta_2,
+                                  epsilon=epsilon, weight_decay=wd or None, clipnorm=None, clipvalue=clip_value,
+                                  global_clipnorm=global_clip)
+    elif (cfg['optimizer'] == 'adam'):
+        optimizer = tf.keras.optimizers.Adam(learning_rate=float(cfg['learningRate']), beta_1=beta_1, beta_2=beta_2,
+                                             epsilon=epsilon, clipnorm=None, clipvalue=clip_value,
+                                             global_clipnorm=global_clip)
+    elif (cfg['optimizer'] == 'adamw'):
+        optimizer = tf.keras.optimizers.AdamW(learning_rate=float(cfg['learningRate']), weight_decay=wd, beta_1=beta_1,
+                                              beta_2=beta_2, epsilon=epsilon, clipnorm=None, clipvalue=clip_value,
+                                              global_clipnorm=global_clip)
+    else:
+        raise ValueError("Unknown optimizer (", cfg['optimizer'], ")")
 
-   if cfg.get('mixedPrecision', False):
-      from tensorflow.keras import mixed_precision
-      policy = mixed_precision.global_policy()
-      # LossScaleOptimizer applies dynamic loss scaling to prevent gradient
-      # underflow in float16 (which has only 5 exponent bits, max ~65504).
-      # bfloat16 shares float32's 8 exponent bits and full dynamic range,
-      # so loss scaling is unnecessary and would only add overhead.
-      if policy.compute_dtype == 'float16':
-          optimizer = mixed_precision.LossScaleOptimizer(optimizer)
-          print(bcolors.WARNING,"Wrapping optimizer with LossScaleOptimizer (float16 policy)",bcolors.ENDC)
-      else:
-          print(bcolors.OKGREEN,"Skipping LossScaleOptimizer (bfloat16 has float32 dynamic range)",bcolors.ENDC)
+    if cfg.get('mixedPrecision', False):
+        from tensorflow.keras import mixed_precision
+        policy = mixed_precision.global_policy()
+        # LossScaleOptimizer applies dynamic loss scaling to prevent gradient
+        # underflow in float16 (which has only 5 exponent bits, max ~65504).
+        # bfloat16 shares float32's 8 exponent bits and full dynamic range,
+        # so loss scaling is unnecessary and would only add overhead.
+        if policy.compute_dtype == 'float16':
+            optimizer = mixed_precision.LossScaleOptimizer(optimizer)
+            print(bcolors.WARNING, "Wrapping optimizer with LossScaleOptimizer (float16 policy)", bcolors.ENDC)
+        else:
+            print(bcolors.OKGREEN, "Skipping LossScaleOptimizer (bfloat16 has float32 dynamic range)", bcolors.ENDC)
 
-   return optimizer
+    return optimizer
+
+
 #============================================================================================
 def check_vram_and_suggest_batch_size(cfg, threshold_pct=80.0):
     """
@@ -300,12 +326,9 @@ def check_vram_and_suggest_batch_size(cfg, threshold_pct=80.0):
     """
     import subprocess
     try:
-        result = subprocess.run(
-            ["nvidia-smi",
-             "--query-gpu=index,memory.used,memory.total",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5
-        )
+        result = subprocess.run([
+            "nvidia-smi", "--query-gpu=index,memory.used,memory.total", "--format=csv,noheader,nounits"
+        ], capture_output=True, text=True, timeout=5)
         if result.returncode != 0:
             print("check_vram_and_suggest_batch_size: nvidia-smi failed")
             return []
@@ -321,43 +344,42 @@ def check_vram_and_suggest_batch_size(cfg, threshold_pct=80.0):
         gpu_idx, used_mb, total_mb = int(parts[0]), int(parts[1]), int(parts[2])
         utilization_pct = 100.0 * used_mb / total_mb if total_mb > 0 else 0.0
         stats.append(dict(gpu_index=gpu_idx, used_mb=used_mb, total_mb=total_mb, utilization_pct=utilization_pct))
-        print(bcolors.OKGREEN,
-              f"GPU {gpu_idx}: {used_mb} MiB / {total_mb} MiB  ({utilization_pct:.1f}% VRAM used)",
+        print(bcolors.OKGREEN, f"GPU {gpu_idx}: {used_mb} MiB / {total_mb} MiB  ({utilization_pct:.1f}% VRAM used)",
               bcolors.ENDC)
 
     low_gpus = [s for s in stats if s['utilization_pct'] < threshold_pct]
     if low_gpus:
         current_batch = cfg.get('batchSize', '?')
         headroom_pcts = [threshold_pct - s['utilization_pct'] for s in low_gpus]
-        avg_headroom  = sum(headroom_pcts) / len(headroom_pcts)
+        avg_headroom = sum(headroom_pcts) / len(headroom_pcts)
         # Rough estimate: headroom maps linearly to batch size budget
         if isinstance(current_batch, int) and current_batch > 0:
             suggested = int(current_batch * (1.0 + avg_headroom / 100.0))
             # Round down to nearest multiple of 4 for alignment
             suggested = max(current_batch + 1, (suggested // 4) * 4)
-            print(bcolors.WARNING,
-                  f"VRAM utilization is below {threshold_pct:.0f}% on {len(low_gpus)} GPU(s). "
-                  f"Consider increasing batchSize from {current_batch} to ~{suggested} "
-                  f"to improve GPU utilization.",
-                  bcolors.ENDC)
+            print(
+                bcolors.WARNING, f"VRAM utilization is below {threshold_pct:.0f}% on {len(low_gpus)} GPU(s). "
+                f"Consider increasing batchSize from {current_batch} to ~{suggested} "
+                f"to improve GPU utilization.", bcolors.ENDC)
         else:
-            print(bcolors.WARNING,
-                  f"VRAM utilization is below {threshold_pct:.0f}% on {len(low_gpus)} GPU(s). "
-                  f"Consider increasing batchSize.",
-                  bcolors.ENDC)
+            print(
+                bcolors.WARNING, f"VRAM utilization is below {threshold_pct:.0f}% on {len(low_gpus)} GPU(s). "
+                f"Consider increasing batchSize.", bcolors.ENDC)
 
     return stats
+
+
 #============================================================================================
 def check_glove_embeddings_correctly_normalized(array):
-   #print(array)
-   if np.any((array < -1) | (array > 1)):
+    #print(array)
+    if np.any((array < -1) | (array > 1)):
         min_val = np.min(array)
         max_val = np.max(array)
-        raise ValueError(
-            f"Array contains values outside [-1, 1] range. "
-            f"Actual range: [{min_val:.4f}, {max_val:.4f}]"
-        )
-   return True
+        raise ValueError(f"Array contains values outside [-1, 1] range. "
+                         f"Actual range: [{min_val:.4f}, {max_val:.4f}]")
+    return True
+
+
 #============================================================================================
 def extract_validation_losses(model, validation_generator, dbValidation):
     """
@@ -373,18 +395,18 @@ def extract_validation_losses(model, validation_generator, dbValidation):
     sample_losses = []
 
     batchStart = 0
-    batchEnd   = 0
+    batchEnd = 0
     for batch_idx in range(len(validation_generator)):
         inputs, targets = validation_generator[batch_idx]
         batch_size = inputs.shape[0]
-        if (batchEnd==0):
+        if (batchEnd == 0):
             batchEnd = batch_size
 
         # Compute per-sample losses
         batch_losses = model.evaluate(inputs, targets, batch_size=batch_size, verbose=0, return_dict=True)
-        print("Batch ",batch_idx, " loss ",batch_losses)
-        dbValidation.updateEpochResults(batch_losses['loss'], batchStart, batchEnd, 1) 
-        
+        print("Batch ", batch_idx, " loss ", batch_losses)
+        dbValidation.updateEpochResults(batch_losses['loss'], batchStart, batchEnd, 1)
+
         # If multiple losses are returned, sum them up per sample
         if isinstance(batch_losses, dict):
             total_loss = sum(batch_losses.values())
@@ -394,13 +416,17 @@ def extract_validation_losses(model, validation_generator, dbValidation):
         sample_losses.extend([total_loss / batch_size] * batch_size)  # Distribute equally per sample
 
         batchStart += batch_size
-        batchEnd   += batch_size
+        batchEnd += batch_size
     return np.array(sample_losses)
+
+
 #============================================================================================
 #============================================================================================
 #============================================================================================
 class TrainingDataGeneratorSingleSeq(keras.utils.Sequence):
-    def __init__(self, cfg, db, batch_size=32, numberOfTokens=16, numberOfClasses=2037, validation_data=False, labels=None, log_dir=None, returnOutputImages=True, **kwargs):
+
+    def __init__(self, cfg, db, batch_size=32, numberOfTokens=16, numberOfClasses=2037, validation_data=False,
+                 labels=None, log_dir=None, returnOutputImages=True, **kwargs):
         super().__init__(**kwargs)  # Ensure Keras properly initializes the dataset class
 
         self.cfg = cfg
@@ -413,7 +439,7 @@ class TrainingDataGeneratorSingleSeq(keras.utils.Sequence):
         self.log_dir = log_dir
         self.labels = labels
         self.numberOfTokens = numberOfTokens
-        self.numberOfClasses    = numberOfClasses
+        self.numberOfClasses = numberOfClasses
         self.returnOutputImages = returnOutputImages
         self.returnOneHot = True
         self.returnGlove = True
@@ -427,7 +453,7 @@ class TrainingDataGeneratorSingleSeq(keras.utils.Sequence):
         start_index = index * self.batch_size
         end_index = min(start_index + self.batch_size, self.numberOfSamples)
 
-        log_thread_progress("dataloader_python",1,"update_cpu_batch")
+        log_thread_progress("dataloader_python", 1, "update_cpu_batch")
 
         npArrayIn, npArrayOut, npArrayOut16Bit = self.db.get_partial_update_IO_array(start_index, end_index)
 
@@ -435,13 +461,15 @@ class TrainingDataGeneratorSingleSeq(keras.utils.Sequence):
             npArrayOutputList = {}
 
             if self.returnOneHot:
-                npArrayTokensOut = self.db.get_partial_token_array(start_index, end_index, encodeAsSingleMultiLabelToken=True).astype("float32")
+                npArrayTokensOut = self.db.get_partial_token_array(start_index, end_index,
+                                                                   encodeAsSingleMultiLabelToken=True).astype("float32")
                 npArrayOutputList["tokens_multihot"] = npArrayTokensOut
 
             if self.returnGlove:
                 npArrayEmbeddingsOut = self.db.get_partial_embedding_array(start_index, end_index).astype("float32")
                 if self.combineData:
-                    npArrayOutputList["tall"] = npArrayEmbeddingsOut.reshape(self.batch_size, self.db.D * self.numberOfTokens)
+                    npArrayOutputList["tall"] = npArrayEmbeddingsOut.reshape(self.batch_size,
+                                                                             self.db.D * self.numberOfTokens)
                 else:
                     for i in range(self.numberOfTokens):
                         npArrayOutputList[f"t{i:02d}"] = npArrayEmbeddingsOut[:, i, :]
@@ -449,11 +477,10 @@ class TrainingDataGeneratorSingleSeq(keras.utils.Sequence):
             if self.returnOutputImages:
                 npArrayOutputList["hm"] = npArrayOut
 
-            log_thread_progress("dataloader_python",0,"update_cpu_batch")
+            log_thread_progress("dataloader_python", 0, "update_cpu_batch")
             return npArrayIn, npArrayOutputList
- 
 
-        log_thread_progress("dataloader_python",0,"update_cpu_batch")
+        log_thread_progress("dataloader_python", 0, "update_cpu_batch")
         return npArrayIn, npArrayOut
 
     def num_batches(self):
@@ -470,104 +497,109 @@ class TrainingDataGeneratorSingleSeq(keras.utils.Sequence):
                 self.db.shuffle()
             else:
                 self.db.shuffle_based_on_loss()
+
+
 #============================================================================================
 #============================================================================================
 #Based on https://stanford.edu/~shervine/blog/keras-how-to-generate-data-on-the-fly <- Old
 #https://www.tensorflow.org/api_docs/python/tf/keras/utils/PyDataset
 class TrainingDataGenerator(keras.utils.PyDataset):
-    def __init__(self,  cfg, db, batch_size=32, numberOfTokens=16, numberOfClasses=2037, validation_data=False, labels=None,  log_dir=None, returnOutputImages = True, **kwargs):
+
+    def __init__(self, cfg, db, batch_size=32, numberOfTokens=16, numberOfClasses=2037, validation_data=False,
+                 labels=None, log_dir=None, returnOutputImages=True, **kwargs):
         super().__init__(**kwargs)
-        self.cfg                = cfg 
-        self.db                 = db
-        self.numberOfSamples    = self.db.numberOfSamples
-        self.batch_size         = batch_size
-        self.num_batches        = self.numberOfSamples // self.batch_size #<- This is needed for Keras 3.1+ compatibility
-        self.epoch              = 1
-        self.inputChannels      = db.inChannels
-        self.validation_data    = validation_data
-        self.log_dir            = log_dir
-        self.labels             = labels
-        self.numberOfTokens     = numberOfTokens
-        self.numberOfClasses    = numberOfClasses
+        self.cfg = cfg
+        self.db = db
+        self.numberOfSamples = self.db.numberOfSamples
+        self.batch_size = batch_size
+        self.num_batches = self.numberOfSamples // self.batch_size  #<- This is needed for Keras 3.1+ compatibility
+        self.epoch = 1
+        self.inputChannels = db.inChannels
+        self.validation_data = validation_data
+        self.log_dir = log_dir
+        self.labels = labels
+        self.numberOfTokens = numberOfTokens
+        self.numberOfClasses = numberOfClasses
         self.returnOutputImages = returnOutputImages
-        self.returnOneHot       = True
-        self.returnGlove        = True
-        self.returnDescriptor   = cfg["outputDescriptors"]
-        self.combineData        = False
-        self.db.shuffle() 
+        self.returnOneHot = True
+        self.returnGlove = True
+        self.returnDescriptor = cfg["outputDescriptors"]
+        self.combineData = False
+        self.db.shuffle()
 
     def __len__(self):
         return self.numberOfSamples // self.batch_size
 
     def __getitem__(self, index):
-        self.start_index   = index * self.batch_size
-        self.end_index     = min(self.start_index + self.batch_size, self.numberOfSamples)
+        self.start_index = index * self.batch_size
+        self.end_index = min(self.start_index + self.batch_size, self.numberOfSamples)
 
-        log_thread_progress("dataloader_python",1,"update_cpu_batch")
+        log_thread_progress("dataloader_python", 1, "update_cpu_batch")
         npArrayIn, npArrayOut, npArrayOut16Bit = self.db.get_partial_update_IO_array(self.start_index, self.end_index)
 
-        
         # ----------------------------------------------------------------------------------------
         # Add a 4th channel: 255 - average of RGB per pixel
         # ----------------------------------------------------------------------------------------
-        if (self.inputChannels==4):
-          avg_rgb = np.mean(npArrayIn, axis=-1, keepdims=True)  # shape: (batch_size, width, height, 1)
-          fourth_channel = 255.0 - avg_rgb                       # shape: (batch_size, width, height, 1)
-          npArrayIn = np.concatenate([npArrayIn, fourth_channel], axis=-1)  # shape: (batch_size, width, height, 4)
+        if (self.inputChannels == 4):
+            avg_rgb = np.mean(npArrayIn, axis=-1, keepdims=True)  # shape: (batch_size, width, height, 1)
+            fourth_channel = 255.0 - avg_rgb  # shape: (batch_size, width, height, 1)
+            npArrayIn = np.concatenate([npArrayIn, fourth_channel], axis=-1)  # shape: (batch_size, width, height, 4)
         # ----------------------------------------------------------------------------------------
 
-
         if ('outputTokens' in self.cfg) and (self.cfg['outputTokens']):
-          npArrayOutputList = dict() 
+            npArrayOutputList = dict()
 
-          if (self.returnDescriptor):
-             npArrayDescriptorsOut = self.db.get_partial_descriptor_array(self.start_index, self.end_index)
-             npArrayOutputList["descriptors"] = npArrayDescriptorsOut #DINO Descriptor
+            if (self.returnDescriptor):
+                npArrayDescriptorsOut = self.db.get_partial_descriptor_array(self.start_index, self.end_index)
+                npArrayOutputList["descriptors"] = npArrayDescriptorsOut  #DINO Descriptor
 
-          if (self.returnOneHot):
-            #----------------------------------------------------------------------------------------------------------------------------
-            #Grab one-hot encodings
-            #----------------------------------------------------------------------------------------------------------------------------
-            if (self.combineData) or (self.returnGlove):
-               npArrayTokensOut = self.db.get_partial_token_array(self.start_index, self.end_index, encodeAsSingleMultiLabelToken = True).astype('float32')
-               npArrayOutputList["tokens_multihot"] = npArrayTokensOut
-               #print("tokens_multihot",npArrayTokensOut.shape)
-            else:
-               npArrayTokensOut = self.db.get_partial_token_array(self.start_index, self.end_index, encodeAsSingleMultiLabelToken = False).astype('float32')
-               npArrayTokensOut = npArrayTokensOut.reshape(self.batch_size, self.numberOfTokens * self.numberOfClasses) 
-               npArrayOutputList["tokens_multihot"] = npArrayTokensOut
-               #print("tokens_multihot",npArrayTokensOut.shape)
-            #----------------------------------------------------------------------------------------------------------------------------
+            if (self.returnOneHot):
+                #----------------------------------------------------------------------------------------------------------------------------
+                #Grab one-hot encodings
+                #----------------------------------------------------------------------------------------------------------------------------
+                if (self.combineData) or (self.returnGlove):
+                    npArrayTokensOut = self.db.get_partial_token_array(
+                        self.start_index, self.end_index, encodeAsSingleMultiLabelToken=True).astype('float32')
+                    npArrayOutputList["tokens_multihot"] = npArrayTokensOut
+                    #print("tokens_multihot",npArrayTokensOut.shape)
+                else:
+                    npArrayTokensOut = self.db.get_partial_token_array(
+                        self.start_index, self.end_index, encodeAsSingleMultiLabelToken=False).astype('float32')
+                    npArrayTokensOut = npArrayTokensOut.reshape(self.batch_size,
+                                                                self.numberOfTokens * self.numberOfClasses)
+                    npArrayOutputList["tokens_multihot"] = npArrayTokensOut
+                    #print("tokens_multihot",npArrayTokensOut.shape)
+                #----------------------------------------------------------------------------------------------------------------------------
 
-          if (self.returnGlove):
-            #----------------------------------------------------------------------------------------------------------------------------
-            #Immediately grab GloVe embeddings
-            #----------------------------------------------------------------------------------------------------------------------------
-            npArrayEmbeddingsOut = self.db.get_partial_embedding_array(self.start_index, self.end_index)
-            npArrayEmbeddingsOut = npArrayEmbeddingsOut.astype('float32')
+            if (self.returnGlove):
+                #----------------------------------------------------------------------------------------------------------------------------
+                #Immediately grab GloVe embeddings
+                #----------------------------------------------------------------------------------------------------------------------------
+                npArrayEmbeddingsOut = self.db.get_partial_embedding_array(self.start_index, self.end_index)
+                npArrayEmbeddingsOut = npArrayEmbeddingsOut.astype('float32')
 
-            #Everything seems normalized
-            #check_glove_embeddings_correctly_normalized(npArrayEmbeddingsOut)
-        
-            if (self.combineData):
-               npArrayOutputList["tall"] = npArrayEmbeddingsOut.reshape(self.batch_size, self.db.D * self.numberOfTokens)
-            else:
-               for i in range(self.numberOfTokens):
-                 npArrayOutputList["t%02u"%i] = npArrayEmbeddingsOut[:,i,:]
-            #----------------------------------------------------------------------------------------------------------------------------
-          #print("Heatmap Shape ",npArrayOutputList["hm"].shape)
-          if (self.returnOutputImages):
-             npArrayOutputList["hm"] = npArrayOut
-             if npArrayOut16Bit is not None:
+                #Everything seems normalized
+                #check_glove_embeddings_correctly_normalized(npArrayEmbeddingsOut)
+
+                if (self.combineData):
+                    npArrayOutputList["tall"] = npArrayEmbeddingsOut.reshape(self.batch_size,
+                                                                             self.db.D * self.numberOfTokens)
+                else:
+                    for i in range(self.numberOfTokens):
+                        npArrayOutputList["t%02u" % i] = npArrayEmbeddingsOut[:, i, :]
+                #----------------------------------------------------------------------------------------------------------------------------
+            #print("Heatmap Shape ",npArrayOutputList["hm"].shape)
+            if (self.returnOutputImages):
+                npArrayOutputList["hm"] = npArrayOut
+                if npArrayOut16Bit is not None:
                     npArrayOutputList["hm_16b"] = npArrayOut16Bit
 
-
-          log_thread_progress("dataloader_python",0,"update_cpu_batch")
-          return npArrayIn, npArrayOutputList
+            log_thread_progress("dataloader_python", 0, "update_cpu_batch")
+            return npArrayIn, npArrayOutputList
         else:
-          #Regular just RGB -> heatmap output
-          log_thread_progress("dataloader_python",0,"update_cpu_batch")
-          return npArrayIn, npArrayOut 
+            #Regular just RGB -> heatmap output
+            log_thread_progress("dataloader_python", 0, "update_cpu_batch")
+            return npArrayIn, npArrayOut
 
     def num_batches(self):
         return self.numberOfSamples // self.batch_size
@@ -576,17 +608,19 @@ class TrainingDataGenerator(keras.utils.PyDataset):
         return self.batch_size
 
     def on_epoch_end(self):
-        self.epoch = self.epoch +1
+        self.epoch = self.epoch + 1
         if (not self.validation_data):
-         print("\nTrainingDataGenerator on_epoch_end shuffling, next epoch is ",self.epoch)
-         if (self.epoch < 2):
-          #in the beginning everything is kind of random so do normal random shuffle
-          self.db.shuffle()
-         else:
-          #After we have accumulated some losses try to shuffle using the losses in an attempt to make training more interesting
-          #self.db.shuffle()
-          self.db.shuffle_based_on_loss() #<- TODO: This may need to be deactivated if training is unstable
-          pass
+            print("\nTrainingDataGenerator on_epoch_end shuffling, next epoch is ", self.epoch)
+            if (self.epoch < 2):
+                #in the beginning everything is kind of random so do normal random shuffle
+                self.db.shuffle()
+            else:
+                #After we have accumulated some losses try to shuffle using the losses in an attempt to make training more interesting
+                #self.db.shuffle()
+                self.db.shuffle_based_on_loss()  #<- TODO: This may need to be deactivated if training is unstable
+                pass
+
+
 #============================================================================================
 # ─────────────────────────────────────────────────────────────────────────────
 # PerfProfiler  — per-batch / per-epoch timing callback, dumps to perf.txt
@@ -608,11 +642,11 @@ class PerfProfiler(keras.callbacks.Callback):
 
     def __init__(self):
         super().__init__()
-        self._batch_start   = None
-        self._batch_end_ts  = None
-        self._batch_times   = []   # step latencies in ms
-        self._gap_times     = []   # inter-step gaps in ms
-        self._epoch_start   = None
+        self._batch_start = None
+        self._batch_end_ts = None
+        self._batch_times = []  # step latencies in ms
+        self._gap_times = []  # inter-step gaps in ms
+        self._epoch_start = None
 
     # ── batch hooks ──────────────────────────────────────────────────────────
 
@@ -631,10 +665,10 @@ class PerfProfiler(keras.callbacks.Callback):
     # ── epoch hooks ──────────────────────────────────────────────────────────
 
     def on_epoch_begin(self, epoch, logs=None):
-        self._batch_times  = []
-        self._gap_times    = []
+        self._batch_times = []
+        self._gap_times = []
         self._batch_end_ts = None
-        self._epoch_start  = time.perf_counter()
+        self._epoch_start = time.perf_counter()
 
     def on_epoch_end(self, epoch, logs=None):
         # Measure how long all the *other* epoch-end callbacks take (this one
@@ -653,22 +687,22 @@ class PerfProfiler(keras.callbacks.Callback):
             a = sorted(vals)
             n = len(a)
             return dict(
-                n    = n,
-                min  = a[0],
-                p50  = a[n // 2],
-                p95  = a[min(int(n * 0.95), n - 1)],
-                max  = a[-1],
-                mean = sum(a) / n,
+                n=n,
+                min=a[0],
+                p50=a[n // 2],
+                p95=a[min(int(n * 0.95), n - 1)],
+                max=a[-1],
+                mean=sum(a) / n,
             )
 
         bs = _stats(bt)
         gs = _stats(gt)
 
         total_step_ms = sum(bt)
-        total_gap_ms  = sum(gt)
+        total_gap_ms = sum(gt)
         # Epoch-level callbacks run after on_epoch_end of PerfProfiler, so we
         # can only bound them: epoch_wall - (step time + gaps)
-        overhead_ms   = epoch_wall_ms - total_step_ms - total_gap_ms
+        overhead_ms = epoch_wall_ms - total_step_ms - total_gap_ms
 
         lines = [
             "",
@@ -715,8 +749,10 @@ class PerfProfiler(keras.callbacks.Callback):
             print("[PerfProfiler] could not write %s: %s" % (self.PERF_FILE, e))
 
         # Always print summary to console too
-        print("[PerfProfiler] epoch=%d  step: mean=%.1fms p95=%.1fms  gap: mean=%.1fms p95=%.1fms  cb_overhead=%.1fs"
-              % (epoch + 1, bs['mean'], bs['p95'], gs['mean'], gs['p95'], overhead_ms / 1000.0))
+        print("[PerfProfiler] epoch=%d  step: mean=%.1fms p95=%.1fms  gap: mean=%.1fms p95=%.1fms  cb_overhead=%.1fs" %
+              (epoch + 1, bs['mean'], bs['p95'], gs['mean'], gs['p95'], overhead_ms / 1000.0))
+
+
 #============================================================================================
 """
 #Experiment directly using a TF Data Generator (to hopefully improve performance)
@@ -899,6 +935,8 @@ class TrainingDataGeneratorSeq(keras.utils.Sequence):
         self.stop_event.set()
         self.worker_thread.join()
 """
+
+
 #============================================================================================
 def custom_lr_scheduler(epoch, startLoss=0.0001, endLoss=0.000015, warmup_epochs=0):
     # warmup_epochs: when >0 (typically set to 5 for multi-GPU), linearly ramp
@@ -909,21 +947,23 @@ def custom_lr_scheduler(epoch, startLoss=0.0001, endLoss=0.000015, warmup_epochs
     # amplifies into NaN.  The warmup lets BatchNorm statistics and early weights
     # stabilise before the full learning rate kicks in.
     #--------------------------
-    finalEpochBeforeFlatLine=100
-    decimals=5
-    maximum=startLoss
-    minimum=endLoss
+    finalEpochBeforeFlatLine = 100
+    decimals = 5
+    maximum = startLoss
+    minimum = endLoss
     #--------------------------
     if warmup_epochs > 0 and epoch < warmup_epochs:
         # Linear ramp from minimum (endLoss) up to maximum (startLoss)
         return round(minimum + (maximum - minimum) * (epoch / warmup_epochs), decimals)
     elif epoch < finalEpochBeforeFlatLine:
-        return round((maximum - minimum) * ((1 - (epoch - 1) / (finalEpochBeforeFlatLine-1) ) ** 2) + minimum,decimals)
+        return round((maximum - minimum) * ((1 - (epoch - 1) / (finalEpochBeforeFlatLine - 1))**2) + minimum, decimals)
     else:
-        return round(minimum,decimals)
+        return round(minimum, decimals)
+
 
 #============================================================================================
-def custom_lr_schedulerWarmup(epoch, warmup_epochs=10, total_epochs=200, initial_lr=0.00015, target_lr=0.001, minimum=0.00015):
+def custom_lr_schedulerWarmup(epoch, warmup_epochs=10, total_epochs=200, initial_lr=0.00015, target_lr=0.001,
+                              minimum=0.00015):
     """
     Custom learning rate scheduler with warmup and cosine decay.
     Inspired from : https://arxiv.org/abs/2406.09405v1
@@ -949,16 +989,17 @@ def custom_lr_schedulerWarmup(epoch, warmup_epochs=10, total_epochs=200, initial
         lr = target_lr * 0.5 * (1 + math.cos(math.pi * decay_ratio))
 
     if lr < minimum:
-         lr = minimum    
+        lr = minimum
 
     return round(lr, 6)
+
+
 #============================================================================================
-def jointGradientScheduler(epoch, warmup_epochs=10, mature_epochs=200, total_epochs=250,
-                           max_joints_gradient=23, min_joints_gradient=8,
-                           max_paf_gradient=6, min_paf_gradient=2):
+def jointGradientScheduler(epoch, warmup_epochs=10, mature_epochs=200, total_epochs=250, max_joints_gradient=23,
+                           min_joints_gradient=8, max_paf_gradient=6, min_paf_gradient=2):
 
     joint_gradient = min_joints_gradient
-    paf_gradient   = min_paf_gradient
+    paf_gradient = min_paf_gradient
 
     if epoch < warmup_epochs:
         #Stick gradient to max value
@@ -968,17 +1009,16 @@ def jointGradientScheduler(epoch, warmup_epochs=10, mature_epochs=200, total_epo
         # Linearly decay to half of max values during warmup
         t = epoch / warmup_epochs  # normalized [0, 1)
         joint_gradient = max_joints_gradient - t * (max_joints_gradient / 2)
-        paf_gradient   = max_paf_gradient    - t * (max_paf_gradient / 2)
+        paf_gradient = max_paf_gradient - t * (max_paf_gradient / 2)
 
     elif epoch < mature_epochs:
 
         #Oscillate with lower magnitude (2/6/25)
-        max_joints_gradient = int(max_joints_gradient/2)
-        max_paf_gradient    = int(max_paf_gradient/2)
+        max_joints_gradient = int(max_joints_gradient / 2)
+        max_paf_gradient = int(max_paf_gradient / 2)
 
         # Number of steps per area (area = one direction: up or down)
-        steps = max(max_joints_gradient - min_joints_gradient,
-                    max_paf_gradient - min_paf_gradient)
+        steps = max(max_joints_gradient - min_joints_gradient, max_paf_gradient - min_paf_gradient)
 
         # Total number of areas (each with 'steps' epochs)
         total_osc_epochs = mature_epochs - warmup_epochs
@@ -992,35 +1032,41 @@ def jointGradientScheduler(epoch, warmup_epochs=10, mature_epochs=200, total_epo
         # Determine direction: even index = down, odd = up
         if area_index % 2 == 0:  # descending
             joint_gradient = max_joints_gradient - (max_joints_gradient - min_joints_gradient) * t
-            paf_gradient   = max_paf_gradient    - (max_paf_gradient   - min_paf_gradient)   * t
+            paf_gradient = max_paf_gradient - (max_paf_gradient - min_paf_gradient) * t
         else:  # ascending
             joint_gradient = min_joints_gradient + (max_joints_gradient - min_joints_gradient) * t
-            paf_gradient   = min_paf_gradient    + (max_paf_gradient   - min_paf_gradient)   * t
+            paf_gradient = min_paf_gradient + (max_paf_gradient - min_paf_gradient) * t
     else:
         joint_gradient = min_joints_gradient
-        paf_gradient   = min_paf_gradient
+        paf_gradient = min_paf_gradient
 
     return int(joint_gradient), int(paf_gradient)
+
+
 #============================================================================================
-def jointGradientSchedulerSimple(epoch, warmup_epochs=10, max_joints_gradient=23, min_joints_gradient=8, max_paf_gradient=6, min_paf_gradient=2):
+def jointGradientSchedulerSimple(epoch, warmup_epochs=10, max_joints_gradient=23, min_joints_gradient=8,
+                                 max_paf_gradient=6, min_paf_gradient=2):
     joint_gradient = min_joints_gradient
-    paf_gradient   = min_paf_gradient
-    if (min_joints_gradient!=max_joints_gradient) or (min_paf_gradient!=max_paf_gradient):
-      if epoch < warmup_epochs:
-        # Linearly decay to target during warmup
-        t = epoch / warmup_epochs  # normalized [0, 1)
-        joint_gradient = max_joints_gradient - t * (max_joints_gradient - min_joints_gradient)
-        paf_gradient   = max_paf_gradient    - t * (max_paf_gradient    - min_paf_gradient)
+    paf_gradient = min_paf_gradient
+    if (min_joints_gradient != max_joints_gradient) or (min_paf_gradient != max_paf_gradient):
+        if epoch < warmup_epochs:
+            # Linearly decay to target during warmup
+            t = epoch / warmup_epochs  # normalized [0, 1)
+            joint_gradient = max_joints_gradient - t * (max_joints_gradient - min_joints_gradient)
+            paf_gradient = max_paf_gradient - t * (max_paf_gradient - min_paf_gradient)
     return int(joint_gradient), int(paf_gradient)
+
+
 #============================================================================================
 class DataAugmentation(keras.callbacks.Callback):
+
     def __init__(self, cfg, db=None):
         super().__init__()
-        self.cfg   = cfg 
+        self.cfg = cfg
         self.epochLimit = cfg["heatmapReductionEpochLimit"]
-        self.db    = db 
+        self.db = db
         self.epoch = 1
-        self.time  = time.time()
+        self.time = time.time()
 
     def clear_gpu_memory(self, tensors):
         # Clear GPU memory for a list of tensors
@@ -1030,13 +1076,13 @@ class DataAugmentation(keras.callbacks.Callback):
     #https://keras.io/guides/writing_your_own_callbacks/
     def on_train_batch_end(self, batch, logs=None):
         if (self.db):
-         keys = list(logs.keys())
-         #self.db.printReadSpeed()
-         if ("loss" in keys):
-           self.db.updateEpochResults(logs['loss'], self.db.lastStartSample, self.db.lastEndSample, self.epoch)
+            keys = list(logs.keys())
+            #self.db.printReadSpeed()
+            if ("loss" in keys):
+                self.db.updateEpochResults(logs['loss'], self.db.lastStartSample, self.db.lastEndSample, self.epoch)
 
     def on_epoch_start(self, epoch, logs=None):
-        self.time  = time.time() #Is this not executed ?
+        self.time = time.time()  #Is this not executed ?
 
     def on_epoch_end(self, epoch, logs=None):
         self.epoch = epoch
@@ -1044,13 +1090,14 @@ class DataAugmentation(keras.callbacks.Callback):
         #print("End epoch ",epoch+1," of training")
         #print("Got log keys:", keys))
 
-        totalSeconds   = time.time() - self.time 
+        totalSeconds = time.time() - self.time
         cpuTimeSeconds = self.db.cpuTimeSeconds
         gpuTimeSeconds = totalSeconds - cpuTimeSeconds
-        print("Time it took for epoch %u | CPU : %0.02f sec | GPU : %0.2f sec | Total : %0.02f sec" % (epoch+1,cpuTimeSeconds,gpuTimeSeconds,totalSeconds))
+        print("Time it took for epoch %u | CPU : %0.02f sec | GPU : %0.2f sec | Total : %0.02f sec" %
+              (epoch + 1, cpuTimeSeconds, gpuTimeSeconds, totalSeconds))
         self.db.printReadSpeed()
-        self.db.cpuTimeSeconds = 0 #Reset counter
-        self.time  = time.time()   #Reset GPU time (although on_epoch_start should also reset it)
+        self.db.cpuTimeSeconds = 0  #Reset counter
+        self.time = time.time()  #Reset GPU time (although on_epoch_start should also reset it)
 
         #print("Doing garbage collection ..",end="")
         gc.collect()
@@ -1068,8 +1115,8 @@ class DataAugmentation(keras.callbacks.Callback):
                 pass
             """
 
-            oldGS=self.db.gradientSize
-            oldPS=self.db.PAFSize
+            oldGS = self.db.gradientSize
+            oldPS = self.db.PAFSize
             """
             #Go up and down
             self.db.gradientSize,self.db.PAFSize = jointGradientScheduler(epoch,
@@ -1086,38 +1133,40 @@ class DataAugmentation(keras.callbacks.Callback):
             #self.db.PAFSize      = self.cfg["heatmapPAFSizeMinimum"]
 
             #Decay to minimum after warmup epochs
-            self.db.gradientSize,self.db.PAFSize = jointGradientSchedulerSimple(epoch,
-                                                                                warmup_epochs=self.cfg.get("heatmapGradientWarmupEpochs", self.cfg["earlyStoppingStart"]),
-                                                                                max_joints_gradient=self.cfg["heatmapGradientSize"],
-                                                                                min_joints_gradient=self.cfg["heatmapGradientSizeMinimum"],
-                                                                                max_paf_gradient=self.cfg["heatmapPAFSize"],
-                                                                                min_paf_gradient=self.cfg["heatmapPAFSizeMinimum"]) 
+            self.db.gradientSize, self.db.PAFSize = jointGradientSchedulerSimple(
+                epoch, warmup_epochs=self.cfg.get("heatmapGradientWarmupEpochs", self.cfg["earlyStoppingStart"]),
+                max_joints_gradient=self.cfg["heatmapGradientSize"],
+                min_joints_gradient=self.cfg["heatmapGradientSizeMinimum"], max_paf_gradient=self.cfg["heatmapPAFSize"],
+                min_paf_gradient=self.cfg["heatmapPAFSizeMinimum"])
 
-            if ( (oldGS!=self.db.gradientSize) or (oldPS!=self.db.PAFSize) ):
-               print(bcolors.OKGREEN,"Set gradient size from ",oldGS," to ",self.db.gradientSize,bcolors.ENDC, end=" / ")
-               print(bcolors.OKGREEN,"Set PAF size from ",oldPS," to ",self.db.PAFSize,bcolors.ENDC) 
- 
+            if ((oldGS != self.db.gradientSize) or (oldPS != self.db.PAFSize)):
+                print(bcolors.OKGREEN, "Set gradient size from ", oldGS, " to ", self.db.gradientSize, bcolors.ENDC,
+                      end=" / ")
+                print(bcolors.OKGREEN, "Set PAF size from ", oldPS, " to ", self.db.PAFSize, bcolors.ENDC)
+
+
 #============================================================================================
 #============================================================================================
 def weighted_token_loss(y_true, y_pred):
     # Use BinaryCrossentropy from Keras
-    token_loss_function = keras.losses.BinaryCrossentropy(from_logits=False) 
-    #token_loss_function = keras.losses.MeanSquaredError() 
-    
+    token_loss_function = keras.losses.BinaryCrossentropy(from_logits=False)
+    #token_loss_function = keras.losses.MeanSquaredError()
+
     # Compute the original loss
     original_loss = token_loss_function(y_true, y_pred)
-    
+
     # Multiply by the weight
     #weighted_loss = 1.0 *  tf.exp(original_loss) #Try perplexity loss e^loss
-    weighted_loss = 10.0 * original_loss 
-    
+    weighted_loss = 10.0 * original_loss
+
     return weighted_loss
+
+
 #============================================================================================
 
 if __name__ == '__main__':
-       for epoch in range(250): 
-         jG,pG = jointGradientScheduler(epoch, warmup_epochs=10, mature_epochs=200, total_epochs=250,
-                           max_joints_gradient=23, min_joints_gradient=8,
-                           max_paf_gradient=6, min_paf_gradient=2)
-         print("Epoch ",epoch," Joints:",jG, " PAF:",pG)
-
+    for epoch in range(250):
+        jG, pG = jointGradientScheduler(epoch, warmup_epochs=10, mature_epochs=200, total_epochs=250,
+                                        max_joints_gradient=23, min_joints_gradient=8, max_paf_gradient=6,
+                                        min_paf_gradient=2)
+        print("Epoch ", epoch, " Joints:", jG, " PAF:", pG)

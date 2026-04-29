@@ -43,7 +43,7 @@ from collections import defaultdict
 # matplotlib is optional — plots are skipped gracefully if not installed
 try:
     import matplotlib
-    matplotlib.use('Agg')        # non-interactive (write PNGs, no display needed)
+    matplotlib.use('Agg')  # non-interactive (write PNGs, no display needed)
     import matplotlib.pyplot as plt
     _HAVE_MATPLOTLIB = True
 except ImportError:
@@ -77,48 +77,51 @@ except Exception as e:
 # NONZERO_THRESHOLD: NonZeroCorrectPixelMetric default nonzeroThreshold=-110 (float)
 #   → in uint8 display space (+ abs(hm_inactive) = +120): -110 + 120 = 10
 # ---------------------------------------------------------------------------
-HDM_THRESHOLD          = 2.4
+HDM_THRESHOLD = 2.4
 NONZERO_THRESHOLD_UINT8 = 10  # GT uint8 pixel >= 10 is "non-background"
 
 # Partial metric channel ranges (matching trainYMAPNet.py metrics list)
 # Each entry: (key, start, end)  — end is *exclusive* (Python slice notation)
 HDM_PARTIAL_SPECS = [
-    ('hdm_joints',    0,  17),
-    ('hdm_PAFs',     17,  29),
-    ('hdm_depth',    29,  30),
-    ('hdm_normal',   30,  33),
-    ('hdm_depthlvls',33,  34),
-    ('hdm_denoise',  34,  37),
-    ('hdm_leftright',37,  39),
-    ('hdm_text',     46,  47),
-    ('hdm_person',   39,  40),
-    ('hdm_vehicle',  43,  44),
-    ('hdm_animal',   44,  45),
-    ('hdm_floor',    57,  58),
-    ('hdm_segms',    39,  73),
+    ('hdm_joints', 0, 17),
+    ('hdm_PAFs', 17, 29),
+    ('hdm_depth', 29, 30),
+    ('hdm_normal', 30, 33),
+    ('hdm_depthlvls', 33, 34),
+    ('hdm_denoise', 34, 37),
+    ('hdm_leftright', 37, 39),
+    ('hdm_text', 46, 47),
+    ('hdm_person', 39, 40),
+    ('hdm_vehicle', 43, 44),
+    ('hdm_animal', 44, 45),
+    ('hdm_floor', 57, 58),
+    ('hdm_segms', 39, 73),
 ]
 
 # Heatmap channel groups for SSIM/MSE/HDM/confusion (display-level metrics)
-RANGE_NAMES    = ["Joints", "PAFs", "Depth", "Normals", "DepthLevels", "Denoising", "LeftRight", "Segmentation"]
+RANGE_NAMES = ["Joints", "PAFs", "Depth", "Normals", "DepthLevels", "Denoising", "LeftRight", "Segmentation"]
 HEATMAP_RANGES = [(0, 16), (17, 28), (29, 29), (30, 32), (33, 33), (34, 36), (37, 38), (39, 72)]
 
-C1 = 0.01 ** 2
-C2 = 0.03 ** 2
+C1 = 0.01**2
+C2 = 0.03**2
+
 
 # ---------------------------------------------------------------------------
 # Metric helpers
 # ---------------------------------------------------------------------------
 def compute_mse(a, b):
-    return float(np.mean((a.astype(np.float32) - b.astype(np.float32)) ** 2))
+    return float(np.mean((a.astype(np.float32) - b.astype(np.float32))**2))
+
 
 def compute_ssim(a, b):
     a = a.astype(np.float32)
     b = b.astype(np.float32)
     mu1, mu2 = np.mean(a), np.mean(b)
-    s1  = np.var(a)
-    s2  = np.var(b)
+    s1 = np.var(a)
+    s2 = np.var(b)
     s12 = np.mean((a - mu1) * (b - mu2))
-    return float(((2*mu1*mu2 + C1) * (2*s12 + C2)) / ((mu1**2 + mu2**2 + C1) * (s1 + s2 + C2)))
+    return float(((2 * mu1 * mu2 + C1) * (2 * s12 + C2)) / ((mu1**2 + mu2**2 + C1) * (s1 + s2 + C2)))
+
 
 def compute_hdm_display(a, b, threshold, output_magnitude=240):
     """Fraction of pixels where |a-b| <= threshold*output_magnitude.
@@ -126,6 +129,7 @@ def compute_hdm_display(a, b, threshold, output_magnitude=240):
     which gives HDM0.01 threshold = 2.4, identical to trainYMAPNet.py."""
     diff = np.abs(a.astype(np.float32) - b.astype(np.float32))
     return float(np.mean(diff <= threshold * output_magnitude))
+
 
 def compute_confusion(a, b, threshold=127):
     a_bin = (a > threshold).astype(np.uint8)
@@ -136,6 +140,7 @@ def compute_confusion(a, b, threshold=127):
     FN = int(np.sum((a_bin == 1) & (b_bin == 0)))
     return TP, TN, FP, FN
 
+
 def cosine_similarity_1d(a, b):
     """Cosine similarity between two 1-D vectors."""
     na = np.linalg.norm(a)
@@ -143,6 +148,7 @@ def cosine_similarity_1d(a, b):
     if na < 1e-8 or nb < 1e-8:
         return 0.0
     return float(np.dot(a, b) / (na * nb))
+
 
 def multihot_metrics(gt, pred, threshold=0.5):
     """
@@ -153,15 +159,16 @@ def multihot_metrics(gt, pred, threshold=0.5):
     only ~5-20 active per sample, the TN-dominated accuracy is always >99%
     regardless of model quality. F1 (= 2*TP / (2*TP+FP+FN)) is used instead.
     """
-    gt_bin   = (gt   > 0.5).astype(np.uint8)
+    gt_bin = (gt > 0.5).astype(np.uint8)
     pred_bin = (pred > threshold).astype(np.uint8)
     TP = int(np.sum((gt_bin == 1) & (pred_bin == 1)))
     FP = int(np.sum((gt_bin == 0) & (pred_bin == 1)))
     FN = int(np.sum((gt_bin == 1) & (pred_bin == 0)))
     precision = TP / (TP + FP + 1e-8)
-    recall    = TP / (TP + FN + 1e-8)
-    f1        = 2 * TP / (2 * TP + FP + FN + 1e-8)
+    recall = TP / (TP + FN + 1e-8)
+    f1 = 2 * TP / (2 * TP + FP + FN + 1e-8)
     return float(f1), float(precision), float(recall), TP, FP, FN
+
 
 def topk_hit(pred_scores, gt_binary, k):
     """Return 1.0 if any GT-positive class appears in top-k predictions, else 0.0."""
@@ -170,6 +177,7 @@ def topk_hit(pred_scores, gt_binary, k):
         return 1.0
     top_k_idx = set(np.argpartition(pred_scores, -k)[-k:])
     return 1.0 if any(idx in top_k_idx for idx in gt_active) else 0.0
+
 
 def gt_int8_to_display_uint8(gt_channel, hm_active=120, hm_inactive=-120):
     """
@@ -182,16 +190,18 @@ def gt_int8_to_display_uint8(gt_channel, hm_active=120, hm_inactive=-120):
     f = f + abs(hm_inactive)
     return f.astype(np.uint8)
 
+
 def make_json_serializable(obj):
     if isinstance(obj, dict):
         return {k: make_json_serializable(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [make_json_serializable(v) for v in obj]
-    if isinstance(obj, (np.integer,)):
+    if isinstance(obj, (np.integer, )):
         return int(obj)
-    if isinstance(obj, (np.floating,)):
+    if isinstance(obj, (np.floating, )):
         return float(obj)
     return obj
+
 
 # ---------------------------------------------------------------------------
 # Skeleton evaluation constants
@@ -199,19 +209,32 @@ def make_json_serializable(obj):
 PCK_THRESHOLDS = [0.05, 0.10, 0.20]
 
 # COCO per-keypoint sigmas (17 joints, same order as keypoint_names in config)
-COCO_KP_SIGMAS = np.array([
-    0.026, 0.025, 0.025, 0.035, 0.035,   # nose, l/r eye, l/r ear
-    0.079, 0.079,                          # l/r shoulder
-    0.072, 0.072,                          # l/r elbow
-    0.062, 0.062,                          # l/r wrist
-    0.107, 0.107,                          # l/r hip
-    0.087, 0.087,                          # l/r knee
-    0.089, 0.089,                          # l/r ankle
-], dtype=np.float32)
+COCO_KP_SIGMAS = np.array(
+    [
+        0.026,
+        0.025,
+        0.025,
+        0.035,
+        0.035,  # nose, l/r eye, l/r ear
+        0.079,
+        0.079,  # l/r shoulder
+        0.072,
+        0.072,  # l/r elbow
+        0.062,
+        0.062,  # l/r wrist
+        0.107,
+        0.107,  # l/r hip
+        0.087,
+        0.087,  # l/r knee
+        0.089,
+        0.089,  # l/r ankle
+    ],
+    dtype=np.float32)
 
 # First PAF channel index and count in the heatmap output
 PAF_FIRST_CH = 17
-PAF_NUM_CH   = 12
+PAF_NUM_CH = 12
+
 
 # ---------------------------------------------------------------------------
 # Skeleton evaluation helpers
@@ -240,9 +263,9 @@ def extract_gt_keypoints(gt_heatmaps, n_joints, act_threshold=0.5):
                 continue
             cx = M['m10'] / M['m00']
             cy = M['m01'] / M['m00']
-            v  = float(ch[min(int(round(cy)), H-1), min(int(round(cx)), W-1)])
+            v = float(ch[min(int(round(cy)), H - 1), min(int(round(cx)), W - 1)])
             if v > best_v:
-                best_v  = v
+                best_v = v
                 best_xy = (cx / W, cy / H)
         if best_xy is not None:
             result.append((best_xy[0], best_xy[1], best_v / 240.0))
@@ -265,8 +288,8 @@ def match_skeleton_to_gt(pred_skeletons, gt_kps, n_joints):
     gt_cy = float(np.mean([p[1] for p in vis_gt]))
     best_skel, best_dist = pred_skeletons[0], float('inf')
     for skel in pred_skeletons:
-        xs = [skel[j*3]   for j in range(n_joints) if skel[j*3+2] > 0]
-        ys = [skel[j*3+1] for j in range(n_joints) if skel[j*3+2] > 0]
+        xs = [skel[j * 3] for j in range(n_joints) if skel[j * 3 + 2] > 0]
+        ys = [skel[j * 3 + 1] for j in range(n_joints) if skel[j * 3 + 2] > 0]
         if not xs:
             continue
         d = ((np.mean(xs) - gt_cx)**2 + (np.mean(ys) - gt_cy)**2)**0.5
@@ -280,17 +303,17 @@ def compute_pck_hits(pred_skel, gt_kps, thr, n_joints):
     Returns (hits[n_joints], visible[n_joints]) for PCK at normalized threshold thr.
     A joint counts as a hit if it is predicted, visible in GT, and within thr of GT.
     """
-    hits    = np.zeros(n_joints, dtype=np.float64)
+    hits = np.zeros(n_joints, dtype=np.float64)
     visible = np.zeros(n_joints, dtype=np.float64)
     for j in range(n_joints):
         gx, gy, gv = gt_kps[j]
         if gv <= 0:
             continue
         visible[j] = 1.0
-        pv = pred_skel[j*3 + 2]
+        pv = pred_skel[j * 3 + 2]
         if pv <= 0:
             continue
-        if ((pred_skel[j*3] - gx)**2 + (pred_skel[j*3+1] - gy)**2)**0.5 <= thr:
+        if ((pred_skel[j * 3] - gx)**2 + (pred_skel[j * 3 + 1] - gy)**2)**0.5 <= thr:
             hits[j] = 1.0
     return hits, visible
 
@@ -306,18 +329,18 @@ def compute_oks_score(pred_skel, gt_kps, n_joints, kp_sigmas):
         return -1.0
     xs, ys = [p[0] for p in vis_pts], [p[1] for p in vis_pts]
     area = max(1e-8, (max(xs) - min(xs)) * (max(ys) - min(ys)))
-    s    = area ** 0.5
+    s = area**0.5
     num, denom = 0.0, 0.0
     for j in range(n_joints):
         gx, gy, gv = gt_kps[j]
         if gv <= 0:
             continue
         denom += 1.0
-        pv = pred_skel[j*3 + 2]
+        pv = pred_skel[j * 3 + 2]
         if pv <= 0:
             continue
-        d2 = (pred_skel[j*3] - gx)**2 + (pred_skel[j*3+1] - gy)**2
-        k  = float(kp_sigmas[j]) if j < len(kp_sigmas) else 0.072
+        d2 = (pred_skel[j * 3] - gx)**2 + (pred_skel[j * 3 + 1] - gy)**2
+        k = float(kp_sigmas[j]) if j < len(kp_sigmas) else 0.072
         num += float(np.exp(-d2 / (2.0 * s**2 * k**2 + 1e-10)))
     return float(num / denom) if denom > 0 else -1.0
 
@@ -325,11 +348,8 @@ def compute_oks_score(pred_skel, gt_kps, n_joints, kp_sigmas):
 # ---------------------------------------------------------------------------
 # Visual inspection helper
 # ---------------------------------------------------------------------------
-def dump_visual_inspection(sample_idx, rgb_input,
-                           gt_heatmaps, pred_heatmapsOut,
-                           gt_kps, pred_skels,
-                           kp_names, paf_parents=None,
-                           out_root='visual_inspection'):
+def dump_visual_inspection(sample_idx, rgb_input, gt_heatmaps, pred_heatmapsOut, gt_kps, pred_skels, kp_names,
+                           paf_parents=None, out_root='visual_inspection'):
     """
     For each joint channel, write a side-by-side PNG:
       LEFT  — GT heatmap (green) with GT peak dot (blue)
@@ -357,45 +377,45 @@ def dump_visual_inspection(sample_idx, rgb_input,
         jname = kp_names[j]
 
         # ---- GT panel ----
-        gt_ch  = gt_heatmaps[:, :, j].astype(np.float32) + 120.0   # [0..240]
+        gt_ch = gt_heatmaps[:, :, j].astype(np.float32) + 120.0  # [0..240]
         gt_img = np.clip(gt_ch / 240.0 * 255.0, 0, 255).astype(np.uint8)
-        gt_bgr = cv2.applyColorMap(gt_img, cv2.COLORMAP_WINTER)     # cool blue-green
+        gt_bgr = cv2.applyColorMap(gt_img, cv2.COLORMAP_WINTER)  # cool blue-green
 
         gx, gy, gv = gt_kps[j]
         if gv > 0:
             px_g = int(round(gx * (W_hm - 1)))
             py_g = int(round(gy * (H_hm - 1)))
-            cv2.circle(gt_bgr, (px_g, py_g), 5, (255, 0, 0), -1)   # blue = GT
+            cv2.circle(gt_bgr, (px_g, py_g), 5, (255, 0, 0), -1)  # blue = GT
 
         # ---- Pred panel ----
         if j < len(pred_heatmapsOut):
-            pred_ch = pred_heatmapsOut[j]   # uint8 [0..255] from convertIO
+            pred_ch = pred_heatmapsOut[j]  # uint8 [0..255] from convertIO
         else:
             pred_ch = np.zeros((H_hm, W_hm), dtype=np.uint8)
         pred_bgr = cv2.applyColorMap(pred_ch, cv2.COLORMAP_HOT)
 
         # All skeleton joints for this keypoint type (all candidates, all skeletons)
         for skel in pred_skels:
-            sx = skel[j*3]
-            sy = skel[j*3 + 1]
-            sv = skel[j*3 + 2]
+            sx = skel[j * 3]
+            sy = skel[j * 3 + 1]
+            sv = skel[j * 3 + 2]
             if sv > 0:
                 px_s = int(round(sx * (W_hm - 1)))
                 py_s = int(round(sy * (H_hm - 1)))
-                cv2.circle(pred_bgr, (px_s, py_s), 4, (0, 0, 255), -1)   # red = any skel
+                cv2.circle(pred_bgr, (px_s, py_s), 4, (0, 0, 255), -1)  # red = any skel
 
         # Best matched skeleton joint
-        bx = best_pred[j*3]
-        by = best_pred[j*3 + 1]
-        bv = best_pred[j*3 + 2]
+        bx = best_pred[j * 3]
+        by = best_pred[j * 3 + 1]
+        bv = best_pred[j * 3 + 2]
         if bv > 0:
             px_b = int(round(bx * (W_hm - 1)))
             py_b = int(round(by * (H_hm - 1)))
-            cv2.circle(pred_bgr, (px_b, py_b), 6, (0, 255, 255), 2)      # yellow ring = best
+            cv2.circle(pred_bgr, (px_b, py_b), 6, (0, 255, 255), 2)  # yellow ring = best
 
         # ---- Labels ----
-        cv2.putText(gt_bgr,   f'GT  {jname}',   (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
-        cv2.putText(pred_bgr, f'PRD {jname}',   (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
+        cv2.putText(gt_bgr, f'GT  {jname}', (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        cv2.putText(pred_bgr, f'PRD {jname}', (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
         # ---- Combine [RGB | GT | Pred] ----
         row = np.concatenate([rgb_resized, gt_bgr, pred_bgr], axis=1)
@@ -422,8 +442,7 @@ def dump_visual_inspection(sample_idx, rgb_input,
             gt_raw = gt_heatmaps[:, :, abs_ch].astype(np.float32) + 120.0
             gt_img = np.clip(gt_raw / 240.0 * 255.0, 0, 255).astype(np.uint8)
             gt_bgr = cv2.applyColorMap(gt_img, cv2.COLORMAP_JET)
-            cv2.putText(gt_bgr, f'GT PAF {label}', (4, 14),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            cv2.putText(gt_bgr, f'GT PAF {label}', (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
             # Pred PAF panel — already uint8 [0..255]
             if abs_ch < len(pred_heatmapsOut):
@@ -436,32 +455,25 @@ def dump_visual_inspection(sample_idx, rgb_input,
             if joint_info is not None:
                 jidx = joint_info[0]
                 for skel in pred_skels:
-                    sx, sy, sv = skel[jidx*3], skel[jidx*3+1], skel[jidx*3+2]
+                    sx, sy, sv = skel[jidx * 3], skel[jidx * 3 + 1], skel[jidx * 3 + 2]
                     if sv > 0:
-                        cv2.circle(pred_bgr,
-                                   (int(round(sx*(W_hm-1))), int(round(sy*(H_hm-1)))),
-                                   4, (0, 0, 255), -1)   # red = any skel
-                bx, by, bv = best_pred[jidx*3], best_pred[jidx*3+1], best_pred[jidx*3+2]
+                        cv2.circle(pred_bgr, (int(round(sx * (W_hm - 1))), int(round(sy * (H_hm - 1)))), 4, (0, 0, 255),
+                                   -1)  # red = any skel
+                bx, by, bv = best_pred[jidx * 3], best_pred[jidx * 3 + 1], best_pred[jidx * 3 + 2]
                 if bv > 0:
-                    cv2.circle(pred_bgr,
-                               (int(round(bx*(W_hm-1))), int(round(by*(H_hm-1)))),
-                               6, (0, 255, 255), 2)       # yellow ring = best
+                    cv2.circle(pred_bgr, (int(round(bx * (W_hm - 1))), int(round(by * (H_hm - 1)))), 6, (0, 255, 255),
+                               2)  # yellow ring = best
 
-            cv2.putText(pred_bgr, f'PRD PAF {label}', (4, 14),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            cv2.putText(pred_bgr, f'PRD PAF {label}', (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
             row = np.concatenate([rgb_resized, gt_bgr, pred_bgr], axis=1)
-            cv2.imwrite(
-                os.path.join(sample_dir, f'paf_{local_ch:02d}_{label}.png'),
-                row
-            )
+            cv2.imwrite(os.path.join(sample_dir, f'paf_{local_ch:02d}_{label}.png'), row)
 
 
 # ---------------------------------------------------------------------------
 # Statistical plots for heatmap metrics
 # ---------------------------------------------------------------------------
-def plot_heatmap_metrics(hm_acc, train_results, serial, output_prefix,
-                        token_data=None):
+def plot_heatmap_metrics(hm_acc, train_results, serial, output_prefix, token_data=None):
     """
     Generate and save PNG plots summarising evaluation metrics.
 
@@ -486,9 +498,9 @@ def plot_heatmap_metrics(hm_acc, train_results, serial, output_prefix,
         print("[warn] matplotlib not available — skipping metric plots")
         return
 
-    names  = RANGE_NAMES                  # list of group labels (8 entries)
-    n      = len(names)
-    x      = np.arange(n)
+    names = RANGE_NAMES  # list of group labels (8 entries)
+    n = len(names)
+    x = np.arange(n)
     colors = [plt.cm.tab10(i / 10.0) for i in range(n)]
 
     # -----------------------------------------------------------------------
@@ -498,14 +510,13 @@ def plot_heatmap_metrics(hm_acc, train_results, serial, output_prefix,
     fig.suptitle(f'Heatmap Metrics Overview  (model {serial})', fontsize=13)
 
     metrics_overview = [
-        ('SSIM',    'Mean SSIM',      axes[0, 0], False),
-        ('MSE',     'Mean MSE',       axes[0, 1], True),   # higher = worse, highlight in red
-        ('HDM0.1',  'HDM @ 0.1',     axes[1, 0], False),
-        ('HDM0.5',  'HDM @ 0.5',     axes[1, 1], False),
+        ('SSIM', 'Mean SSIM', axes[0, 0], False),
+        ('MSE', 'Mean MSE', axes[0, 1], True),  # higher = worse, highlight in red
+        ('HDM0.1', 'HDM @ 0.1', axes[1, 0], False),
+        ('HDM0.5', 'HDM @ 0.5', axes[1, 1], False),
     ]
     for metric, ylabel, ax, invert_good in metrics_overview:
-        vals = [float(np.mean(hm_acc[nm][metric])) if hm_acc[nm][metric] else 0.0
-                for nm in names]
+        vals = [float(np.mean(hm_acc[nm][metric])) if hm_acc[nm][metric] else 0.0 for nm in names]
         bar_colors = colors if not invert_good else ['#d62728'] * n
         bars = ax.bar(x, vals, color=bar_colors, edgecolor='white', linewidth=0.5)
         ax.set_xticks(x)
@@ -515,8 +526,8 @@ def plot_heatmap_metrics(hm_acc, train_results, serial, output_prefix,
         ax.grid(axis='y', linestyle='--', alpha=0.4)
         # Annotate each bar with its value
         for bar, v in zip(bars, vals):
-            ax.text(bar.get_x() + bar.get_width() / 2.0, bar.get_height(),
-                    f'{v:.3f}', ha='center', va='bottom', fontsize=7)
+            ax.text(bar.get_x() + bar.get_width() / 2.0, bar.get_height(), f'{v:.3f}', ha='center', va='bottom',
+                    fontsize=7)
 
     fig.tight_layout()
     path1 = f'{output_prefix}_heatmap_overview.png'
@@ -527,20 +538,19 @@ def plot_heatmap_metrics(hm_acc, train_results, serial, output_prefix,
     # -----------------------------------------------------------------------
     # Plot 2 — HDM threshold sweep: 5 thresholds × 8 groups (grouped bars)
     # -----------------------------------------------------------------------
-    thresholds  = ['HDM0.01', 'HDM0.1', 'HDM0.3', 'HDM0.5', 'HDM0.8']
-    thr_labels  = ['0.01',    '0.1',    '0.3',    '0.5',    '0.8']
-    n_thr       = len(thresholds)
-    bar_width   = 0.15
-    thr_colors  = [plt.cm.viridis(i / (n_thr - 1)) for i in range(n_thr)]
+    thresholds = ['HDM0.01', 'HDM0.1', 'HDM0.3', 'HDM0.5', 'HDM0.8']
+    thr_labels = ['0.01', '0.1', '0.3', '0.5', '0.8']
+    n_thr = len(thresholds)
+    bar_width = 0.15
+    thr_colors = [plt.cm.viridis(i / (n_thr - 1)) for i in range(n_thr)]
 
     fig, ax = plt.subplots(figsize=(14, 5))
     fig.suptitle(f'HDM at Different Thresholds  (model {serial})', fontsize=13)
     for ti, (thr_key, thr_lbl) in enumerate(zip(thresholds, thr_labels)):
-        vals = [float(np.mean(hm_acc[nm][thr_key])) if hm_acc[nm][thr_key] else 0.0
-                for nm in names]
+        vals = [float(np.mean(hm_acc[nm][thr_key])) if hm_acc[nm][thr_key] else 0.0 for nm in names]
         offset = (ti - n_thr / 2.0 + 0.5) * bar_width
-        ax.bar(x + offset, vals, width=bar_width,
-               label=f'HDM@{thr_lbl}', color=thr_colors[ti], edgecolor='white', linewidth=0.3)
+        ax.bar(x + offset, vals, width=bar_width, label=f'HDM@{thr_lbl}', color=thr_colors[ti], edgecolor='white',
+               linewidth=0.3)
 
     ax.set_xticks(x)
     ax.set_xticklabels(names, rotation=30, ha='right', fontsize=9)
@@ -558,18 +568,14 @@ def plot_heatmap_metrics(hm_acc, train_results, serial, output_prefix,
     # Plot 3 — training-equivalent HDM partial metrics bar chart
     # -----------------------------------------------------------------------
     # Keep a sensible order: overall first, then per-group partials
-    train_keys_ordered = (
-        ['hdm', 'hdm_not0', 'hdm_not0_joints'] +
-        [k for k, _, _ in HDM_PARTIAL_SPECS]
-    )
+    train_keys_ordered = (['hdm', 'hdm_not0', 'hdm_not0_joints'] + [k for k, _, _ in HDM_PARTIAL_SPECS])
     train_keys_ordered = [k for k in train_keys_ordered if k in train_results]
     train_vals = [float(train_results[k]) for k in train_keys_ordered]
     xt = np.arange(len(train_keys_ordered))
 
     fig, ax = plt.subplots(figsize=(14, 5))
     fig.suptitle(f'Training-Equivalent HDM Metrics  (model {serial})', fontsize=13)
-    bar_colors_t = [plt.cm.Set2(i / max(len(train_keys_ordered) - 1, 1))
-                    for i in range(len(train_keys_ordered))]
+    bar_colors_t = [plt.cm.Set2(i / max(len(train_keys_ordered) - 1, 1)) for i in range(len(train_keys_ordered))]
     bars = ax.bar(xt, train_vals, color=bar_colors_t, edgecolor='white', linewidth=0.5)
     ax.set_xticks(xt)
     ax.set_xticklabels(train_keys_ordered, rotation=30, ha='right', fontsize=8)
@@ -577,8 +583,8 @@ def plot_heatmap_metrics(hm_acc, train_results, serial, output_prefix,
     ax.set_ylim(0, 1.05)
     ax.grid(axis='y', linestyle='--', alpha=0.4)
     for bar, v in zip(bars, train_vals):
-        ax.text(bar.get_x() + bar.get_width() / 2.0, bar.get_height(),
-                f'{v:.4f}', ha='center', va='bottom', fontsize=7, rotation=45)
+        ax.text(bar.get_x() + bar.get_width() / 2.0, bar.get_height(), f'{v:.4f}', ha='center', va='bottom', fontsize=7,
+                rotation=45)
     fig.tight_layout()
     path3 = f'{output_prefix}_training_hdm.png'
     fig.savefig(path3, dpi=120, bbox_inches='tight')
@@ -592,18 +598,18 @@ def plot_heatmap_metrics(hm_acc, train_results, serial, output_prefix,
     fig.suptitle(f'Per-Sample/Channel Distributions  (model {serial})', fontsize=13)
 
     ssim_data = [hm_acc[nm]['SSIM'] for nm in names]
-    mse_data  = [hm_acc[nm]['MSE']  for nm in names]
+    mse_data = [hm_acc[nm]['MSE'] for nm in names]
 
     for ax, data, title, ylabel in [
-        (axes[0], ssim_data, 'SSIM Distribution',  'SSIM'),
-        (axes[1], mse_data,  'MSE Distribution',   'MSE'),
+        (axes[0], ssim_data, 'SSIM Distribution', 'SSIM'),
+        (axes[1], mse_data, 'MSE Distribution', 'MSE'),
     ]:
         # Remove empty groups so matplotlib doesn't crash on empty arrays
         non_empty = [(nm, d) for nm, d in zip(names, data) if len(d) > 0]
         if non_empty:
             bp_labels, bp_data = zip(*non_empty)
-            bp = ax.boxplot(bp_data, labels=bp_labels, patch_artist=True,
-                            medianprops=dict(color='black', linewidth=1.5))
+            bp = ax.boxplot(bp_data, labels=bp_labels, patch_artist=True, medianprops=dict(
+                color='black', linewidth=1.5))
             for patch, color in zip(bp['boxes'], colors[:len(bp_data)]):
                 patch.set_facecolor(color)
                 patch.set_alpha(0.7)
@@ -624,17 +630,17 @@ def plot_heatmap_metrics(hm_acc, train_results, serial, output_prefix,
     if token_data is None:
         return
 
-    cosine_sims      = token_data.get('cosine_sims',      [])
+    cosine_sims = token_data.get('cosine_sims', [])
     cosine_per_token = token_data.get('cosine_per_token', [])
-    multihot_f1      = token_data.get('multihot_f1',      [])
-    multihot_prec    = token_data.get('multihot_prec',    [])
-    multihot_rec     = token_data.get('multihot_rec',     [])
-    top3_acc         = token_data.get('top3_acc',         [])
-    top5_acc         = token_data.get('top5_acc',         [])
+    multihot_f1 = token_data.get('multihot_f1', [])
+    multihot_prec = token_data.get('multihot_prec', [])
+    multihot_rec = token_data.get('multihot_rec', [])
+    top3_acc = token_data.get('top3_acc', [])
+    top5_acc = token_data.get('top5_acc', [])
 
     # Bar chart: one bar per aggregate token metric
     token_bar_labels = []
-    token_bar_vals   = []
+    token_bar_vals = []
 
     if cosine_sims:
         token_bar_labels.append('Cosine\n(overall)')
@@ -663,20 +669,18 @@ def plot_heatmap_metrics(hm_acc, train_results, serial, output_prefix,
 
     if token_bar_labels:
         xt = np.arange(len(token_bar_labels))
-        bar_colors_tok = [plt.cm.tab20(i / max(len(token_bar_labels) - 1, 1))
-                          for i in range(len(token_bar_labels))]
+        bar_colors_tok = [plt.cm.tab20(i / max(len(token_bar_labels) - 1, 1)) for i in range(len(token_bar_labels))]
         fig, ax = plt.subplots(figsize=(max(10, len(token_bar_labels) * 0.9), 5))
         fig.suptitle(f'Token Metrics  (model {serial})', fontsize=13)
-        bars = ax.bar(xt, token_bar_vals, color=bar_colors_tok,
-                      edgecolor='white', linewidth=0.5)
+        bars = ax.bar(xt, token_bar_vals, color=bar_colors_tok, edgecolor='white', linewidth=0.5)
         ax.set_xticks(xt)
         ax.set_xticklabels(token_bar_labels, fontsize=8)
         ax.set_ylim(0, 1.05)
         ax.set_ylabel('Score', fontsize=9)
         ax.grid(axis='y', linestyle='--', alpha=0.4)
         for bar, v in zip(bars, token_bar_vals):
-            ax.text(bar.get_x() + bar.get_width() / 2.0, bar.get_height(),
-                    f'{v:.3f}', ha='center', va='bottom', fontsize=7)
+            ax.text(bar.get_x() + bar.get_width() / 2.0, bar.get_height(), f'{v:.3f}', ha='center', va='bottom',
+                    fontsize=7)
         fig.tight_layout()
         path5 = f'{output_prefix}_token_metrics.png'
         fig.savefig(path5, dpi=120, bbox_inches='tight')
@@ -686,14 +690,13 @@ def plot_heatmap_metrics(hm_acc, train_results, serial, output_prefix,
     # -----------------------------------------------------------------------
     # Plot 6 — token cosine distribution: box plot per token slot
     # -----------------------------------------------------------------------
-    slot_data = [(f't{ti:02d}', sims)
-                 for ti, sims in enumerate(cosine_per_token) if sims]
+    slot_data = [(f't{ti:02d}', sims) for ti, sims in enumerate(cosine_per_token) if sims]
     if slot_data:
         slot_labels, slot_sims_list = zip(*slot_data)
         fig, ax = plt.subplots(figsize=(max(8, len(slot_data) * 0.8), 5))
         fig.suptitle(f'Per-Token Cosine Similarity Distribution  (model {serial})', fontsize=13)
-        bp = ax.boxplot(slot_sims_list, labels=slot_labels, patch_artist=True,
-                        medianprops=dict(color='black', linewidth=1.5))
+        bp = ax.boxplot(slot_sims_list, labels=slot_labels, patch_artist=True, medianprops=dict(
+            color='black', linewidth=1.5))
         slot_colors = [plt.cm.tab10(i / 10.0) for i in range(len(slot_data))]
         for patch, color in zip(bp['boxes'], slot_colors):
             patch.set_facecolor(color)
@@ -711,27 +714,32 @@ def plot_heatmap_metrics(hm_acc, train_results, serial, output_prefix,
 # Main evaluation
 # ---------------------------------------------------------------------------
 def evaluate():
-    model_path       = '2d_pose_estimation'
-    json_path        = '2d_pose_estimation/configuration.json'
-    output_json      = None  # auto-named after evaluation
-    confusion_json   = None  # auto-named after evaluation
+    model_path = '2d_pose_estimation'
+    json_path = '2d_pose_estimation/configuration.json'
+    output_json = None  # auto-named after evaluation
+    confusion_json = None  # auto-named after evaluation
 
-    do_skeleton_eval  = True
+    do_skeleton_eval = True
     do_visual_inspect = False
-    max_samples       = None
+    max_samples = None
     argv = sys.argv[1:]
     i = 0
     while i < len(argv):
         if argv[i] == '--output' and i + 1 < len(argv):
-            output_json = argv[i + 1]; i += 2
+            output_json = argv[i + 1]
+            i += 2
         elif argv[i] == '--model' and i + 1 < len(argv):
-            model_path = argv[i + 1]; i += 2
+            model_path = argv[i + 1]
+            i += 2
         elif argv[i] == '--no-skeleton':
-            do_skeleton_eval = False; i += 1
+            do_skeleton_eval = False
+            i += 1
         elif argv[i] == '--samples' and i + 1 < len(argv):
-            max_samples = int(argv[i + 1]); i += 2
+            max_samples = int(argv[i + 1])
+            i += 2
         elif argv[i] == '--visualinspection':
-            do_visual_inspect = True; i += 1
+            do_visual_inspect = True
+            i += 1
         else:
             i += 1
 
@@ -745,7 +753,7 @@ def evaluate():
         print(bcolors.FAIL, f"Configuration not found: {json_path}", bcolors.ENDC)
         sys.exit(1)
 
-    cfg    = loadJSONConfiguration(json_path, useRAMfs=False)
+    cfg = loadJSONConfiguration(json_path, useRAMfs=False)
     serial = cfg.get('serial', 'unknown')
 
     if output_json is None:
@@ -754,7 +762,7 @@ def evaluate():
         # Place confusion JSON in the same directory as output_json so that
         # when --output points inside 2d_pose_estimation/, everything lands there
         # and gets picked up by the zip step in trainYMAPNet.py.
-        out_dir       = os.path.dirname(output_json) or '.'
+        out_dir = os.path.dirname(output_json) or '.'
         confusion_json = os.path.join(out_dir, f"evaluation_results_{serial}_token_confusion.json")
 
     # Load vocabulary for class-name labelling in the confusion output
@@ -781,33 +789,24 @@ def evaluate():
     # -----------------------------------------------------------------------
     batch_size = int(cfg['batchSize'])
     print(bcolors.OKGREEN, "Creating validation DataLoader...", bcolors.ENDC)
-    db = DataLoader(
-        (cfg['inputHeight'],  cfg['inputWidth'],  cfg['inputChannels']),
-        (cfg['outputHeight'], cfg['outputWidth'],  cfg['outputChannels']),
-        output16BitChannels    = cfg['output16BitChannels'],
-        numberOfThreads        = cfg['DatasetLoaderThreads'],
-        streamData             = 1,
-        batchSize              = batch_size,
-        gradientSize           = cfg['heatmapGradientSizeMinimum'],
-        PAFSize                = cfg['heatmapPAFSizeMinimum'],
-        doAugmentations        = 0,
-        addPAFs                = int(cfg['heatmapAddPAFs']),
-        addBackground          = int(cfg['heatmapGenerateSkeletonBkg']),
-        addDepthMap            = int(cfg['heatmapAddDepthmap']),
-        addDepthLevelsHeatmaps = int(cfg['heatmapAddDepthLevels']),
-        addNormals             = int(cfg['heatmapAddNormals']),
-        addSegmentation        = int(cfg['heatmapAddSegmentation']),
-        datasets               = cfg['ValidationDataset'],
-        libraryPath            = "datasets/DataLoader/libDataLoader.so"
-    )
+    db = DataLoader((cfg['inputHeight'], cfg['inputWidth'],
+                     cfg['inputChannels']), (cfg['outputHeight'], cfg['outputWidth'], cfg['outputChannels']),
+                    output16BitChannels=cfg['output16BitChannels'], numberOfThreads=cfg['DatasetLoaderThreads'],
+                    streamData=1, batchSize=batch_size, gradientSize=cfg['heatmapGradientSizeMinimum'],
+                    PAFSize=cfg['heatmapPAFSizeMinimum'], doAugmentations=0, addPAFs=int(
+                        cfg['heatmapAddPAFs']), addBackground=int(cfg['heatmapGenerateSkeletonBkg']), addDepthMap=int(
+                            cfg['heatmapAddDepthmap']), addDepthLevelsHeatmaps=int(
+                                cfg['heatmapAddDepthLevels']), addNormals=int(
+                                    cfg['heatmapAddNormals']), addSegmentation=int(cfg['heatmapAddSegmentation']),
+                    datasets=cfg['ValidationDataset'], libraryPath="datasets/DataLoader/libDataLoader.so")
 
-    n_samples   = db.numberOfSamples
+    n_samples = db.numberOfSamples
     if max_samples is not None:
         n_samples = min(n_samples, max_samples)
-    n_channels  = int(cfg['outputChannels'])
-    tokens_out  = int(cfg.get('tokensOut',  8))
-    has_tokens  = bool(cfg.get('outputTokens', False))
-    hm_active   = int(cfg.get('heatmapActive',      120))
+    n_channels = int(cfg['outputChannels'])
+    tokens_out = int(cfg.get('tokensOut', 8))
+    has_tokens = bool(cfg.get('outputTokens', False))
+    hm_active = int(cfg.get('heatmapActive', 120))
     hm_inactive = int(cfg.get('heatmapDeactivated', -120))
 
     print(f"Validation samples: {n_samples}  |  batch_size: {batch_size}  |  channels: {n_channels}")
@@ -817,12 +816,12 @@ def evaluate():
     # -----------------------------------------------------------------------
     print(bcolors.OKGREEN, "Loading YMAPNet model...", bcolors.ENDC)
     estimator = YMAPNet(
-        modelPath         = model_path,
-        threshold         = 0,
-        keypoint_threshold= 50.0,   # match webcam default — controls peak detection threshold
-        engine            = 'tensorflow',
-        profiling         = False,
-        compileModel      = False    # skip optimizer state loading — not needed for evaluation
+        modelPath=model_path,
+        threshold=0,
+        keypoint_threshold=50.0,  # match webcam default — controls peak detection threshold
+        engine='tensorflow',
+        profiling=False,
+        compileModel=False  # skip optimizer state loading — not needed for evaluation
     )
 
     # -----------------------------------------------------------------------
@@ -831,9 +830,17 @@ def evaluate():
     hm_acc = {}
     for name in RANGE_NAMES:
         hm_acc[name] = {
-            'SSIM': [], 'MSE': [],
-            'HDM0.01': [], 'HDM0.1': [], 'HDM0.3': [], 'HDM0.5': [], 'HDM0.8': [],
-            'TP': 0, 'TN': 0, 'FP': 0, 'FN': 0
+            'SSIM': [],
+            'MSE': [],
+            'HDM0.01': [],
+            'HDM0.1': [],
+            'HDM0.3': [],
+            'HDM0.5': [],
+            'HDM0.8': [],
+            'TP': 0,
+            'TN': 0,
+            'FP': 0,
+            'FN': 0
         }
 
     # -----------------------------------------------------------------------
@@ -851,50 +858,47 @@ def evaluate():
     # -----------------------------------------------------------------------
     # Token accumulators
     # -----------------------------------------------------------------------
-    token_cosine_sims      = []
+    token_cosine_sims = []
     token_cosine_per_token = [[] for _ in range(tokens_out)]  # per-token cosine sims
-    token_multihot_f1      = []
-    token_multihot_prec    = []
-    token_multihot_rec     = []
-    token_multihot_TP      = 0
-    token_multihot_FP      = 0
-    token_multihot_FN      = 0
-    token_top3_acc         = []
-    token_top5_acc         = []
+    token_multihot_f1 = []
+    token_multihot_prec = []
+    token_multihot_rec = []
+    token_multihot_TP = 0
+    token_multihot_FP = 0
+    token_multihot_FN = 0
+    token_top3_acc = []
+    token_top5_acc = []
 
     # Per-class and confusion-pair accumulators (lazy-init on first multihot sample)
-    class_TP       = None   # np.int64 array (n_classes,)
-    class_FP       = None
-    class_FN       = None
-    confusion_ctr  = defaultdict(int)  # (true_idx, pred_idx) -> count
+    class_TP = None  # np.int64 array (n_classes,)
+    class_FP = None
+    class_FN = None
+    confusion_ctr = defaultdict(int)  # (true_idx, pred_idx) -> count
 
     # -----------------------------------------------------------------------
     # Skeleton resolution accumulators
     # -----------------------------------------------------------------------
-    kp_names   = cfg.get('keypoint_names', [])
-    n_joints   = len(kp_names)
-    has_skel_cfg = (n_joints > 0 and
-                    'keypoint_parents'  in cfg and
-                    'keypoint_children' in cfg and
-                    'paf_parents'       in cfg)
+    kp_names = cfg.get('keypoint_names', [])
+    n_joints = len(kp_names)
+    has_skel_cfg = (n_joints > 0 and 'keypoint_parents' in cfg and 'keypoint_children' in cfg and 'paf_parents' in cfg)
     do_skeleton_eval = do_skeleton_eval and has_skel_cfg
 
-    pck_hits     = {t: np.zeros(n_joints, dtype=np.float64) for t in PCK_THRESHOLDS}
-    pck_visible  = {t: np.zeros(n_joints, dtype=np.float64) for t in PCK_THRESHOLDS}
-    oks_values   = []
+    pck_hits = {t: np.zeros(n_joints, dtype=np.float64) for t in PCK_THRESHOLDS}
+    pck_visible = {t: np.zeros(n_joints, dtype=np.float64) for t in PCK_THRESHOLDS}
+    oks_values = []
     skel_detected = 0
-    skel_total    = 0
+    skel_total = 0
 
     # -----------------------------------------------------------------------
     # Main loop — iterate in batches (same size as training) to satisfy the
     # DataLoader's minimum-batch-size constraint in HeatmapGenerator.c
     # -----------------------------------------------------------------------
-    start_time   = time.time()
+    start_time = time.time()
     samples_done = 0
     cosine_error_reported = False
 
     for batch_start in range(0, n_samples, batch_size):
-        batch_end    = min(batch_start + batch_size, n_samples)
+        batch_end = min(batch_start + batch_size, n_samples)
         actual_count = batch_end - batch_start
 
         # --- Get ground-truth data from DataLoader --------------------------
@@ -910,7 +914,7 @@ def evaluate():
 
         # Fetch GT tokens / embeddings for the whole batch at once
         gt_embeddings_batch = None
-        gt_multihot_batch   = None
+        gt_multihot_batch = None
         if has_tokens:
             try:
                 gt_embeddings_batch = db.get_partial_embedding_array(batch_start, batch_end)  # (B, tokensOut, 300)
@@ -924,7 +928,7 @@ def evaluate():
 
         # --- Per-sample inference and metric computation --------------------
         for i in range(actual_count):
-            rgb_input   = npArrayIn[i]   # (H, W, 3)
+            rgb_input = npArrayIn[i]  # (H, W, 3)
             gt_heatmaps = npArrayOut[i]  # (H, W, outputChannels)
 
             try:
@@ -941,18 +945,19 @@ def evaluate():
             # ----------------------------------------------------------------
             if do_skeleton_eval:
                 try:
-                    pred_kp_hm = np.stack(
-                        estimator.heatmapsOut[:n_joints], axis=2
-                    ).astype(np.float32) - 120.0   # uint8→[-120..120]
+                    pred_kp_hm = np.stack(estimator.heatmapsOut[:n_joints], axis=2).astype(
+                        np.float32) - 120.0  # uint8→[-120..120]
 
-                    paf_end  = min(PAF_FIRST_CH + PAF_NUM_CH, n_pred_hm)
+                    paf_end = min(PAF_FIRST_CH + PAF_NUM_CH, n_pred_hm)
                     pred_paf = [
                         estimator.heatmapsOut[PAF_FIRST_CH + j].astype(np.float32) - 120.0
                         for j in range(paf_end - PAF_FIRST_CH)
                     ]
 
                     pred_skels = resolveJointHierarchyNew(
-                        pred_kp_hm, pred_paf, estimator.depthmap,
+                        pred_kp_hm,
+                        pred_paf,
+                        estimator.depthmap,
                         cfg['keypoint_names'],
                         cfg['keypoint_parents'],
                         cfg['keypoint_children'],
@@ -964,12 +969,12 @@ def evaluate():
                 except Exception:
                     pred_skels = []
 
-                gt_kps    = extract_gt_keypoints(gt_heatmaps, n_joints)
+                gt_kps = extract_gt_keypoints(gt_heatmaps, n_joints)
                 best_pred = match_skeleton_to_gt(pred_skels, gt_kps, n_joints)
 
                 for thr in PCK_THRESHOLDS:
                     h, v = compute_pck_hits(best_pred, gt_kps, thr, n_joints)
-                    pck_hits[thr]    += h
+                    pck_hits[thr] += h
                     pck_visible[thr] += v
 
                 oks = compute_oks_score(best_pred, gt_kps, n_joints, COCO_KP_SIGMAS)
@@ -983,33 +988,33 @@ def evaluate():
                 # ---- Visual inspection dump --------------------------------
                 if do_visual_inspect:
                     dump_visual_inspection(
-                        sample_idx       = batch_start + i,
-                        rgb_input        = rgb_input,
-                        gt_heatmaps      = gt_heatmaps,
-                        pred_heatmapsOut = estimator.heatmapsOut,
-                        gt_kps           = gt_kps,
-                        pred_skels       = pred_skels,
-                        kp_names         = kp_names,
-                        paf_parents      = cfg['paf_parents'],
+                        sample_idx=batch_start + i,
+                        rgb_input=rgb_input,
+                        gt_heatmaps=gt_heatmaps,
+                        pred_heatmapsOut=estimator.heatmapsOut,
+                        gt_kps=gt_kps,
+                        pred_skels=pred_skels,
+                        kp_names=kp_names,
+                        paf_parents=cfg['paf_parents'],
                     )
 
             # ----------------------------------------------------------------
             # Build full uint8 stacks for training-equivalent metrics
             # ----------------------------------------------------------------
             H, W = gt_heatmaps.shape[0], gt_heatmaps.shape[1]
-            gt_uint8   = np.empty((H, W, n_ch_eval), dtype=np.uint8)
+            gt_uint8 = np.empty((H, W, n_ch_eval), dtype=np.uint8)
             pred_uint8 = np.empty((H, W, n_ch_eval), dtype=np.uint8)
             for ch in range(n_ch_eval):
-                gt_uint8[:, :, ch]   = gt_int8_to_display_uint8(gt_heatmaps[:, :, ch], hm_active, hm_inactive)
+                gt_uint8[:, :, ch] = gt_int8_to_display_uint8(gt_heatmaps[:, :, ch], hm_active, hm_inactive)
                 pred_uint8[:, :, ch] = estimator.heatmapsOut[ch]
 
-            diff         = np.abs(gt_uint8.astype(np.float32) - pred_uint8.astype(np.float32))
+            diff = np.abs(gt_uint8.astype(np.float32) - pred_uint8.astype(np.float32))
             correct_mask = diff <= HDM_THRESHOLD
             nonzero_mask = gt_uint8 >= NONZERO_THRESHOLD_UINT8
 
             # --- Training-equivalent HDM (all channels) ---------------------
             train_metrics['hdm']['correct'] += int(np.sum(correct_mask))
-            train_metrics['hdm']['total']   += correct_mask.size
+            train_metrics['hdm']['total'] += correct_mask.size
 
             # --- hdm_not0 (all channels, non-background GT only) ------------
             nz = nonzero_mask
@@ -1017,7 +1022,7 @@ def evaluate():
             train_metrics['hdm_not0']['nonzero'] += int(np.sum(nz))
 
             # --- hdm_not0_joints (channels 0-16, non-background GT only) ----
-            nz_j  = nonzero_mask[:, :, 0:17]
+            nz_j = nonzero_mask[:, :, 0:17]
             cor_j = correct_mask[:, :, 0:17]
             train_metrics['hdm_not0_joints']['correct'] += int(np.sum(cor_j & nz_j))
             train_metrics['hdm_not0_joints']['nonzero'] += int(np.sum(nz_j))
@@ -1029,7 +1034,7 @@ def evaluate():
                     continue
                 c = correct_mask[:, :, s:e_clamped]
                 train_metrics[key]['correct'] += int(np.sum(c))
-                train_metrics[key]['total']   += c.size
+                train_metrics[key]['total'] += c.size
 
             # ----------------------------------------------------------------
             # Display-level metrics per heatmap group (SSIM, MSE, HDM%, confusion)
@@ -1039,7 +1044,7 @@ def evaluate():
                 for ch in range(ch_start, ch_stop + 1):
                     if ch >= n_ch_eval:
                         break
-                    gt_ch   = gt_uint8[:, :, ch]
+                    gt_ch = gt_uint8[:, :, ch]
                     pred_ch = pred_uint8[:, :, ch]
 
                     hm_acc[name]['SSIM'].append(compute_ssim(gt_ch, pred_ch))
@@ -1081,7 +1086,7 @@ def evaluate():
                     elif not cosine_error_reported:
                         cosine_error_reported = True
                         emb_info = type(pred_emb).__name__ if pred_emb is not None else "None"
-                        gt_info  = type(gt_embeddings_batch).__name__ if gt_embeddings_batch is not None else "None"
+                        gt_info = type(gt_embeddings_batch).__name__ if gt_embeddings_batch is not None else "None"
                         print(f"\n[warn] cosine skip: pred_emb={emb_info}, gt_embeddings_batch={gt_info}")
                 except Exception as ex:
                     if not cosine_error_reported:
@@ -1114,13 +1119,13 @@ def evaluate():
                             class_TP = np.zeros(n_cls, dtype=np.int64)
                             class_FP = np.zeros(n_cls, dtype=np.int64)
                             class_FN = np.zeros(n_cls, dtype=np.int64)
-                        gt_b   = (gt_mh   > 0.5)
+                        gt_b = (gt_mh > 0.5)
                         pred_b = (pred_mh > 0.5)
-                        class_TP += (gt_b  & pred_b)
+                        class_TP += (gt_b & pred_b)
                         class_FP += (~gt_b & pred_b)
-                        class_FN += (gt_b  & ~pred_b)
+                        class_FN += (gt_b & ~pred_b)
                         # Confusion pairs: for each (missed GT class, wrongly predicted class)
-                        fn_idx = np.where(gt_b  & ~pred_b)[0]
+                        fn_idx = np.where(gt_b & ~pred_b)[0]
                         fp_idx = np.where(~gt_b & pred_b)[0]
                         for fi in fn_idx:
                             for fj in fp_idx:
@@ -1132,8 +1137,8 @@ def evaluate():
 
         # --- Progress -------------------------------------------------------
         elapsed = time.time() - start_time
-        fps     = samples_done / max(elapsed, 1e-6)
-        eta     = (n_samples - samples_done) / max(fps, 1e-6)
+        fps = samples_done / max(elapsed, 1e-6)
+        eta = (n_samples - samples_done) / max(fps, 1e-6)
         print(f"\r  [{samples_done}/{n_samples}]  {fps:.1f} fps  ETA {eta:.0f}s      ", end='', flush=True)
 
     print()
@@ -1142,17 +1147,17 @@ def evaluate():
     # Build and print results
     # -----------------------------------------------------------------------
     results = {
-        'serial':        serial,
+        'serial': serial,
         'total_samples': n_samples,
         'heatmap_metrics': {},
         'training_equivalent_metrics': {},
-        'token_metrics':  {}
+        'token_metrics': {}
     }
 
     # --- Display-level heatmap metrics -------------------------------------
     print("\n=== Heatmap Metrics (display-level) ===")
     for name in RANGE_NAMES:
-        m   = hm_acc[name]
+        m = hm_acc[name]
         avg = {}
         for key in ['SSIM', 'MSE', 'HDM0.01', 'HDM0.1', 'HDM0.3', 'HDM0.5', 'HDM0.8']:
             avg[key] = float(np.mean(m[key])) if m[key] else 0.0
@@ -1193,9 +1198,9 @@ def evaluate():
         print("\n=== Token Metrics ===")
         token_res = {
             'glove_cosine_similarity': float(np.mean(token_cosine_sims)) if token_cosine_sims else 0.0,
-            'multihot_f1':             float(np.mean(token_multihot_f1))   if token_multihot_f1   else 0.0,
-            'multihot_precision':      float(np.mean(token_multihot_prec)) if token_multihot_prec else 0.0,
-            'multihot_recall':         float(np.mean(token_multihot_rec))  if token_multihot_rec  else 0.0,
+            'multihot_f1': float(np.mean(token_multihot_f1)) if token_multihot_f1 else 0.0,
+            'multihot_precision': float(np.mean(token_multihot_prec)) if token_multihot_prec else 0.0,
+            'multihot_recall': float(np.mean(token_multihot_rec)) if token_multihot_rec else 0.0,
             'multihot_TP': token_multihot_TP,
             'multihot_FP': token_multihot_FP,
             'multihot_FN': token_multihot_FN,
@@ -1232,41 +1237,38 @@ def evaluate():
             fn = int(class_FN[c])
             if tp == 0 and fp == 0 and fn == 0:
                 continue
-            prec  = tp / (tp + fp + 1e-8)
-            rec   = tp / (tp + fn + 1e-8)
-            f1_c  = 2 * tp / (2 * tp + fp + fn + 1e-8)
+            prec = tp / (tp + fp + 1e-8)
+            rec = tp / (tp + fn + 1e-8)
+            f1_c = 2 * tp / (2 * tp + fp + fn + 1e-8)
             per_class.append({
-                'class':     _class_name(c),
-                'idx':       c,
-                'TP':        tp,
-                'FP':        fp,
-                'FN':        fn,
-                'precision': round(float(prec),  4),
-                'recall':    round(float(rec),   4),
-                'f1':        round(float(f1_c),  4),
+                'class': _class_name(c),
+                'idx': c,
+                'TP': tp,
+                'FP': fp,
+                'FN': fn,
+                'precision': round(float(prec), 4),
+                'recall': round(float(rec), 4),
+                'f1': round(float(f1_c), 4),
             })
         # Sort by GT occurrence (TP+FN) descending — most frequent classes first
         per_class.sort(key=lambda x: x['TP'] + x['FN'], reverse=True)
 
         # Confusion pairs — sorted by count descending
-        confusion_pairs = [
-            {
-                'true_label': _class_name(fi),
-                'true_idx':   fi,
-                'pred_label': _class_name(fj),
-                'pred_idx':   fj,
-                'count':      cnt,
-            }
-            for (fi, fj), cnt in sorted(confusion_ctr.items(), key=lambda x: -x[1])
-        ]
+        confusion_pairs = [{
+            'true_label': _class_name(fi),
+            'true_idx': fi,
+            'pred_label': _class_name(fj),
+            'pred_idx': fj,
+            'count': cnt,
+        } for (fi, fj), cnt in sorted(confusion_ctr.items(), key=lambda x: -x[1])]
 
         confusion_out = {
-            'serial':          serial,
-            'total_samples':   n_samples,
-            'n_classes':       n_cls,
+            'serial': serial,
+            'total_samples': n_samples,
+            'n_classes': n_cls,
             'n_active_classes': len(per_class),
             'n_confusion_pairs': len(confusion_pairs),
-            'per_class':       per_class,
+            'per_class': per_class,
             'confusion_pairs': confusion_pairs,
         }
         with open(confusion_json, 'w') as f:
@@ -1285,7 +1287,7 @@ def evaluate():
         skel_results = {
             'detection_rate': round(det_rate, 6),
             'detected': skel_detected,
-            'total':    skel_total,
+            'total': skel_total,
         }
 
         for thr in PCK_THRESHOLDS:
@@ -1325,16 +1327,15 @@ def evaluate():
     token_plot_data = None
     if has_tokens:
         token_plot_data = {
-            'cosine_sims':      token_cosine_sims,
+            'cosine_sims': token_cosine_sims,
             'cosine_per_token': token_cosine_per_token,
-            'multihot_f1':      token_multihot_f1,
-            'multihot_prec':    token_multihot_prec,
-            'multihot_rec':     token_multihot_rec,
-            'top3_acc':         token_top3_acc,
-            'top5_acc':         token_top5_acc,
+            'multihot_f1': token_multihot_f1,
+            'multihot_prec': token_multihot_prec,
+            'multihot_rec': token_multihot_rec,
+            'top3_acc': token_top3_acc,
+            'top5_acc': token_top5_acc,
         }
-    plot_heatmap_metrics(hm_acc, train_results, serial, plot_prefix,
-                         token_data=token_plot_data)
+    plot_heatmap_metrics(hm_acc, train_results, serial, plot_prefix, token_data=token_plot_data)
 
     # -----------------------------------------------------------------------
     # Auto-run visualizeTokenConfusion.py when a confusion JSON was produced
@@ -1349,11 +1350,14 @@ def evaluate():
         embeddings_path = os.path.join(model_path, 'GloVe_D300.embeddings')
 
         cmd = [
-            sys.executable, 'visualizeTokenConfusion.py',
+            sys.executable,
+            'visualizeTokenConfusion.py',
             confusion_json,
-            '--output',      confusion_prefix,
-            '--no-show',                          # non-interactive: save PNGs only
-            '--embeddings',  embeddings_path,
+            '--output',
+            confusion_prefix,
+            '--no-show',  # non-interactive: save PNGs only
+            '--embeddings',
+            embeddings_path,
         ]
         print(f"  {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=False)

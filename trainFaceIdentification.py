@@ -18,11 +18,11 @@ from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import normalize
 
 # ── Config ────────────────────────────────────────────────────────────────────
-FACES_DIR     = Path("faces")
-IMG_SIZE      = (64, 64)          # resize all faces to this
-N_COMPONENTS  = 64                # PCA components (eigenfaces)
-K_RANGE       = range(2, 20)      # candidate identity counts to evaluate
-MODEL_OUT     = "face_classifier.pkl"
+FACES_DIR = Path("faces")
+IMG_SIZE = (64, 64)  # resize all faces to this
+N_COMPONENTS = 64  # PCA components (eigenfaces)
+K_RANGE = range(2, 20)  # candidate identity counts to evaluate
+MODEL_OUT = "face_classifier.pkl"
 # ─────────────────────────────────────────────────────────────────────────────
 
 

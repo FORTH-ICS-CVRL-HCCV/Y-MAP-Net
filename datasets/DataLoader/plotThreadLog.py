@@ -73,7 +73,12 @@ for thread in threads:
     thread_tasks = [task for task in tasks if task[0] == thread]
     for _, label, start, end in thread_tasks:
         color = label_colors.get(label, 'gray')  # fallback to gray if unknown label
-        ax.barh(y, end - start, left=start, color=color,) # edgecolor='black'
+        ax.barh(
+            y,
+            end - start,
+            left=start,
+            color=color,
+        )  # edgecolor='black'
     yticks.append(y)
     yticklabels.append(thread)
     y += 1
@@ -91,4 +96,3 @@ ax.legend(handles=legend_patches, loc='upper right')
 plt.tight_layout()
 plt.savefig('thread_jobs_timeline.png')
 print("Saved plot to thread_jobs_timeline.png")
-

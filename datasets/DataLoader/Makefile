@@ -3,7 +3,7 @@
 # Variables
 CC = gcc
 CFLAGS = -D_GNU_SOURCE -O3 -fPIC -march=native -mtune=native -pthread
-LDFLAGS = -lm -ljpeg -lpng -lzstd
+LDFLAGS = -lm -ljpeg -lpng -lzstd -llz4
 CODEC_DIR = codecs
 SOURCE_FILES = $(CODEC_DIR)/codecs.h $(CODEC_DIR)/codecs.c $(CODEC_DIR)/asciiInput.c $(CODEC_DIR)/bmpInput.c $(CODEC_DIR)/jpgInput.c \
                $(CODEC_DIR)/pfmInput.c $(CODEC_DIR)/pngInput.c $(CODEC_DIR)/ppmInput.c $(CODEC_DIR)/pzpInput.c \

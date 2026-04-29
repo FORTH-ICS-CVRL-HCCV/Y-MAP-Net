@@ -6,8 +6,8 @@ from gradio_client import Client, handle_file
 import cv2  # For saving image files
 import numpy as np
 
-#python3 gradioClient.py datasets/coco/cache/coco/val2017/000000412362.jpg 
-#python3 gradioClient.py --directory datasets/coco/cache/coco/val2017/ && python3 encode_outputs_as_html.py 
+#python3 gradioClient.py datasets/coco/cache/coco/val2017/000000412362.jpg
+#python3 gradioClient.py --directory datasets/coco/cache/coco/val2017/ && python3 encode_outputs_as_html.py
 
 #Hello world
 # Replace with the actual server URL if different
@@ -34,15 +34,15 @@ argumentStart = 1
 if len(sys.argv) > 1:
     for i in range(0, len(sys.argv)):
         if sys.argv[i] == "--ip":
-            ip = sys.argv[i+1]
+            ip = sys.argv[i + 1]
             argumentStart += 2
         if sys.argv[i] == "--directory":
-            directory = sys.argv[i+1]
+            directory = sys.argv[i + 1]
             argumentStart += 2
             # Populate files with image (.jpg, .png) contents of directory
             if os.path.isdir(directory):
                 directoryList = os.listdir(directory)
-                directoryList.sort() 
+                directoryList.sort()
                 for file in directoryList:
                     if file.lower().endswith(('.jpg', '.png', '.jpeg')):
                         files.append(os.path.join(directory, file))
@@ -50,16 +50,16 @@ if len(sys.argv) > 1:
                 print(f"Error: Directory '{directory}' does not exist.")
                 sys.exit(1)
         elif sys.argv[i] == "--start":
-            startAt = int(sys.argv[i+1])
+            startAt = int(sys.argv[i + 1])
             argumentStart += 2
         elif sys.argv[i] == "--port":
-            port = sys.argv[i+1]
+            port = sys.argv[i + 1]
             argumentStart += 2
         elif sys.argv[i] == "--threshold":
-            threshold = float(sys.argv[i+1])
+            threshold = float(sys.argv[i + 1])
             argumentStart += 2
         elif sys.argv[i] in ("--output", "-o"):
-            output_file = sys.argv[i+1]
+            output_file = sys.argv[i + 1]
             argumentStart += 2
 
 results = dict()
@@ -71,14 +71,13 @@ for i in range(argumentStart, len(sys.argv)):
 # Make sure the list is sorted
 files.sort()
 
-if (len(files)==0):
-   print("No input files to process")
-   sys.exit(0)
+if (len(files) == 0):
+    print("No input files to process")
+    sys.exit(0)
 
 # Initialize the Gradio client with the server URL
 client = Client(f"http://{ip}:{port}")
 # client.view_api()
-
 
 # Possibly start at specific index
 for i in range(startAt, len(files)):
@@ -92,11 +91,10 @@ for i in range(startAt, len(files)):
     try:
         # Send the image file path and the prompt to the Gradio app for processing
         result = client.predict(
-            image=handle_file(image_path),   # Provide the file path directly
+            image=handle_file(image_path),  # Provide the file path directly
             threshold=0.2,
             history=[],
-            api_name="/predict"
-        )
+            api_name="/predict")
     except Exception as e:
         print("Failed to complete job, please restart using --start", i)
         output_file = f"partial_until_{i}_{output_file}"
@@ -106,7 +104,6 @@ for i in range(startAt, len(files)):
     seconds = time.time() - start
     remaining = (len(files) - i) * seconds
     hz = 1 / (seconds + 0.0001)
-
 
     print(result)
 
@@ -121,14 +118,14 @@ for i in range(startAt, len(files)):
 
     # Fixed outputs (indices 1-8) — order matches describe_image return value
     FIXED_OUTPUT_NAMES = [
-        "input_image",        # result[1]
-        "rgb_pose",           # result[2]
-        "union_joints",       # result[3]
-        "union_pafs",         # result[4]
-        "union_segms",        # result[5]
-        "normals",            # result[6]
-        "depth",              # result[7]
-        "depth_improved",     # result[8]
+        "input_image",  # result[1]
+        "rgb_pose",  # result[2]
+        "union_joints",  # result[3]
+        "union_pafs",  # result[4]
+        "union_segms",  # result[5]
+        "normals",  # result[6]
+        "depth",  # result[7]
+        "depth_improved",  # result[8]
     ]
 
     output_image_paths = {"rgb_raw": image_path}
@@ -162,4 +159,3 @@ for i in range(startAt, len(files)):
 print(f"\n\n\nStoring results in JSON file {output_file}")
 with open(output_file, "w") as outfile:
     json.dump(results, outfile, indent=4)
-

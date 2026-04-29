@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-
 """
 Author : "Ammar Qammaz"
 Copyright : "2024 Foundation of Research and Technology, Computer Science Department Greece, See license.txt"
@@ -31,85 +30,72 @@ except Exception as e:
 # Argument parser
 # =============================================================================
 
+
 def build_arg_parser():
     p = argparse.ArgumentParser(description="YMAPNet 2D pose estimation runner")
-    p.add_argument("--cpu",          action="store_true",
-                   help="Force CPU inference")
-    p.add_argument("--update",       action="store_true",
-                   help="Re-download the model weights")
-    p.add_argument("--from",         dest="videoFilePath", default="webcam",
-                   metavar="PATH",
+    p.add_argument("--cpu", action="store_true", help="Force CPU inference")
+    p.add_argument("--update", action="store_true", help="Re-download the model weights")
+    p.add_argument("--from", dest="videoFilePath", default="webcam", metavar="PATH",
                    help="Source: path, webcam, screen, esp, /dev/videoN")
-    p.add_argument("--size",         nargs=2, type=int, default=[640, 480],
-                   metavar=("W", "H"))
-    p.add_argument("--scale",        type=float, default=1.0)
-    p.add_argument("--threshold",    type=float, default=84.0, metavar="T")
-    p.add_argument("--border",       type=int,   default=0)
-    p.add_argument("--crop",         nargs=3, type=int,
-                   metavar=("X", "Y", "SIZE"),
+    p.add_argument("--size", nargs=2, type=int, default=[640, 480], metavar=("W", "H"))
+    p.add_argument("--scale", type=float, default=1.0)
+    p.add_argument("--threshold", type=float, default=84.0, metavar="T")
+    p.add_argument("--border", type=int, default=0)
+    p.add_argument("--crop", nargs=3, type=int, metavar=("X", "Y", "SIZE"),
                    help="Custom crop: centre X, centre Y, size")
-    p.add_argument("--nocrop",       action="store_true",
-                   help="Disable centre-crop preprocessing")
-    p.add_argument("--blur",         type=int,   default=0, metavar="STRENGTH")
-    p.add_argument("--noise",        type=float, default=0.0, metavar="MAG",
-                   help="Gaussian noise magnitude [0.0-1.0]")
-    p.add_argument("--engine",       default="tensorflow", metavar="ENGINE")
-    p.add_argument("--model",        default="2d_pose_estimation", metavar="PATH",
+    p.add_argument("--nocrop", action="store_true", help="Disable centre-crop preprocessing")
+    p.add_argument("--blur", type=int, default=0, metavar="STRENGTH")
+    p.add_argument("--noise", type=float, default=0.0, metavar="MAG", help="Gaussian noise magnitude [0.0-1.0]")
+    p.add_argument("--engine", default="tensorflow", metavar="ENGINE")
+    p.add_argument("--model", default="2d_pose_estimation", metavar="PATH",
                    help="Model directory or file (default: 2d_pose_estimation)")
-    p.add_argument("--save",         action="store_true")
-    p.add_argument("--prune",        action="store_true", dest="pruneTokens")
-    p.add_argument("--tile",         action="store_true")
-    p.add_argument("--illustrate",   action="store_true")
-    p.add_argument("--collab",       action="store_true",
-                   help="illustrate + save, no display")
-    p.add_argument("--headless",     "--novisualization",
-                   action="store_true", dest="headless")
-    p.add_argument("--profiling",    "--profile", action="store_true")
+    p.add_argument("--save", action="store_true")
+    p.add_argument("--prune", action="store_true", dest="pruneTokens")
+    p.add_argument("--tile", action="store_true")
+    p.add_argument("--illustrate", action="store_true")
+    p.add_argument("--collab", action="store_true", help="illustrate + save, no display")
+    p.add_argument("--headless", "--novisualization", action="store_true", dest="headless")
+    p.add_argument("--profiling", "--profile", action="store_true")
     p.add_argument("--depth-iterations", type=int, default=10, metavar="N",
                    help="Sobel depth-refinement iterations (0 = disabled)")
-    p.add_argument("--no-person-id",  action="store_true",
-                   help="Disable per-blob person ID estimation")
-    p.add_argument("--no-skeleton",   action="store_true",
-                   help="Disable joint-hierarchy skeleton resolution")
-    p.add_argument("--fast",          action="store_true",
+    p.add_argument("--no-person-id", action="store_true", help="Disable per-blob person ID estimation")
+    p.add_argument("--no-skeleton", action="store_true", help="Disable joint-hierarchy skeleton resolution")
+    p.add_argument("--fast", action="store_true",
                    help="Shorthand for --depth-iterations 0 --no-person-id --no-skeleton")
     # Repeatable multi-value options
-    p.add_argument("--win",          nargs=3, action="append", default=[],
-                   metavar=("X", "Y", "LABEL"),
+    p.add_argument("--win", nargs=3, action="append", default=[], metavar=("X", "Y", "LABEL"),
                    help="Window arrangement entry (repeatable)")
-    p.add_argument("--monitor",      nargs=4, action="append", default=[],
-                   metavar=("HM", "X", "Y", "LABEL"),
+    p.add_argument("--monitor", nargs=4, action="append", default=[], metavar=("HM", "X", "Y", "LABEL"),
                    help="Heatmap monitor entry (repeatable)")
-    p.add_argument("--upload-url",   default="http://ammar.gr/datasets/uploads.php",
-                   metavar="URL",    help="Frame upload endpoint")
-    p.add_argument("--screen",       nargs=2, type=int, default=None,
-                   metavar=("W", "H"),
+    p.add_argument("--upload-url", default="http://ammar.gr/datasets/uploads.php", metavar="URL",
+                   help="Frame upload endpoint")
+    p.add_argument("--screen", nargs=2, type=int, default=None, metavar=("W", "H"),
                    help="Physical display resolution for auto window tiling (auto-detected if omitted)")
-    p.add_argument("--fallen-person-detector", action="store_true",
-                   dest="fallen_person_detector",
+    p.add_argument("--fallen-person-detector", action="store_true", dest="fallen_person_detector",
                    help="Enable fallen-person detection using Person/Floor/Normal heatmaps")
-    p.add_argument("--no-save-fallen", action="store_false",
-                   dest="save_fallen", default=True,
+    p.add_argument("--no-save-fallen", action="store_false", dest="save_fallen", default=True,
                    help="Disable saving frames when a fallen person is detected (saving is ON by default)")
-    p.add_argument("--faces",          action="store_true",
+    p.add_argument("--faces", action="store_true",
                    help="Dump RGB crops of every detected face (Face segmentation mask) to faces/")
-    p.add_argument("--pose-match",     action="store_true",
-                   dest="pose_match",
+    p.add_argument("--pose-match", action="store_true", dest="pose_match",
                    help="Enable real-time pose matching demo (press R to capture reference)")
-    p.add_argument("--eco",            type=float, default=[4.0], nargs="+", metavar=("THRESHOLD", "MAX_SKIP"),
-                   help="Skip network run when mean pixel diff of the 256x256 input is below "
-                        "THRESHOLD (0 = disabled). Try 5.0-15.0 for static scenes. "
-                        "Optional second value MAX_SKIP forces a network run after that many "
-                        "consecutive skipped frames (default: 10, e.g. --eco 8.0 30).")
-    p.add_argument("--vram",           type=int,   default=4800, metavar="MB",
+    p.add_argument(
+        "--eco", type=float, default=[4.0], nargs="+", metavar=("THRESHOLD", "MAX_SKIP"),
+        help="Skip network run when mean pixel diff of the 256x256 input is below "
+        "THRESHOLD (0 = disabled). Try 5.0-15.0 for static scenes. "
+        "Optional second value MAX_SKIP forces a network run after that many "
+        "consecutive skipped frames (default: 10, e.g. --eco 8.0 30).")
+    p.add_argument("--vram", type=int, default=4800, metavar="MB",
                    help="GPU VRAM limit in MB for TensorFlow (default: 4800)")
     return p
+
 
 # =============================================================================
 # Video capture factory
 # =============================================================================
 def getCaptureDeviceFromPath(videoFilePath, videoWidth, videoHeight, videoFramerate=30,
                              model_path="2d_pose_estimation"):
+
     def _open_camera(index):
         # On Windows the default MSMF backend frequently fails to open cameras;
         # DirectShow (CAP_DSHOW) is far more reliable.
@@ -152,6 +138,7 @@ def getCaptureDeviceFromPath(videoFilePath, videoWidth, videoHeight, videoFramer
             return FolderStreamer(path=videoFilePath, width=videoWidth, height=videoHeight)
         return cv2.VideoCapture(videoFilePath)
 
+
 # =============================================================================
 # System utilities
 # =============================================================================
@@ -161,37 +148,42 @@ def save_and_upload_frame(frame, url):
     print("Uploading frame to", url)
     subprocess.run(["curl", "-F", "file=@frame.jpg", url], check=False)
 
+
 def prevent_screensaver():
     subprocess.run(
         "xdotool mousemove_relative -- 1 0 && sleep 1 && xdotool mousemove_relative -- -1 0",
-        shell=True, check=False,
+        shell=True,
+        check=False,
     )
+
 
 def disable_screensaver():
     subprocess.run(["xset", "s", "off"], check=False)
 
+
 def enable_screensaver():
     subprocess.run(["xset", "s", "on"], check=False)
+
 
 def screenshot(framenumber):
     subprocess.run(["scrot", f"colorFrame_0_{framenumber:05}.png"], check=False)
 
+
 # =============================================================================
 # Image processing helpers
 # =============================================================================
+
 
 def create_ply_file(bgr_image, depth_array, filename, depthScale=1.0):
     height, width = depth_array.shape[:2]
     if bgr_image.shape[:2] != (height, width):
         bgr_image = cv2.resize(bgr_image, (width, height), interpolation=cv2.INTER_LINEAR)
 
-    header = (
-        f"ply\nformat ascii 1.0\nelement vertex {height * width}\n"
-        "property float x\nproperty float y\nproperty float z\n"
-        "property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n"
-    )
+    header = (f"ply\nformat ascii 1.0\nelement vertex {height * width}\n"
+              "property float x\nproperty float y\nproperty float z\n"
+              "property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n")
     ys, xs = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
-    zs   = depth_array * depthScale
+    zs = depth_array * depthScale
     r, g, b = bgr_image[:, :, 2], bgr_image[:, :, 1], bgr_image[:, :, 0]
     data = np.stack([xs, -ys, zs, r, g, b], axis=-1).reshape(-1, 6)
     with open(filename, 'w') as ply_file:
@@ -206,7 +198,7 @@ def extract_centered_rectangle(image):
     cx, cy = img_width // 2, img_height // 2
     x0 = max(0, cx - side // 2)
     y0 = max(0, cy - side // 2)
-    x1 = min(img_width,  cx + side // 2)
+    x1 = min(img_width, cx + side // 2)
     y1 = min(img_height, cy + side // 2)
     return image[y0:y1, x0:x1]
 
@@ -221,7 +213,7 @@ def custom_crop(image, cX, cY, size):
     img_height, img_width = image.shape[:2]
     x0 = max(0, cX - size // 2)
     y0 = max(0, cY - size // 2)
-    x1 = min(img_width,  cX + size)
+    x1 = min(img_width, cX + size)
     y1 = min(img_height, cY + size)
     return image[y0:y1, x0:x1]
 
@@ -230,11 +222,9 @@ def add_horizontal_stripes(image: np.ndarray, stripe_height: int) -> np.ndarray:
     """Paint black bars of *stripe_height* pixels at the top and bottom of *image*."""
     max_stripe_height = image.shape[0] // 2
     if stripe_height > max_stripe_height:
-        raise ValueError(
-            f"Stripe height cannot exceed half the image height ({max_stripe_height})."
-        )
+        raise ValueError(f"Stripe height cannot exceed half the image height ({max_stripe_height}).")
     result = np.copy(image)
-    result[:stripe_height, :]  = 0
+    result[:stripe_height, :] = 0
     result[-stripe_height:, :] = 0
     return result
 
@@ -258,9 +248,11 @@ def add_noise_to_image(image: np.ndarray, noise_magnitude: float = 0.1) -> np.nd
     noise = np.random.normal(0, noise_magnitude * 255, image.shape).astype(np.float32)
     return np.clip(image.astype(np.float32) + noise, 0, 255).astype(np.uint8)
 
+
 # =============================================================================
 # Display resolution detection
 # =============================================================================
+
 
 def detect_screen_resolution():
     """Return the total desktop resolution (width, height) as a tuple of ints.
@@ -335,45 +327,44 @@ from appFallDetection import _run_fallen_person_detector, _save_fallen_frame, _p
 from appFace import _dump_face_crops
 from appPoseMatch import PoseMatcher, draw_pose_match_overlay
 
-
 # =============================================================================
 # Main routine
 # =============================================================================
 
+
 def main_pose_estimation(args):
-    model_path          = args.model
+    model_path = args.model
     videoWidth, videoHeight = args.size
-    threshold           = int(args.threshold)
-    keypoint_threshold  = args.threshold
-    cropInputFrame      = not args.nocrop
-    customCrop          = args.crop is not None
-    customCropX         = args.crop[0] if customCrop else 0
-    customCropY         = args.crop[1] if customCrop else 0
-    customCropSize      = args.crop[2] if customCrop else 0
-    scale               = args.scale
-    emulateBorder       = args.border
-    noise               = np.clip(args.noise, 0.0, 1.0)
-    blur                = min(40, abs(args.blur))
-    illustrate          = args.illustrate or args.collab
-    save                = args.save or args.collab
-    show                = not args.headless and not args.collab
-    visualize           = not args.headless
+    threshold = int(args.threshold)
+    keypoint_threshold = args.threshold
+    cropInputFrame = not args.nocrop
+    customCrop = args.crop is not None
+    customCropX = args.crop[0] if customCrop else 0
+    customCropY = args.crop[1] if customCrop else 0
+    customCropSize = args.crop[2] if customCrop else 0
+    scale = args.scale
+    emulateBorder = args.border
+    noise = np.clip(args.noise, 0.0, 1.0)
+    blur = min(40, abs(args.blur))
+    illustrate = args.illustrate or args.collab
+    save = args.save or args.collab
+    show = not args.headless and not args.collab
+    visualize = not args.headless
 
     window_arrangement = [(int(x), int(y), label) for x, y, label in args.win]
     monitor = []
     for hm, x, y, label in args.monitor:
         try:
-            hm_spec = int(hm)           # numeric index
+            hm_spec = int(hm)  # numeric index
         except ValueError:
-            hm_spec = hm                # label string — resolved in YMAPNet.__init__
+            hm_spec = hm  # label string — resolved in YMAPNet.__init__
         monitor.append((hm_spec, int(x), int(y), label))
         print(f"Added a monitor @ {x},{y} for {hm}")
 
     print("Keypoint Threshold :", keypoint_threshold)
     print("Threshold          :", threshold)
 
-    cap = getCaptureDeviceFromPath(args.videoFilePath, videoWidth, videoHeight,
-                                   model_path=model_path)
+    cap = getCaptureDeviceFromPath(args.videoFilePath, videoWidth, videoHeight, model_path=model_path)
 
     from YMAPNet import YMAPNet, PoseEstimatorTiler
     estimator = YMAPNet(
@@ -392,9 +383,8 @@ def main_pose_estimation(args):
         estimate_person_id=not args.no_person_id,
         resolve_skeleton=not args.no_skeleton,
         vram_limit=args.vram,
-        compileModel=False,          # skip optimizer state loading — not needed for inference
-        show = show
-    )
+        compileModel=False,  # skip optimizer state loading — not needed for inference
+        show=show)
     # noise is [0,1]; add_noise_to_image expects the same range
     estimator.addedNoise = noise
     estimator.show = show
@@ -410,102 +400,100 @@ def main_pose_estimation(args):
     if show:
         estimator.setup_threshold_control_window()
 
-    face_crop_counter = [0]   # mutable counter shared across frames
+    face_crop_counter = [0]  # mutable counter shared across frames
     pose_matcher = PoseMatcher(estimator) if args.pose_match else None
 
     failedFrames = 0
     try:
-     while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Failed to capture frame")
-            failedFrames += 1
-            if failedFrames > 100:
-                break
-            continue
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("Failed to capture frame")
+                failedFrames += 1
+                if failedFrames > 100:
+                    break
+                continue
 
-        failedFrames = 0
+            failedFrames = 0
 
-        if args.tile:
-            tiler.process(frame)
-        else:
-            if scale != 1.0:
-                h, w = frame.shape[:2]
-                frame = cv2.resize(frame, (int(w * scale), int(h * scale)),
-                                   interpolation=cv2.INTER_AREA)
-
-            if cropInputFrame and estimator.cfg['inputWidth'] == estimator.cfg['inputHeight']:
-                if customCrop:
-                    frame = custom_crop(frame, customCropX, customCropY, customCropSize)
-                else:
-                    frame = extract_centered_rectangle(frame)
-
-            if emulateBorder > 0:
-                bigBorder = frame.shape[0] * (emulateBorder / estimator.cfg['inputHeight'])
-                frame = add_horizontal_stripes(frame, int(bigBorder))
-
-            if blur:
-                frame = apply_blur_to_image(frame, blur_strength=blur)
-
-            if estimator.addedNoise != 0.0:
-                frame = add_noise_to_image(frame, noise_magnitude=estimator.addedNoise)
-
-            _eco_threshold = args.eco[0]
-            _eco_max_skip  = int(args.eco[1]) if len(args.eco) > 1 else 20
-            estimator.process(frame, static_frame_threshold=_eco_threshold, eco_max_skip=_eco_max_skip)
-
-            if args.fallen_person_detector:
-                _fp_result = _run_fallen_person_detector(estimator)
-                if _fp_result is not None:
-                    _fp, _union_human, _floor_mask, _furniture_mask = _fp_result
-                    _print_fallen_result(_fp, estimator.frameNumber)
-                    if _fp["is_fallen"] and args.save_fallen:
-                        _save_fallen_frame(frame, _fp, estimator.frameNumber, _union_human, _floor_mask, _furniture_mask)
-
-            if args.faces:
-                _dump_face_crops(estimator, frame, face_crop_counter)
-
-            if pose_matcher is not None:
-                pm_result = pose_matcher.tick()
-                if pm_result is not None:
-                    draw_pose_match_overlay(frame, pm_result, estimator, pose_matcher)
-
-        if visualize:
-            if show:
-                estimator.update_thresholds_from_gui()
             if args.tile:
-                frameWithVis = frame.copy()
-                tiler.visualize(frameWithVis)
+                tiler.process(frame)
             else:
-                frameWithVis = frame.copy()
-                estimator.visualize(frameWithVis, show=show, save=save)
+                if scale != 1.0:
+                    h, w = frame.shape[:2]
+                    frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
-            key = cv2.waitKey(1) & 0xFF if show else 255
-            if key != 255:
-                print("Key Press =", key)
-            if key == 81:
-                print("Left Arrow")
-            elif key == 97:
-                print("Save demo screenshot")
-                subprocess.run(
-                    ["scrot", "-a", "800,10,1157,570",
-                     f"scrot{estimator.frameNumber}.png"],
-                    check=False,
-                )
-            elif key in (27, ord('q'), ord('Q')):
-                print("Terminating after receiving keyboard request")
-                break
-            elif key in (ord('r'), ord('R')):
+                if cropInputFrame and estimator.cfg['inputWidth'] == estimator.cfg['inputHeight']:
+                    if customCrop:
+                        frame = custom_crop(frame, customCropX, customCropY, customCropSize)
+                    else:
+                        frame = extract_centered_rectangle(frame)
+
+                if emulateBorder > 0:
+                    bigBorder = frame.shape[0] * (emulateBorder / estimator.cfg['inputHeight'])
+                    frame = add_horizontal_stripes(frame, int(bigBorder))
+
+                if blur:
+                    frame = apply_blur_to_image(frame, blur_strength=blur)
+
+                if estimator.addedNoise != 0.0:
+                    frame = add_noise_to_image(frame, noise_magnitude=estimator.addedNoise)
+
+                _eco_threshold = args.eco[0]
+                _eco_max_skip = int(args.eco[1]) if len(args.eco) > 1 else 20
+                estimator.process(frame, static_frame_threshold=_eco_threshold, eco_max_skip=_eco_max_skip)
+
+                if args.fallen_person_detector:
+                    _fp_result = _run_fallen_person_detector(estimator)
+                    if _fp_result is not None:
+                        _fp, _union_human, _floor_mask, _furniture_mask = _fp_result
+                        _print_fallen_result(_fp, estimator.frameNumber)
+                        if _fp["is_fallen"] and args.save_fallen:
+                            _save_fallen_frame(frame, _fp, estimator.frameNumber, _union_human, _floor_mask,
+                                               _furniture_mask)
+
+                if args.faces:
+                    _dump_face_crops(estimator, frame, face_crop_counter)
+
                 if pose_matcher is not None:
-                    pose_matcher.capture_reference()
-            elif key in (ord('u'), ord('U')):
-                save_and_upload_frame(frame, args.upload_url)
-            elif key in (ord('s'), ord('S')):
-                create_ply_file(estimator.imageIn, estimator.depthmap,
-                                f"output_{estimator.frameNumber}.ply")
+                    pm_result = pose_matcher.tick()
+                    if pm_result is not None:
+                        draw_pose_match_overlay(frame, pm_result, estimator, pose_matcher)
 
-            if save and show:
-                screenshot(estimator.frameNumber)
+            if visualize:
+                if show:
+                    estimator.update_thresholds_from_gui()
+                if args.tile:
+                    frameWithVis = frame.copy()
+                    tiler.visualize(frameWithVis)
+                else:
+                    frameWithVis = frame.copy()
+                    estimator.visualize(frameWithVis, show=show, save=save)
+
+                key = cv2.waitKey(1) & 0xFF if show else 255
+                if key != 255:
+                    print("Key Press =", key)
+                if key == 81:
+                    print("Left Arrow")
+                elif key == 97:
+                    print("Save demo screenshot")
+                    subprocess.run(
+                        ["scrot", "-a", "800,10,1157,570", f"scrot{estimator.frameNumber}.png"],
+                        check=False,
+                    )
+                elif key in (27, ord('q'), ord('Q')):
+                    print("Terminating after receiving keyboard request")
+                    break
+                elif key in (ord('r'), ord('R')):
+                    if pose_matcher is not None:
+                        pose_matcher.capture_reference()
+                elif key in (ord('u'), ord('U')):
+                    save_and_upload_frame(frame, args.upload_url)
+                elif key in (ord('s'), ord('S')):
+                    create_ply_file(estimator.imageIn, estimator.depthmap, f"output_{estimator.frameNumber}.ply")
+
+                if save and show:
+                    screenshot(estimator.frameNumber)
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")
@@ -518,10 +506,21 @@ def main_pose_estimation(args):
     if save and show:
         enable_screensaver()
         subprocess.run([
-            "ffmpeg", "-nostdin", "-framerate", "25",
-            "-i", "colorFrame_0_%05d.png",
-            "-vf", "scale=-1:720", "-y", "-r", "25",
-            "-pix_fmt", "yuv420p", "-threads", "8",
+            "ffmpeg",
+            "-nostdin",
+            "-framerate",
+            "25",
+            "-i",
+            "colorFrame_0_%05d.png",
+            "-vf",
+            "scale=-1:720",
+            "-y",
+            "-r",
+            "25",
+            "-pix_fmt",
+            "yuv420p",
+            "-threads",
+            "8",
             f"{args.videoFilePath}_lastRun3DHiRes.mp4",
         ], check=False)
         for f in glob.glob("colorFrame*.png"):
@@ -529,14 +528,26 @@ def main_pose_estimation(args):
 
     if illustrate:
         subprocess.run([
-            "ffmpeg", "-nostdin", "-framerate", "25",
-            "-i", "composite_%05d.png",
-            "-vf", "scale=-1:720", "-y", "-r", "25",
-            "-pix_fmt", "yuv420p", "-threads", "8",
+            "ffmpeg",
+            "-nostdin",
+            "-framerate",
+            "25",
+            "-i",
+            "composite_%05d.png",
+            "-vf",
+            "scale=-1:720",
+            "-y",
+            "-r",
+            "25",
+            "-pix_fmt",
+            "yuv420p",
+            "-threads",
+            "8",
             f"{args.videoFilePath}_illustration.mp4",
         ], check=False)
         for f in glob.glob("composite_*.png"):
             os.remove(f)
+
 
 # =============================================================================
 if __name__ == '__main__':
@@ -545,8 +556,8 @@ if __name__ == '__main__':
 
     if args.fast:
         args.depth_iterations = 0
-        args.no_person_id     = True
-        args.no_skeleton      = True
+        args.no_person_id = True
+        args.no_skeleton = True
 
     if args.cpu:
         os.environ['CUDA_VISIBLE_DEVICES'] = ''

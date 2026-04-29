@@ -44,32 +44,30 @@ class DatasetStreamer:
         datasets = cfg[dataset_cfg_key]
 
         self._db = DataLoader(
-            (cfg['inputHeight'],  cfg['inputWidth'],  cfg['inputChannels']),
-            (cfg['outputHeight'], cfg['outputWidth'],  cfg['outputChannels']),
-            output16BitChannels    = cfg.get('output16BitChannels', 0),
-            numberOfThreads        = 1,
-            streamData             = 1,
-            batchSize              = 1,
-            gradientSize           = cfg.get('heatmapGradientSizeMinimum',
-                                             cfg.get('heatmapGradientSize', 12)),
-            PAFSize                = cfg.get('heatmapPAFSizeMinimum',
-                                             cfg.get('heatmapPAFSize', 2)),
-            doAugmentations        = 0,   # raw images, no flips / crops / colour jitter
-            addPAFs                = int(cfg.get('heatmapAddPAFs', 1)),
-            addBackground          = int(cfg.get('heatmapGenerateSkeletonBkg', 1)),
-            addDepthMap            = int(cfg.get('heatmapAddDepthmap', 1)),
-            addDepthLevelsHeatmaps = int(cfg.get('heatmapAddDepthLevels', 0)),
-            addNormals             = int(cfg.get('heatmapAddNormals', 1)),
-            addSegmentation        = int(cfg.get('heatmapAddSegmentation', 1)),
-            datasets               = datasets,
-            synonymPath            = cfg.get('synonymPath', None),
-            libraryPath            = "datasets/DataLoader/libDataLoader.so",
+            (cfg['inputHeight'], cfg['inputWidth'], cfg['inputChannels']),
+            (cfg['outputHeight'], cfg['outputWidth'], cfg['outputChannels']),
+            output16BitChannels=cfg.get('output16BitChannels', 0),
+            numberOfThreads=1,
+            streamData=1,
+            batchSize=1,
+            gradientSize=cfg.get('heatmapGradientSizeMinimum', cfg.get('heatmapGradientSize', 12)),
+            PAFSize=cfg.get('heatmapPAFSizeMinimum', cfg.get('heatmapPAFSize', 2)),
+            doAugmentations=0,  # raw images, no flips / crops / colour jitter
+            addPAFs=int(cfg.get('heatmapAddPAFs', 1)),
+            addBackground=int(cfg.get('heatmapGenerateSkeletonBkg', 1)),
+            addDepthMap=int(cfg.get('heatmapAddDepthmap', 1)),
+            addDepthLevelsHeatmaps=int(cfg.get('heatmapAddDepthLevels', 0)),
+            addNormals=int(cfg.get('heatmapAddNormals', 1)),
+            addSegmentation=int(cfg.get('heatmapAddSegmentation', 1)),
+            datasets=datasets,
+            synonymPath=cfg.get('synonymPath', None),
+            libraryPath="datasets/DataLoader/libDataLoader.so",
         )
 
-        self.frameNumber  = 0
-        self.total        = self._db.numberOfSamples
+        self.frameNumber = 0
+        self.total = self._db.numberOfSamples
         self._should_stop = False
-        self._frame       = None
+        self._frame = None
         print(f"DatasetStreamer: {dataset_cfg_key} — {self.total} samples")
 
     # ------------------------------------------------------------------
@@ -86,8 +84,8 @@ class DatasetStreamer:
             return False, None
 
         try:
-            npIn, _, _ = self._db.get_partial_update_IO_array(
-                self.frameNumber, self.frameNumber + 1, produce16BitData=False)
+            npIn, _, _ = self._db.get_partial_update_IO_array(self.frameNumber, self.frameNumber + 1,
+                                                              produce16BitData=False)
         except Exception as e:
             print(f"DatasetStreamer: error reading sample {self.frameNumber}: {e}")
             self._should_stop = True
@@ -100,6 +98,6 @@ class DatasetStreamer:
         if img.shape[2] == 3:
             img = img[:, :, ::-1].copy()
 
-        self._frame       = img
+        self._frame = img
         self.frameNumber += 1
         return True, self._frame

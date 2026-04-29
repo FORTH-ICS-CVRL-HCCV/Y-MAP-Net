@@ -356,7 +356,7 @@ void db_update_sample_loss(struct ImageDatabase *db,unsigned long sample,float l
         db->losses[sample] = loss;
     } else
     {
-        fprintf(stderr,RED "Unable to update loss for sample %lu, aborting to enforce consistency\n" NORMAL,sample);
+        fprintf(stderr,RED "db_update_sample_loss: Unable to update loss for sample %lu, aborting to enforce consistency\n" NORMAL,sample);
         abort();
     }
 }
@@ -366,25 +366,47 @@ void db_update_sample_loss(struct ImageDatabase *db,unsigned long sample,float l
 void db_update_sample_loss_range(struct ImageDatabase *db,unsigned long sampleStart,unsigned long sampleEnd,float loss)
 {
     //fprintf(stderr,GREEN "db_update_sample_loss_range %lu -> %lu with loss %0.2f \n\n\n" NORMAL,sampleStart,sampleEnd,loss);
+
+    if ( (db!=0) && (db->losses!=0) && (sampleStart<db->numberOfSamples) && (sampleStart<sampleEnd) && (sampleEnd>=db->numberOfSamples) )
+    {
+      //Detect special case where the batch size does not perfectly divide the number of samples (?)
+      //Keras should probably take care of this however it doesn't
+      //Without this the code aborts with message : Unable to update loss for sample 4960 -> 5000, aborting to enforce consistency
+      if (db->numberOfSamples>0)
+      {
+         fprintf(stderr,YELLOW "db_update_sample_loss_range: Adjusting sampleEnd based on numberOfSamples=%lu\n" NORMAL,db->numberOfSamples);
+         fprintf(stderr,YELLOW "Was sampleEnd=%lu\n" NORMAL,sampleEnd);
+         sampleEnd=db->numberOfSamples-1;
+         fprintf(stderr,YELLOW "Adjusted to sampleEnd=%lu\n" NORMAL,sampleEnd);
+      }
+    }
+
     if ( (db!=0) && (db->losses!=0) && (sampleStart<db->numberOfSamples) && (sampleEnd<db->numberOfSamples) )
     {
         SampleNumber sampleID;
         for  (sampleID = sampleStart; sampleID<sampleEnd; sampleID++)
          {
              SampleNumber sID = db->indices[sampleID];
-             db->losses[sID]      += loss;
-             db->trainPasses[sID] += 1;
-
-             //Keep loss float from ballooning — explicit reset for predictable decay period
-             if (db->trainPasses[sID] > 10)
+             if (sID<db->numberOfSamples)
              {
+               db->losses[sID]      += loss;
+               db->trainPasses[sID] += 1;
+
+               //Keep loss float from ballooning — explicit reset for predictable decay period
+               if (db->trainPasses[sID] > 10)
+               {
                 db->trainPasses[sID] = 5;
                 db->losses[sID]     /= 2.0;
+               }
+             } else
+             {
+                 fprintf(stderr,RED "db_update_sample_loss_range: Incorrect SampleID resolution\n" NORMAL);
              }
          }
     } else
     {
-        fprintf(stderr,RED "Unable to update loss for sample %lu -> %lu, aborting to enforce consistency\n" NORMAL,sampleStart,sampleEnd);
+        fprintf(stderr,RED "db_update_sample_loss_range: Unable to update loss for sample %lu -> %lu, aborting to enforce consistency\n" NORMAL,sampleStart,sampleEnd);
+        fprintf(stderr,RED "sampleStart=%lu sampleEnd=%lu numberOfSamples=%lu\n" NORMAL,sampleStart,sampleEnd,db->numberOfSamples);
         abort();
     }
 }
