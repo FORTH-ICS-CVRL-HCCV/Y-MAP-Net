@@ -1722,6 +1722,8 @@ class YMAPNet:
         self.chanFloor = -1  # set from config below
         self.chanCeiling = -1
         self.chanWall = -1
+        self.chanPerson = -1
+        self.chanFace = -1
 
         # "Programmable" heatmap IDs
         if "heatmaps" in self.cfg:
@@ -2172,7 +2174,7 @@ class YMAPNet:
             cv2.imshow('Unsegmented', (not_segmented * 255).astype(np.uint8))
 
         human_segms = None
-        if "Face" in self.cfg['heatmaps']:
+        if "Face" in self.cfg.get('heatmaps', []):
             #print(f"Person: dtype={self.heatmapsOut[39].dtype}, min={np.min(self.heatmapsOut[39])}, max={np.max(self.heatmapsOut[39])}")
             #print(f"Face: dtype={self.heatmapsOut[40].dtype}, min={np.min(self.heatmapsOut[40])}, max={np.max(self.heatmapsOut[40])}")
             #print(f"Hand: dtype={self.heatmapsOut[41].dtype}, min={np.min(self.heatmapsOut[41])}, max={np.max(self.heatmapsOut[41])}")

@@ -101,25 +101,52 @@ def createSelectedModel(cfg, testModel=True):
             if ("tokensOut" in cfg):
                 numTokens = int(cfg["tokensOut"])
 
+
         model = build_unet(
-            cfg['inputHeight'], cfg['inputWidth'], channels, cfg['outputWidth'], cfg['outputHeight'],
-            cfg['outputChannels'], numTokens=numTokens, numClasses=cfg['tokensClasses'],
-            minHeatmapValue=cfg['heatmapDeactivated'], maxHeatmapValue=cfg['heatmapActive'],
-            baseChannels=cfg['baseChannels'], pixelwiseChannels=cfg['pixelwiseChannels'], encoderRepetitions=cfg[
-                'encoderRepetitions'], decoderRepetitions=cfg['decoderRepetitions'], encoderGrowthBase=cfg.get(
-                    'encoderGrowthBase', 1.4), decoderGrowthBase=cfg.get(
-                        'decoderGrowthBase', 2.0), midSectionRepetitions=cfg['midSectionRepetitions'],
-            gloveLayers=cfg['gloveLayers'], multihotLayers=cfg['multihotLayers'], multihotLayerWidth=cfg.get(
-                'multihotLayerWidth', 0), use_learnable_residuals=cfg['learnableTokenResiduals'],
-            bridgeRatio=cfg['bridgeRatio'], forceBridgeSize=cfg['forceBridgeSize'], activation=cfg['activation'],
-            gaussianNoiseSTD=cfg['RGBgaussianNoiseSTD'], dropoutRate=cfg['dropoutRate'], nextTokenStrength=cfg[
-                'nextTokenStrength'], quantize=cfg['quantizeModel'], serial=cfg['serial'], useDescriptors=cfg[
-                    'outputDescriptors'], useASPPBridge=cfg.get('useASPPBridge', False), useDepthRefinementHead=cfg.get(
-                        'useDepthRefinementHead',
-                        False), useCoordConv=cfg.get('useCoordConv', False), useBottleneckAttention=cfg.get(
-                            'useBottleneckAttention', False), depth_channel_start=_resolve_depth_channel_start(
-                                cfg), depth_channel_end=_resolve_depth_channel_end(cfg), convBlockRepetitions=cfg.get(
-                                    'convBlockRepetitions', 2))
+                           inputHeight=cfg['inputHeight'],
+                           inputWidth=cfg['inputWidth'], 
+                           inputChannels=channels, 
+                           outputWidth=cfg['outputWidth'], 
+                           outputHeight=cfg['outputHeight'], 
+                           numKeypoints=cfg['outputChannels'], 
+                           num16BitHeatmaps=cfg['output16BitChannels'],
+                           numTokens=numTokens, 
+                           numClasses=cfg['tokensClasses'], 
+                           minHeatmapValue=cfg['heatmapDeactivated'],
+                           maxHeatmapValue=cfg['heatmapActive'], 
+                           encoderGrowthBase=cfg.get('encoderGrowthBase',1.4),
+                           decoderGrowthBase=cfg.get('decoderGrowthBase',2.0),
+                           baseChannels=cfg['baseChannels'],
+                           pixelwiseChannels=cfg['pixelwiseChannels'],
+                           encoderRepetitions=cfg['encoderRepetitions'],
+                           decoderRepetitions=cfg['decoderRepetitions'],
+                           midSectionRepetitions=cfg['midSectionRepetitions'],
+                           gloveLayers=cfg['gloveLayers'],
+                           multihotLayers=cfg['multihotLayers'],
+                           multihotLayerWidth=cfg.get('multihotLayerWidth',0),
+                           use_learnable_residuals=cfg['learnableTokenResiduals'],
+                           bridgeRatio=cfg['bridgeRatio'],
+                           forceBridgeSize=cfg['forceBridgeSize'],
+                           activation=cfg['activation'],
+                           gaussianNoiseSTD=cfg['RGBgaussianNoiseSTD'],
+                           dropoutRate=cfg['dropoutRate'],
+                           nextTokenStrength=cfg['nextTokenStrength'],
+                           quantize=cfg['quantizeModel'],
+                           serial=cfg['serial'],
+                           useDescriptors=cfg['outputDescriptors'],
+                           depth_channel_start=_resolve_depth_channel_start(cfg),
+                           depth_channel_end=_resolve_depth_channel_end(cfg),
+                           useASPPBridge=cfg.get('useASPPBridge',False),
+                           useDepthRefinementHead=cfg.get('useDepthRefinementHead',False),
+                           useCoordConv=cfg.get('useCoordConv',False),
+                           useBottleneckAttention=cfg.get('useBottleneckAttention',False),
+                           convBlockRepetitions=cfg.get('convBlockRepetitions',2),
+                           deconCheckerboardSmoothing=cfg.get('deconCheckerboardSmoothing','')
+                           )
+        
+        # "deconCheckerboardSmoothing": "" (default/omitted) → Conv2DTranspose,
+        # "nearest" or "bilinear" → UpSampling2D + Conv2D (no tiling artefacts).
+        # See decoder_block() in NNModel.py for the full rationale.
     else:
         print("ERROR, incorrect model type ", cfg['model'])
         sys.exit(1)
@@ -325,6 +352,15 @@ if __name__ == '__main__':
                 restoreBestWeights = True
                 resumePreviousTraining = False
                 saveRestoredWeights = True
+            if (sys.argv[i] == "--dumpWeights"):
+                from NNModel import load_keypoints_model
+                _model_path = "2d_pose_estimation/model.keras"
+                print(bcolors.OKGREEN, "Loading model from", _model_path, bcolors.ENDC)
+                _model, _, _, _ = load_keypoints_model(_model_path)
+                print(bcolors.OKGREEN, "Saving weights to best.weights.h5 ..", bcolors.ENDC)
+                _model.save_weights("best.weights.h5")
+                print(bcolors.OKGREEN, "Done.", bcolors.ENDC)
+                sys.exit(0)
             if (sys.argv[i] == "--skiptest") or (sys.argv[i] == "--notest"):
                 print("Will not save model upon creating to check its I/O")
                 testModel = False
