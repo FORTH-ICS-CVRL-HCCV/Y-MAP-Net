@@ -15,6 +15,7 @@ import re
 import sys
 import subprocess
 import argparse
+import time
 from tools import bcolors
 
 try:
@@ -56,12 +57,13 @@ def build_arg_parser():
     p.add_argument("--collab", action="store_true", help="illustrate + save, no display")
     p.add_argument("--headless", "--novisualization", action="store_true", dest="headless")
     p.add_argument("--profiling", "--profile", action="store_true")
-    p.add_argument("--depth-iterations", type=int, default=10, metavar="N",
+    p.add_argument("--depth-iterations", type=int, default=15, metavar="N",
                    help="Sobel depth-refinement iterations (0 = disabled)")
     p.add_argument("--no-person-id", action="store_true", help="Disable per-blob person ID estimation")
-    p.add_argument("--no-skeleton", action="store_true", help="Disable joint-hierarchy skeleton resolution")
+    p.add_argument("--skeleton", action="store_true",
+                   help="Enable joint-hierarchy skeleton resolution (off by default)")
     p.add_argument("--fast", action="store_true",
-                   help="Shorthand for --depth-iterations 0 --no-person-id --no-skeleton")
+                   help="Shorthand for --depth-iterations 0 --no-person-id (skeleton already off by default)")
     # Repeatable multi-value options
     p.add_argument("--win", nargs=3, action="append", default=[], metavar=("X", "Y", "LABEL"),
                    help="Window arrangement entry (repeatable)")
@@ -80,14 +82,51 @@ def build_arg_parser():
     p.add_argument("--pose-match", action="store_true", dest="pose_match",
                    help="Enable real-time pose matching demo (press R to capture reference)")
     p.add_argument(
-        "--eco", type=float, default=[4.0], nargs="+", metavar=("THRESHOLD", "MAX_SKIP"),
+        "--eco", type=float, default=[3.0], nargs="+", metavar=("THRESHOLD", "MAX_SKIP"),
         help="Skip network run when mean pixel diff of the 256x256 input is below "
         "THRESHOLD (0 = disabled). Try 5.0-15.0 for static scenes. "
         "Optional second value MAX_SKIP forces a network run after that many "
-        "consecutive skipped frames (default: 10, e.g. --eco 8.0 30).")
+        "consecutive skipped frames (default: 20, e.g. --eco 8.0 30).")
     p.add_argument("--vram", type=int, default=4800, metavar="MB",
                    help="GPU VRAM limit in MB for TensorFlow (default: 4800)")
     return p
+
+
+# =============================================================================
+# Live-stream frame-drop sync
+# =============================================================================
+
+def _is_live_source(videoFilePath):
+    """Return True for real-time camera sources where frame-drop sync should apply."""
+    if videoFilePath in ("webcam", "screen", "esp"):
+        return True
+    if isinstance(videoFilePath, str) and videoFilePath.isdigit():
+        return True
+    if isinstance(videoFilePath, str) and re.fullmatch(r'/dev/video\d+', videoFilePath):
+        return True
+    return False
+
+
+class LiveStreamSyncer:
+    """Drops stale frames from a live capture so processing stays in sync."""
+
+    def __init__(self, cap, nominal_fps: float):
+        self.cap = cap
+        self.fps = max(nominal_fps, 1.0)
+        self._t_last = time.perf_counter()
+
+    def read(self):
+        now = time.perf_counter()
+        elapsed = now - self._t_last
+        n_drop = max(0, int(elapsed * self.fps) - 1)
+        for _ in range(n_drop):
+            self.cap.grab()
+        ret, frame = self.cap.read()
+        self._t_last = time.perf_counter()
+        if n_drop >= 5:
+            print(f"[sync] dropped {n_drop} stale frame(s) "
+                  f"(lag {elapsed * 1000:.0f} ms @ {self.fps:.1f} fps)")
+        return ret, frame
 
 
 # =============================================================================
@@ -106,6 +145,9 @@ def getCaptureDeviceFromPath(videoFilePath, videoWidth, videoHeight, videoFramer
         cap.set(cv2.CAP_PROP_FPS, videoFramerate)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, videoWidth)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, videoHeight)
+        # Keep the internal buffer small so at most one extra frame queues up.
+        # Not all backends honour this, but it limits passive lag where supported.
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not cap.isOpened():
             print("ERROR: Could not open camera index %d." % index)
             if sys.platform == 'win32':
@@ -328,49 +370,40 @@ from appFace import _dump_face_crops
 from appPoseMatch import PoseMatcher, draw_pose_match_overlay
 
 # =============================================================================
-# Main routine
+# Main routine helpers
 # =============================================================================
 
 
-def main_pose_estimation(args):
-    model_path = args.model
-    videoWidth, videoHeight = args.size
-    threshold = int(args.threshold)
-    keypoint_threshold = args.threshold
-    cropInputFrame = not args.nocrop
-    customCrop = args.crop is not None
-    customCropX = args.crop[0] if customCrop else 0
-    customCropY = args.crop[1] if customCrop else 0
-    customCropSize = args.crop[2] if customCrop else 0
-    scale = args.scale
-    emulateBorder = args.border
-    noise = np.clip(args.noise, 0.0, 1.0)
-    blur = min(40, abs(args.blur))
-    illustrate = args.illustrate or args.collab
-    save = args.save or args.collab
-    show = not args.headless and not args.collab
-    visualize = not args.headless
+def parse_monitor_args(monitor_args):
+    """Convert --monitor entries to (hm_spec, x, y, label) tuples.
 
-    window_arrangement = [(int(x), int(y), label) for x, y, label in args.win]
-    monitor = []
-    for hm, x, y, label in args.monitor:
+    The heatmap selector is either a numeric index or a label string;
+    label resolution happens inside YMAPNet.__init__.
+    """
+    monitors = []
+    for hm, x, y, label in monitor_args:
         try:
             hm_spec = int(hm)  # numeric index
         except ValueError:
             hm_spec = hm  # label string — resolved in YMAPNet.__init__
-        monitor.append((hm_spec, int(x), int(y), label))
+        monitors.append((hm_spec, int(x), int(y), label))
         print(f"Added a monitor @ {x},{y} for {hm}")
+    return monitors
 
-    print("Keypoint Threshold :", keypoint_threshold)
-    print("Threshold          :", threshold)
 
-    cap = getCaptureDeviceFromPath(args.videoFilePath, videoWidth, videoHeight, model_path=model_path)
-
+def build_estimator(args):
+    """Construct the YMAPNet estimator and its tile wrapper from CLI args."""
     from YMAPNet import YMAPNet, PoseEstimatorTiler
+
+    illustrate = args.illustrate or args.collab
+    show = not args.headless and not args.collab
+    window_arrangement = [(int(x), int(y), label) for x, y, label in args.win]
+    monitor = parse_monitor_args(args.monitor)
+
     estimator = YMAPNet(
-        modelPath=model_path,
-        threshold=threshold,
-        keypoint_threshold=keypoint_threshold,
+        modelPath=args.model,
+        threshold=int(args.threshold),
+        keypoint_threshold=args.threshold,
         engine=args.engine,
         profiling=args.profiling,
         illustrate=illustrate,
@@ -381,12 +414,12 @@ def main_pose_estimation(args):
         screen_h=args.screen[1],
         depth_iterations=args.depth_iterations,
         estimate_person_id=not args.no_person_id,
-        resolve_skeleton=not args.no_skeleton,
+        resolve_skeleton=args.skeleton,
         vram_limit=args.vram,
         compileModel=False,  # skip optimizer state loading — not needed for inference
         show=show)
     # noise is [0,1]; add_noise_to_image expects the same range
-    estimator.addedNoise = noise
+    estimator.addedNoise = np.clip(args.noise, 0.0, 1.0)
     estimator.show = show
 
     tiler = PoseEstimatorTiler(
@@ -394,6 +427,118 @@ def main_pose_estimation(args):
         tile_size=(estimator.cfg['inputWidth'], estimator.cfg['inputHeight']),
         overlap=(0, 0),
     )
+    return estimator, tiler
+
+
+def preprocess_frame(frame, args, estimator):
+    """Apply scale, crop, border, blur, and noise pre-processing to a frame."""
+    if args.scale != 1.0:
+        h, w = frame.shape[:2]
+        frame = cv2.resize(frame, (int(w * args.scale), int(h * args.scale)),
+                           interpolation=cv2.INTER_AREA)
+
+    cropInputFrame = not args.nocrop
+    if cropInputFrame and estimator.cfg['inputWidth'] == estimator.cfg['inputHeight']:
+        if args.crop is not None:
+            frame = custom_crop(frame, args.crop[0], args.crop[1], args.crop[2])
+        else:
+            frame = extract_centered_rectangle(frame)
+
+    if args.border > 0:
+        bigBorder = frame.shape[0] * (args.border / estimator.cfg['inputHeight'])
+        frame = add_horizontal_stripes(frame, int(bigBorder))
+
+    blur = min(40, abs(args.blur))
+    if blur:
+        frame = apply_blur_to_image(frame, blur_strength=blur)
+
+    if estimator.addedNoise != 0.0:
+        frame = add_noise_to_image(frame, noise_magnitude=estimator.addedNoise)
+
+    return frame
+
+
+# OpenCV waitKey() & 0xFF return values. 255 means no key was pressed in the
+# wait window. The asymmetry below (LEFT_ARROW/SCREENSHOT vs the rest) is
+# intentional: only the action keys accept both cases.
+KEY_NONE        = 255
+KEY_LEFT_ARROW  = {81}
+KEY_SCREENSHOT  = {ord('a')}
+KEY_QUIT        = {27, ord('q'), ord('Q')}
+KEY_RECORD      = {ord('r'), ord('R')}
+KEY_UPLOAD      = {ord('u'), ord('U')}
+KEY_SAVE_PLY    = {ord('s'), ord('S')}
+
+
+def handle_keypress(key, args, estimator, frame, pose_matcher):
+    """Process a single OpenCV keypress. Returns True if the loop should exit."""
+    if key == KEY_NONE:
+        return False
+    print("Key Press =", key)
+    if key in KEY_LEFT_ARROW:
+        print("Left Arrow")
+    elif key in KEY_SCREENSHOT:
+        print("Save demo screenshot")
+        subprocess.run(
+            ["scrot", "-a", "800,10,1157,570", f"scrot{estimator.frameNumber}.png"],
+            check=False,
+        )
+    elif key in KEY_QUIT:
+        print("Terminating after receiving keyboard request")
+        return True
+    elif key in KEY_RECORD:
+        if pose_matcher is not None:
+            pose_matcher.capture_reference()
+    elif key in KEY_UPLOAD:
+        save_and_upload_frame(frame, args.upload_url)
+    elif key in KEY_SAVE_PLY:
+        create_ply_file(estimator.imageIn, estimator.depthmap,
+                        f"output_{estimator.frameNumber}.ply")
+    return False
+
+
+def encode_video(input_pattern, output, cleanup_glob, fps=25):
+    """Run ffmpeg over a numbered PNG sequence and remove the source frames."""
+    subprocess.run([
+        "ffmpeg", "-nostdin",
+        "-framerate", str(fps),
+        "-i", input_pattern,
+        "-vf", "scale=-1:720",
+        "-y", "-r", str(fps),
+        "-pix_fmt", "yuv420p",
+        "-threads", "8",
+        output,
+    ], check=False)
+    for f in glob.glob(cleanup_glob):
+        os.remove(f)
+
+
+# =============================================================================
+# Main routine
+# =============================================================================
+
+
+def main_pose_estimation(args):
+    videoWidth, videoHeight = args.size
+    illustrate = args.illustrate or args.collab
+    save = args.save or args.collab
+    show = not args.headless and not args.collab
+    visualize = not args.headless
+
+    print("Keypoint Threshold :", args.threshold)
+    print("Threshold          :", int(args.threshold))
+
+    cap = getCaptureDeviceFromPath(args.videoFilePath, videoWidth, videoHeight,
+                                   model_path=args.model)
+
+    is_live = _is_live_source(args.videoFilePath)
+    if is_live:
+        nominal_fps = cap.get(cv2.CAP_PROP_FPS) if hasattr(cap, 'get') else 30.0
+        nominal_fps = nominal_fps if nominal_fps > 0 else 30.0
+        _syncer = LiveStreamSyncer(cap, nominal_fps)
+        print(f"[sync] Live source — frame-drop sync enabled at {nominal_fps:.1f} fps")
+
+    estimator, tiler = build_estimator(args)
 
     if save and show:
         disable_screensaver()
@@ -403,10 +548,13 @@ def main_pose_estimation(args):
     face_crop_counter = [0]  # mutable counter shared across frames
     pose_matcher = PoseMatcher(estimator) if args.pose_match else None
 
+    eco_threshold = args.eco[0]
+    eco_max_skip = int(args.eco[1]) if len(args.eco) > 1 else 20
+
     failedFrames = 0
     try:
         while True:
-            ret, frame = cap.read()
+            ret, frame = _syncer.read() if is_live else cap.read()
             if not ret:
                 print("Failed to capture frame")
                 failedFrames += 1
@@ -419,29 +567,9 @@ def main_pose_estimation(args):
             if args.tile:
                 tiler.process(frame)
             else:
-                if scale != 1.0:
-                    h, w = frame.shape[:2]
-                    frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-
-                if cropInputFrame and estimator.cfg['inputWidth'] == estimator.cfg['inputHeight']:
-                    if customCrop:
-                        frame = custom_crop(frame, customCropX, customCropY, customCropSize)
-                    else:
-                        frame = extract_centered_rectangle(frame)
-
-                if emulateBorder > 0:
-                    bigBorder = frame.shape[0] * (emulateBorder / estimator.cfg['inputHeight'])
-                    frame = add_horizontal_stripes(frame, int(bigBorder))
-
-                if blur:
-                    frame = apply_blur_to_image(frame, blur_strength=blur)
-
-                if estimator.addedNoise != 0.0:
-                    frame = add_noise_to_image(frame, noise_magnitude=estimator.addedNoise)
-
-                _eco_threshold = args.eco[0]
-                _eco_max_skip = int(args.eco[1]) if len(args.eco) > 1 else 20
-                estimator.process(frame, static_frame_threshold=_eco_threshold, eco_max_skip=_eco_max_skip)
+                frame = preprocess_frame(frame, args, estimator)
+                estimator.process(frame, static_frame_threshold=eco_threshold,
+                                  eco_max_skip=eco_max_skip)
 
                 if args.fallen_person_detector:
                     _fp_result = _run_fallen_person_detector(estimator)
@@ -471,26 +599,8 @@ def main_pose_estimation(args):
                     estimator.visualize(frameWithVis, show=show, save=save)
 
                 key = cv2.waitKey(1) & 0xFF if show else 255
-                if key != 255:
-                    print("Key Press =", key)
-                if key == 81:
-                    print("Left Arrow")
-                elif key == 97:
-                    print("Save demo screenshot")
-                    subprocess.run(
-                        ["scrot", "-a", "800,10,1157,570", f"scrot{estimator.frameNumber}.png"],
-                        check=False,
-                    )
-                elif key in (27, ord('q'), ord('Q')):
-                    print("Terminating after receiving keyboard request")
+                if handle_keypress(key, args, estimator, frame, pose_matcher):
                     break
-                elif key in (ord('r'), ord('R')):
-                    if pose_matcher is not None:
-                        pose_matcher.capture_reference()
-                elif key in (ord('u'), ord('U')):
-                    save_and_upload_frame(frame, args.upload_url)
-                elif key in (ord('s'), ord('S')):
-                    create_ply_file(estimator.imageIn, estimator.depthmap, f"output_{estimator.frameNumber}.ply")
 
                 if save and show:
                     screenshot(estimator.frameNumber)
@@ -505,48 +615,14 @@ def main_pose_estimation(args):
 
     if save and show:
         enable_screensaver()
-        subprocess.run([
-            "ffmpeg",
-            "-nostdin",
-            "-framerate",
-            "25",
-            "-i",
-            "colorFrame_0_%05d.png",
-            "-vf",
-            "scale=-1:720",
-            "-y",
-            "-r",
-            "25",
-            "-pix_fmt",
-            "yuv420p",
-            "-threads",
-            "8",
-            f"{args.videoFilePath}_lastRun3DHiRes.mp4",
-        ], check=False)
-        for f in glob.glob("colorFrame*.png"):
-            os.remove(f)
+        encode_video("colorFrame_0_%05d.png",
+                     f"{args.videoFilePath}_lastRun3DHiRes.mp4",
+                     "colorFrame*.png")
 
     if illustrate:
-        subprocess.run([
-            "ffmpeg",
-            "-nostdin",
-            "-framerate",
-            "25",
-            "-i",
-            "composite_%05d.png",
-            "-vf",
-            "scale=-1:720",
-            "-y",
-            "-r",
-            "25",
-            "-pix_fmt",
-            "yuv420p",
-            "-threads",
-            "8",
-            f"{args.videoFilePath}_illustration.mp4",
-        ], check=False)
-        for f in glob.glob("composite_*.png"):
-            os.remove(f)
+        encode_video("composite_%05d.png",
+                     f"{args.videoFilePath}_illustration.mp4",
+                     "composite_*.png")
 
 
 # =============================================================================
@@ -557,7 +633,7 @@ if __name__ == '__main__':
     if args.fast:
         args.depth_iterations = 0
         args.no_person_id = True
-        args.no_skeleton = True
+        args.skeleton = False  # --fast forces skeleton off even if --skeleton was passed
 
     if args.cpu:
         os.environ['CUDA_VISIBLE_DEVICES'] = ''

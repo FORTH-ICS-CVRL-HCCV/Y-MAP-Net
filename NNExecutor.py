@@ -35,6 +35,7 @@ class TFLiteExecutor():
         self.heatmaps_16b = None
         self.description = None
         self.multihot_description = None
+        self.depth_normals_uncertainty = None
         self.activity = None
         #------------------------------------------
 #-----------------------------------------------------------------------------------------------------
@@ -61,12 +62,13 @@ class TFLiteExecutor():
             self.heatmaps = predictions[0]
             return self.heatmaps[0]
 
-        hm, hm16, desc, mh = _parse_predictions(predictions)
+        hm, hm16, desc, mh, unc = _parse_predictions(predictions)
         # Strip batch dim from heatmap outputs; description/multihot already match TFExecutor shape
         self.heatmaps = hm[0] if hm is not None else None
         self.heatmaps_16b = hm16[0] if hm16 is not None else None
         self.description = desc
         self.multihot_description = mh
+        self.depth_normals_uncertainty = unc[0] if unc is not None else None
 
         return self.heatmaps
 #-----------------------------------------------------------------------------------------------------
@@ -86,8 +88,12 @@ class TFLiteExecutor():
             self.heatmaps = predictions[0]
             return self.heatmaps
 
-        self.heatmaps, self.heatmaps_16b, self.description, self.multihot_description = \
-            _parse_predictions(predictions)
+        hm, hm16, desc, mh, unc = _parse_predictions(predictions)
+        self.heatmaps = hm
+        self.heatmaps_16b = hm16
+        self.description = desc
+        self.multihot_description = mh
+        self.depth_normals_uncertainty = unc
 
         return self.heatmaps
 
@@ -104,41 +110,54 @@ def to_float32(tensor):
 def _parse_predictions(predictions):
     """Identify and separate named outputs from a list of batched prediction arrays.
 
-    Heuristics (matching TFExecutor behaviour):
-      - 4-D, channels == 1  → 16-bit heatmap
-      - 4-D, channels  > 1  → main heatmaps
-      - 2-D, width == 300   → GloVe token embedding
-      - 2-D, other width    → multi-hot classification vector
+    Heuristics:
+      - 4-D, channels == 1                    → 16-bit heatmap  (hm_16b)
+      - 4-D, channels == max of all 4-D outs  → main heatmaps   (hm)
+      - 4-D, any other channel count          → uncertainty map  (hm_nll)
+      - 2-D, width == 300                     → GloVe token embedding
+      - 2-D, other width                      → multi-hot classification vector
 
-    Returns (heatmaps, heatmaps_16b, description, multihot_description).
-    All arrays retain the batch dimension; callers strip [0] for single-image use.
+    Using "most channels = main heatmap" rather than a fixed channel count makes
+    the parser robust to the optional hm_nll uncertainty output ([B,H,W,8]) which
+    would otherwise be misidentified as the primary heatmap.
+
+    Returns (heatmaps, heatmaps_16b, description, multihot_description,
+             depth_normals_uncertainty).
+    All 4-D arrays retain the batch dimension; callers strip [0] for single-image use.
     """
-    heatmap_idx = None
     heatmap_16b_idx = None
     multihot_idx = None
+    hm_nll_idx = None
     token_indices = []
+    multi_ch_4d = []  # indices of 4-D tensors with channels > 1
 
     for i, pred in enumerate(predictions):
         if pred.ndim == 4:
             if pred.shape[3] == 1:
                 heatmap_16b_idx = i
             else:
-                heatmap_idx = i
+                multi_ch_4d.append(i)
         elif pred.ndim == 2:
             if pred.shape[1] == 300:
                 token_indices.append(i)
             else:
                 multihot_idx = i
 
-    # Heatmap outputs keep the batch dimension so callers can choose to strip it.
+    # Main heatmap = 4-D output with the most channels (always hm, never hm_nll)
+    heatmap_idx = None
+    if multi_ch_4d:
+        heatmap_idx = max(multi_ch_4d, key=lambda i: predictions[i].shape[3])
+        for i in multi_ch_4d:
+            if i != heatmap_idx:
+                hm_nll_idx = i  # uncertainty head — currently at most one
+
     heatmaps = predictions[heatmap_idx] if heatmap_idx is not None else None
     heatmaps_16b = predictions[heatmap_16b_idx] if heatmap_16b_idx is not None else None
-    # Multihot: keep batch dimension (matches TFExecutor behaviour)
     multihot_description = predictions[multihot_idx] if multihot_idx is not None else None
-    # Tokens: strip batch dim per token before stacking → shape (N_tokens, 300)
     description = np.vstack([predictions[i][0] for i in token_indices]) if token_indices else None
+    depth_normals_uncertainty = predictions[hm_nll_idx] if hm_nll_idx is not None else None
 
-    return heatmaps, heatmaps_16b, description, multihot_description
+    return heatmaps, heatmaps_16b, description, multihot_description, depth_normals_uncertainty
 
 
 #-----------------------------------------------------------------------------------------------------
@@ -155,6 +174,7 @@ class TFExecutor():
         self.heatmaps_16b = None
         self.description = None
         self.multihot_description = None
+        self.depth_normals_uncertainty = None
         self.activity = None
         #Tensorflow attempt to be reasonable
         #------------------------------------------
@@ -362,48 +382,14 @@ class TFExecutor():
                 return predictions[0]
 
         #Else we have a list of outputs so find the correct one!
-        heatmap_16bOutputIndex = None
-        heatmapOutputIndex = 9
-        multiHotOutputIndex = 8
-        tokenOutputIndices = list()
+        hm, hm16, desc, mh, unc = _parse_predictions(predictions)
+        self.heatmaps = hm[0] if hm is not None else None
+        self.heatmaps_16b = hm16[0] if hm16 is not None else None
+        self.description = desc
+        self.multihot_description = mh
+        self.depth_normals_uncertainty = unc[0] if unc is not None else None
 
-        #16B
-        #---------------------------
-        heatmap_16bOutputIndex = 1
-        heatmapOutputIndex = 0
-        multiHotOutputIndex = 10
-
-        for i, item in enumerate(predictions):
-            #print(i," items : ",predictions[i].shape)
-            #print(i," dims :  ",predictions[i].ndim)
-            if predictions[i].ndim == 4:
-                #print("Heatmap %u has %u elements " % (i,predictions[i].shape[3]) )
-                if (predictions[i].shape[3] == 1):
-                    heatmap_16bOutputIndex = i
-                else:
-                    heatmapOutputIndex = i
-
-                self.heatmaps = predictions[heatmapOutputIndex][0]
-            elif predictions[i].ndim == 3:
-                print(" unknown output @ ", i)
-            elif predictions[i].ndim == 2:
-                #print(" multihot @ ",i)
-                #print("  multihot length = ",len(predictions[i][0]))
-                dataLength = len(predictions[i][0])
-                if (dataLength == 300):  #300 dim is the GloVe vectors
-                    tokenOutputIndices.append(i)
-                else:
-                    multiHotOutputIndex = i  #Other dimensionality should be the multihot output
-                    self.multihot_description = predictions[multiHotOutputIndex]
-
-        if (len(tokenOutputIndices) > 0):
-            selected_predictions = [predictions[i][0] for i in tokenOutputIndices]
-            self.description = np.vstack(selected_predictions)
-
-        if (heatmap_16bOutputIndex is not None):
-            self.heatmaps_16b = predictions[heatmap_16bOutputIndex][0]
-
-        return self.heatmaps  #predictions[heatmapOutputIndex][0]
+        return self.heatmaps
 #-----------------------------------------------------------------------------------------------------
 
     def predict_multi(self, image):
@@ -437,34 +423,14 @@ class TFExecutor():
                 return predictions
 
         #Else we have a list of outputs so find the correct one!
-        heatmapOutputIndex = 9
-        multiHotOutputIndex = 8
-        tokenOutputIndices = list()
+        hm, hm16, desc, mh, unc = _parse_predictions(predictions)
+        self.heatmaps = hm
+        self.heatmaps_16b = hm16
+        self.description = desc
+        self.multihot_description = mh
+        self.depth_normals_uncertainty = unc
 
-        for i, item in enumerate(predictions):
-            #print(i," items : ",predictions[i].shape)
-            #print(i," dims :  ",predictions[i].ndim)
-            if predictions[i].ndim == 4:
-                #print(" heatmaps @ ",i)
-                heatmapOutputIndex = i
-                self.heatmaps = predictions[heatmapOutputIndex]
-            elif predictions[i].ndim == 3:
-                print(" unknown output @ ", i)
-            elif predictions[i].ndim == 2:
-                #print(" multihot @ ",i)
-                #print("  multihot length = ",len(predictions[i][0]))
-                dataLength = len(predictions[i])
-                if (dataLength == 300):  #300 dim is the GloVe vectors
-                    tokenOutputIndices.append(i)
-                else:
-                    multiHotOutputIndex = i  #Other dimensionality should be the multihot output
-                    self.multihot_description = predictions[multiHotOutputIndex]
-
-        if (len(tokenOutputIndices) > 0):
-            selected_predictions = [predictions[i] for i in tokenOutputIndices]
-            self.description = np.vstack(selected_predictions)
-
-        return self.heatmaps  #predictions[heatmapOutputIndex][0]
+        return self.heatmaps
 
 
 #-----------------------------------------------------------------------------------------------------
@@ -493,6 +459,7 @@ class ONNXExecutor():
         self.heatmaps_16b = None
         self.multihot_description = None
         self.description = None
+        self.depth_normals_uncertainty = None
         self.activity = None
         #------------------------------------------
         sess_options = ort.SessionOptions()
@@ -533,12 +500,13 @@ class ONNXExecutor():
             self.heatmaps = predictions[0]
             return self.heatmaps[0]
 
-        hm, hm16, desc, mh = _parse_predictions(predictions)
+        hm, hm16, desc, mh, unc = _parse_predictions(predictions)
         # Strip batch dim from heatmap outputs; description/multihot already match TFExecutor shape
         self.heatmaps = hm[0] if hm is not None else None
         self.heatmaps_16b = hm16[0] if hm16 is not None else None
         self.description = desc
         self.multihot_description = mh
+        self.depth_normals_uncertainty = unc[0] if unc is not None else None
 
         return self.heatmaps
 #-----------------------------------------------------------------------------------------------------
@@ -558,8 +526,12 @@ class ONNXExecutor():
             self.heatmaps = predictions[0]
             return self.heatmaps
 
-        self.heatmaps, self.heatmaps_16b, self.description, self.multihot_description = \
-            _parse_predictions(predictions)
+        hm, hm16, desc, mh, unc = _parse_predictions(predictions)
+        self.heatmaps = hm
+        self.heatmaps_16b = hm16
+        self.description = desc
+        self.multihot_description = mh
+        self.depth_normals_uncertainty = unc
 
         return self.heatmaps
 
@@ -602,6 +574,7 @@ class JAXExecutor():
         self.heatmaps_16b = None
         self.description = None
         self.multihot_description = None
+        self.depth_normals_uncertainty = None
         self.activity = None
         self._jnp = jnp
 
@@ -726,11 +699,12 @@ class JAXExecutor():
             self.heatmaps = predictions[0][0]
             return self.heatmaps
 
-        hm, hm16, desc, mh = _parse_predictions(predictions)
+        hm, hm16, desc, mh, unc = _parse_predictions(predictions)
         self.heatmaps = hm[0] if hm is not None else None
         self.heatmaps_16b = hm16[0] if hm16 is not None else None
         self.description = desc
         self.multihot_description = mh
+        self.depth_normals_uncertainty = unc[0] if unc is not None else None
         return self.heatmaps
 #-----------------------------------------------------------------------------------------------------
 
@@ -749,8 +723,12 @@ class JAXExecutor():
             self.heatmaps = predictions[0]
             return self.heatmaps
 
-        self.heatmaps, self.heatmaps_16b, self.description, self.multihot_description = \
-            _parse_predictions(predictions)
+        hm, hm16, desc, mh, unc = _parse_predictions(predictions)
+        self.heatmaps = hm
+        self.heatmaps_16b = hm16
+        self.description = desc
+        self.multihot_description = mh
+        self.depth_normals_uncertainty = unc
         return self.heatmaps
 
 
@@ -793,6 +771,7 @@ class HAILOExecutor():
         self.heatmaps_16b = None
         self.description = None
         self.multihot_description = None
+        self.depth_normals_uncertainty = None
         self.activity = None
         # ── open device and load HEF ──────────────────────────────────
         self._target = VDevice()
@@ -853,11 +832,12 @@ class HAILOExecutor():
             self.heatmaps = predictions[0][0]
             return self.heatmaps
 
-        hm, hm16, desc, mh = _parse_predictions(predictions)
+        hm, hm16, desc, mh, unc = _parse_predictions(predictions)
         self.heatmaps = hm[0] if hm is not None else None
         self.heatmaps_16b = hm16[0] if hm16 is not None else None
         self.description = desc
         self.multihot_description = mh
+        self.depth_normals_uncertainty = unc[0] if unc is not None else None
         return self.heatmaps
 #-----------------------------------------------------------------------------------------------------
 
@@ -876,8 +856,12 @@ class HAILOExecutor():
             self.heatmaps = predictions[0]
             return self.heatmaps
 
-        self.heatmaps, self.heatmaps_16b, self.description, self.multihot_description = \
-            _parse_predictions(predictions)
+        hm, hm16, desc, mh, unc = _parse_predictions(predictions)
+        self.heatmaps = hm
+        self.heatmaps_16b = hm16
+        self.description = desc
+        self.multihot_description = mh
+        self.depth_normals_uncertainty = unc
         return self.heatmaps
 
 
@@ -914,6 +898,7 @@ class PyTorchExecutor():
         self.heatmaps_16b = None
         self.description = None
         self.multihot_description = None
+        self.depth_normals_uncertainty = None
         self.activity = None
         self._torch = torch
 
@@ -981,11 +966,12 @@ class PyTorchExecutor():
             self.heatmaps = predictions[0][0]
             return self.heatmaps
 
-        hm, hm16, desc, mh = _parse_predictions(predictions)
+        hm, hm16, desc, mh, unc = _parse_predictions(predictions)
         self.heatmaps = hm[0] if hm is not None else None
         self.heatmaps_16b = hm16[0] if hm16 is not None else None
         self.description = desc
         self.multihot_description = mh
+        self.depth_normals_uncertainty = unc[0] if unc is not None else None
         return self.heatmaps
 #-----------------------------------------------------------------------------------------------------
 
@@ -1004,8 +990,12 @@ class PyTorchExecutor():
             self.heatmaps = predictions[0]
             return self.heatmaps
 
-        self.heatmaps, self.heatmaps_16b, self.description, self.multihot_description = \
-            _parse_predictions(predictions)
+        hm, hm16, desc, mh, unc = _parse_predictions(predictions)
+        self.heatmaps = hm
+        self.heatmaps_16b = hm16
+        self.description = desc
+        self.multihot_description = mh
+        self.depth_normals_uncertainty = unc
         return self.heatmaps
 
 
@@ -1129,6 +1119,11 @@ class NNExecutor():
 
 
 #-----------------------------------------------------------------------------------------------------
+
+    def depth_normals_uncertainty(self):
+        #------------------------------------------
+        return self.model.depth_normals_uncertainty
+        #------------------------------------------
 
     def activity(self):
         #------------------------------------------
