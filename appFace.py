@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-
 """
 Author : "Ammar Qammaz"
 Copyright : "2024 Foundation of Research and Technology, Computer Science Department Greece, See license.txt"
@@ -12,13 +11,12 @@ import os
 import cv2
 import numpy as np
 
-
 # =============================================================================
 # Face-crop helpers
 # =============================================================================
 
 # Heatmap channel indices for facial keypoints (fixed by model architecture)
-_FACE_KP_CHANNELS = [0, 1, 2, 3, 4]   # nose, left_eye, right_eye, left_ear, right_ear
+_FACE_KP_CHANNELS = [0, 1, 2, 3, 4]  # nose, left_eye, right_eye, left_ear, right_ear
 
 
 def _find_kp_peaks(heatmap, threshold=40, blur_k=3):
@@ -30,7 +28,7 @@ def _find_kp_peaks(heatmap, threshold=40, blur_k=3):
         hm = cv2.GaussianBlur(heatmap.astype(np.float32), (blur_k, blur_k), 0)
     else:
         hm = heatmap.astype(np.float32)
-    kernel  = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     dilated = cv2.dilate(hm, kernel)
     local_max = (hm == dilated) & (hm >= threshold)
     ys, xs = np.where(local_max)
@@ -51,7 +49,7 @@ def _cluster_face_keypoints(all_peaks, cluster_radius):
             # Compare against the cluster centroid (mean of existing points)
             cx = sum(p[0] for p in cl) / len(cl)
             cy = sum(p[1] for p in cl) / len(cl)
-            d  = ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5
+            d = ((px - cx)**2 + (py - cy)**2)**0.5
             if d < best_dist:
                 best_dist, best_idx = d, ci
         if best_dist <= cluster_radius:
@@ -61,9 +59,8 @@ def _cluster_face_keypoints(all_peaks, cluster_radius):
     return clusters
 
 
-def _dump_face_crops(estimator, frame, face_crop_counter, output_dir="faces",
-                     seg_threshold=64, kp_threshold=40, min_seg_pixels=80,
-                     padding=0.5):
+def _dump_face_crops(estimator, frame, face_crop_counter, output_dir="faces", seg_threshold=64, kp_threshold=40,
+                     min_seg_pixels=80, padding=0.5):
     """
     Dump RGB face crops to *output_dir/face_XXXXXX.jpg*.
 
@@ -83,7 +80,7 @@ def _dump_face_crops(estimator, frame, face_crop_counter, output_dir="faces",
       connected-component bounding boxes of the Face segmentation mask, as before.
     """
     heatmaps = estimator.heatmapsOut
-    n_hm     = len(heatmaps)
+    n_hm = len(heatmaps)
 
     fH, fW = frame.shape[:2]
 
@@ -91,7 +88,7 @@ def _dump_face_crops(estimator, frame, face_crop_counter, output_dir="faces",
     chan_face = getattr(estimator, 'chanFace', -1)
     face_mask = None
     if 0 <= chan_face < n_hm:
-        face_mask = heatmaps[chan_face]          # H_hm × W_hm uint8
+        face_mask = heatmaps[chan_face]  # H_hm × W_hm uint8
 
     hmH = face_mask.shape[0] if face_mask is not None else fH
     hmW = face_mask.shape[1] if face_mask is not None else fW
@@ -102,21 +99,20 @@ def _dump_face_crops(estimator, frame, face_crop_counter, output_dir="faces",
         """Pad, clip, crop and write one face JPEG."""
         w_hm = max(1, x1_hm - x0_hm)
         h_hm = max(1, y1_hm - y0_hm)
-        diag = (w_hm ** 2 + h_hm ** 2) ** 0.5
-        pad  = int(diag * padding * 0.5)       # same pad on all sides
+        diag = (w_hm**2 + h_hm**2)**0.5
+        pad = int(diag * padding * 0.5)  # same pad on all sides
 
-        fx0 = max(0,  int((x0_hm - pad) * scale_x))
-        fy0 = max(0,  int((y0_hm - pad) * scale_y))
+        fx0 = max(0, int((x0_hm - pad) * scale_x))
+        fy0 = max(0, int((y0_hm - pad) * scale_y))
         fx1 = min(fW, int((x1_hm + pad) * scale_x))
         fy1 = min(fH, int((y1_hm + pad) * scale_y))
 
         crop = frame[fy0:fy1, fx0:fx1]
         if crop.size == 0:
             return
-        idx  = face_crop_counter[0]
+        idx = face_crop_counter[0]
         face_crop_counter[0] += 1
-        cv2.imwrite(os.path.join(output_dir, f"face_{idx:06d}.jpg"),
-                    crop, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        cv2.imwrite(os.path.join(output_dir, f"face_{idx:06d}.jpg"), crop, [cv2.IMWRITE_JPEG_QUALITY, 92])
 
     # ── 1. Collect peaks from all facial keypoint channels ───────────────────
     all_peaks = []
@@ -155,8 +151,8 @@ def _dump_face_crops(estimator, frame, face_crop_counter, output_dir="faces",
         # X span (±cluster_radius) so we don't bleed into a neighbouring face.
         y1_seg = y1_kp
         if bin_face is not None:
-            col_lo = max(0,    x0_kp - int(cluster_radius))
-            col_hi = min(hmW,  x1_kp + int(cluster_radius))
+            col_lo = max(0, x0_kp - int(cluster_radius))
+            col_hi = min(hmW, x1_kp + int(cluster_radius))
             col_slice = bin_face[:, col_lo:col_hi]  # (hmH, col_width)
             rows_with_face = np.where(col_slice.any(axis=1))[0]
             if rows_with_face.size:
@@ -169,8 +165,7 @@ def _dump_face_crops(estimator, frame, face_crop_counter, output_dir="faces",
     # ── 4. Fallback: segmentation blobs (no keypoints detected) ─────────────
     if not used_kp_path and face_mask is not None:
         bin_mask = (face_mask >= seg_threshold).astype(np.uint8) * 255
-        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(
-            bin_mask, connectivity=8)
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(bin_mask, connectivity=8)
         for lbl in range(1, num_labels):
             if stats[lbl, cv2.CC_STAT_AREA] < min_seg_pixels:
                 continue

@@ -46,15 +46,12 @@ def build_parser():
     p = argparse.ArgumentParser(description='Visualise token confusion JSON')
     p.add_argument('confusion_json', nargs='?', default=None,
                    help='Path to token_confusion JSON (auto-detected if omitted)')
-    p.add_argument('--top',         type=int, default=30,
-                   help='Number of top classes to display (default: 30)')
+    p.add_argument('--top', type=int, default=30, help='Number of top classes to display (default: 30)')
     p.add_argument('--heatmap-top', type=int, default=50,
                    help='Number of top confusion pairs for heatmap (default: 50)')
-    p.add_argument('--output',      default='token_confusion',
-                   help='Output filename prefix (default: token_confusion)')
-    p.add_argument('--no-show',     action='store_true',
-                   help='Save only, do not call plt.show()')
-    p.add_argument('--embeddings',  default='2d_pose_estimation/GloVe_D300.embeddings',
+    p.add_argument('--output', default='token_confusion', help='Output filename prefix (default: token_confusion)')
+    p.add_argument('--no-show', action='store_true', help='Save only, do not call plt.show()')
+    p.add_argument('--embeddings', default='2d_pose_estimation/GloVe_D300.embeddings',
                    help='Path to GloVe embeddings file (default: 2d_pose_estimation/GloVe_D300.embeddings)')
     return p
 
@@ -65,9 +62,8 @@ def find_confusion_json():
     if candidates:
         print(f'Auto-detected: {candidates[-1]}')
         return candidates[-1]
-    raise FileNotFoundError(
-        'No evaluation_results_*_token_confusion.json found. '
-        'Pass the path explicitly as the first argument.')
+    raise FileNotFoundError('No evaluation_results_*_token_confusion.json found. '
+                            'Pass the path explicitly as the first argument.')
 
 
 # ---------------------------------------------------------------------------
@@ -100,9 +96,9 @@ def load_glove_embeddings(file_path):
     with open(file_path, 'r') as f:
         D = int(f.readline().strip())
         N = int(f.readline().strip())
-        f.readline()   # offset  (unused)
-        f.readline()   # scaling (unused)
-        f.readline()   # "start"
+        f.readline()  # offset  (unused)
+        f.readline()  # scaling (unused)
+        f.readline()  # "start"
         for _ in range(N):
             key = f.readline().strip()
             vec = np.array([float(f.readline()) for _ in range(D)], dtype=np.float32)
@@ -138,14 +134,14 @@ def enrich_confusion_pairs_with_similarity(confusion_pairs, embeddings):
 def per_class_arrays(data):
     """Return numpy arrays extracted from the per_class list."""
     pc = data['per_class']
-    names     = [e['class']     for e in pc]
-    tp        = np.array([e['TP']        for e in pc], dtype=np.int64)
-    fp        = np.array([e['FP']        for e in pc], dtype=np.int64)
-    fn        = np.array([e['FN']        for e in pc], dtype=np.int64)
+    names = [e['class'] for e in pc]
+    tp = np.array([e['TP'] for e in pc], dtype=np.int64)
+    fp = np.array([e['FP'] for e in pc], dtype=np.int64)
+    fn = np.array([e['FN'] for e in pc], dtype=np.int64)
     precision = np.array([e['precision'] for e in pc], dtype=np.float32)
-    recall    = np.array([e['recall']    for e in pc], dtype=np.float32)
-    f1        = np.array([e['f1']        for e in pc], dtype=np.float32)
-    gt_freq   = tp + fn   # ground-truth occurrences per class
+    recall = np.array([e['recall'] for e in pc], dtype=np.float32)
+    f1 = np.array([e['f1'] for e in pc], dtype=np.float32)
+    gt_freq = tp + fn  # ground-truth occurrences per class
     return names, tp, fp, fn, precision, recall, f1, gt_freq
 
 
@@ -155,12 +151,14 @@ def per_class_arrays(data):
 def plot_top_classes(ax, names, tp, fp, fn, f1, gt_freq, top_n):
     """Stacked horizontal bar: TP (green) | FP (orange) | FN (red), sorted by gt_freq."""
     # Already sorted by gt_freq descending from evaluateYMAPNet; take first top_n
-    idx   = np.arange(min(top_n, len(names)))
-    lbls  = [names[i] for i in idx]
-    tp_v  = tp[idx];  fp_v = fp[idx];  fn_v = fn[idx]
-    f1_v  = f1[idx]
+    idx = np.arange(min(top_n, len(names)))
+    lbls = [names[i] for i in idx]
+    tp_v = tp[idx]
+    fp_v = fp[idx]
+    fn_v = fn[idx]
+    f1_v = f1[idx]
     total = tp_v + fp_v + fn_v
-    total = np.where(total == 0, 1, total)   # avoid /0
+    total = np.where(total == 0, 1, total)  # avoid /0
 
     y = np.arange(len(idx))
     h = 0.6
@@ -188,22 +186,20 @@ def plot_f1_histogram(ax, f1, n_active):
     """Histogram of F1 scores across all active classes."""
     # Separate zero-F1 classes (not predicted at all) from non-zero
     nonzero_f1 = f1[f1 > 0]
-    zero_count  = int(np.sum(f1 == 0))
+    zero_count = int(np.sum(f1 == 0))
 
     bins = np.linspace(0, 1, 41)
     ax.hist(nonzero_f1, bins=bins, color='#3498db', edgecolor='white', linewidth=0.4)
-    ax.axvline(float(np.mean(f1)),        color='red',    linestyle='--', linewidth=1.2,
-               label=f'mean F1={np.mean(f1):.3f}')
-    ax.axvline(float(np.median(nonzero_f1)) if len(nonzero_f1) else 0,
-               color='orange', linestyle='--', linewidth=1.2,
-               label=f'median (non-zero)={np.median(nonzero_f1):.3f}' if len(nonzero_f1) else 'median=0')
+    ax.axvline(float(np.mean(f1)), color='red', linestyle='--', linewidth=1.2, label=f'mean F1={np.mean(f1):.3f}')
+    ax.axvline(
+        float(np.median(nonzero_f1)) if len(nonzero_f1) else 0, color='orange', linestyle='--', linewidth=1.2,
+        label=f'median (non-zero)={np.median(nonzero_f1):.3f}' if len(nonzero_f1) else 'median=0')
 
     ax.set_xlabel('F1 score')
     ax.set_ylabel('Number of classes')
     ax.set_title(
         f'F1 distribution — {n_active} active classes\n'
-        f'({zero_count} with F1=0, {len(nonzero_f1)} with F1>0)',
-        fontsize=9)
+        f'({zero_count} with F1=0, {len(nonzero_f1)} with F1>0)', fontsize=9)
     ax.legend(fontsize=7)
 
 
@@ -213,20 +209,18 @@ def plot_f1_histogram(ax, f1, n_active):
 def plot_precision_recall(ax, names, precision, recall, f1, gt_freq, top_n):
     """Scatter plot of all active classes; point size ∝ GT frequency."""
     # Clamp point sizes to a visible range
-    size_raw    = gt_freq.astype(np.float32)
+    size_raw = gt_freq.astype(np.float32)
     size_normed = np.clip(size_raw / (size_raw.max() + 1e-6), 0.02, 1.0)
-    sizes       = 8 + size_normed * 120
+    sizes = 8 + size_normed * 120
 
-    sc = ax.scatter(recall, precision, s=sizes, c=f1,
-                    cmap='RdYlGn', vmin=0, vmax=1, alpha=0.6, linewidths=0)
+    sc = ax.scatter(recall, precision, s=sizes, c=f1, cmap='RdYlGn', vmin=0, vmax=1, alpha=0.6, linewidths=0)
     plt.colorbar(sc, ax=ax, label='F1', fraction=0.03, pad=0.02)
 
     # Annotate the top-N most frequent classes by name
-    order  = np.argsort(-gt_freq)[:top_n]
+    order = np.argsort(-gt_freq)[:top_n]
     for i in order:
-        ax.annotate(names[i], (recall[i], precision[i]),
-                    fontsize=5, alpha=0.8,
-                    xytext=(2, 2), textcoords='offset points')
+        ax.annotate(names[i], (recall[i], precision[i]), fontsize=5, alpha=0.8, xytext=(2, 2),
+                    textcoords='offset points')
 
     # Draw iso-F1 curves as faint guides
     _r = np.linspace(0.01, 1.0, 200)
@@ -234,8 +228,7 @@ def plot_precision_recall(ax, names, precision, recall, f1, gt_freq, top_n):
         _p = iso_f1 * _r / (2 * _r - iso_f1 + 1e-9)
         _p = np.clip(_p, 0, 1)
         ax.plot(_r, _p, color='grey', linewidth=0.5, linestyle=':', alpha=0.5)
-        ax.text(1.01, iso_f1 / (2 - iso_f1 + 1e-9),
-                f'F1={iso_f1}', fontsize=5, color='grey', va='center')
+        ax.text(1.01, iso_f1 / (2 - iso_f1 + 1e-9), f'F1={iso_f1}', fontsize=5, color='grey', va='center')
 
     ax.set_xlim(-0.02, 1.05)
     ax.set_ylim(-0.02, 1.05)
@@ -258,10 +251,10 @@ def _cos_color(cos_val):
     if cos_val is None:
         return '#e0e0e0'
     if cos_val >= 0.7:
-        return '#ffd6d6'   # pale red
+        return '#ffd6d6'  # pale red
     if cos_val >= 0.4:
-        return '#fff4cc'   # pale amber
-    return '#d6eaff'       # pale blue
+        return '#fff4cc'  # pale amber
+    return '#d6eaff'  # pale blue
 
 
 def plot_confusion_table(ax, confusion_pairs, top_n):
@@ -320,9 +313,8 @@ def plot_confusion_table(ax, confusion_pairs, top_n):
                 table[(i + 1, j)].set_facecolor(base_color)
 
     title_suffix = '  |  CosSim: ■ ≥0.7 synonym  ■ 0.4–0.7 related  ■ <0.4 unrelated' if has_cos else ''
-    ax.set_title(
-        f'Top {len(top)} confusion pairs (true label missed, pred label wrongly fired){title_suffix}',
-        fontsize=8, pad=12)
+    ax.set_title(f'Top {len(top)} confusion pairs (true label missed, pred label wrongly fired){title_suffix}',
+                 fontsize=8, pad=12)
 
 
 # ---------------------------------------------------------------------------
@@ -382,9 +374,9 @@ def plot_confusion_heatmap(confusion_pairs, top_n, serial, output_prefix, no_sho
     has_cos = not np.all(np.isnan(cos_matrix))
 
     # Figure size scales with matrix dimensions, capped for readability
-    cell_px = 0.35          # inches per cell
-    fig_w   = max(10, min(28, n_pred * cell_px + 5))
-    fig_h   = max(6,  min(24, n_true * cell_px + 3))
+    cell_px = 0.35  # inches per cell
+    fig_w = max(10, min(28, n_pred * cell_px + 5))
+    fig_h = max(6, min(24, n_true * cell_px + 3))
 
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     fig.patch.set_facecolor('#1a1a2e')
@@ -394,9 +386,7 @@ def plot_confusion_heatmap(confusion_pairs, top_n, serial, output_prefix, no_sho
     vmax = count_matrix.max()
     norm = matplotlib.colors.LogNorm(vmin=0.5, vmax=max(vmax, 1)) if vmax > 5 else None
 
-    im = ax.imshow(count_matrix, aspect='auto',
-                   cmap='YlOrRd', norm=norm,
-                   interpolation='nearest')
+    im = ax.imshow(count_matrix, aspect='auto', cmap='YlOrRd', norm=norm, interpolation='nearest')
     cbar = plt.colorbar(im, ax=ax, fraction=0.02, pad=0.01)
     cbar.set_label('Co-occurrence count', color='white', fontsize=8)
     cbar.ax.yaxis.set_tick_params(color='white')
@@ -404,11 +394,9 @@ def plot_confusion_heatmap(confusion_pairs, top_n, serial, output_prefix, no_sho
 
     # Axis labels
     ax.set_xticks(np.arange(n_pred))
-    ax.set_xticklabels(pred_labels_ordered, rotation=60, ha='right',
-                       fontsize=max(4, min(7, 120 // n_pred)))
+    ax.set_xticklabels(pred_labels_ordered, rotation=60, ha='right', fontsize=max(4, min(7, 120 // n_pred)))
     ax.set_yticks(np.arange(n_true))
-    ax.set_yticklabels(true_labels_ordered,
-                       fontsize=max(4, min(7, 120 // n_true)))
+    ax.set_yticklabels(true_labels_ordered, fontsize=max(4, min(7, 120 // n_true)))
     ax.tick_params(colors='white')
 
     # Annotate cells when matrix is small enough to be readable.
@@ -427,32 +415,26 @@ def plot_confusion_heatmap(confusion_pairs, top_n, serial, output_prefix, no_sho
                     c = float(cos_matrix[ti, pi])
                     # Cosine similarity colour: green=similar, yellow=related, cyan=unrelated
                     if c >= 0.7:
-                        cos_color = '#88ff88'    # green — likely synonym/plural
+                        cos_color = '#88ff88'  # green — likely synonym/plural
                     elif c >= 0.4:
-                        cos_color = '#ffee66'    # yellow — semantically related
+                        cos_color = '#ffee66'  # yellow — semantically related
                     else:
-                        cos_color = '#88ddff'    # cyan — genuinely unrelated confusion
+                        cos_color = '#88ddff'  # cyan — genuinely unrelated confusion
                     # Two-line annotation: count then cosine
-                    ax.text(pi, ti - 0.18, str(v),
-                            ha='center', va='center', fontsize=fsize,
-                            color=count_color, fontweight='bold')
-                    ax.text(pi, ti + 0.22, f'{c:.2f}',
-                            ha='center', va='center', fontsize=max(3, fsize - 1),
+                    ax.text(pi, ti - 0.18, str(v), ha='center', va='center', fontsize=fsize, color=count_color,
+                            fontweight='bold')
+                    ax.text(pi, ti + 0.22, f'{c:.2f}', ha='center', va='center', fontsize=max(3, fsize - 1),
                             color=cos_color)
                 else:
-                    ax.text(pi, ti, str(v),
-                            ha='center', va='center', fontsize=fsize,
-                            color=count_color)
+                    ax.text(pi, ti, str(v), ha='center', va='center', fontsize=fsize, color=count_color)
 
     cos_legend = ('  |  cell bottom: GloVe cosine  '
-                  '■green ≥0.7 synonym  ■yellow 0.4–0.7 related  ■cyan <0.4 unrelated'
-                  if has_cos else '')
+                  '■green ≥0.7 synonym  ■yellow 0.4–0.7 related  ■cyan <0.4 unrelated' if has_cos else '')
     ax.set_xlabel('Predicted label (false positive)', color='white', fontsize=9)
     ax.set_ylabel('True label (false negative / missed)', color='white', fontsize=9)
     ax.set_title(
         f'Token confusion heatmap — v{serial}  '
-        f'(top {len(top)} pairs, rows=missed GT, cols=wrong prediction){cos_legend}',
-        color='white', fontsize=9, pad=10)
+        f'(top {len(top)} pairs, rows=missed GT, cols=wrong prediction){cos_legend}', color='white', fontsize=9, pad=10)
 
     fig.tight_layout()
     out_path = f'{output_prefix}_heatmap.png'
@@ -475,8 +457,8 @@ def plot_glove_cos_histogram(ax, confusion_pairs):
         0.40–0.69  semantically related          (pale amber)
         < 0.40  genuinely unrelated             (pale blue)
     """
-    cos_vals   = []
-    cos_wtd    = []   # count-weighted
+    cos_vals = []
+    cos_wtd = []  # count-weighted
     for p in confusion_pairs:
         c = p.get('glove_cos')
         if c is not None:
@@ -488,56 +470,50 @@ def plot_glove_cos_histogram(ax, confusion_pairs):
         return
 
     cos_arr = np.array(cos_vals, dtype=np.float32)
-    counts  = np.array([w for _, w in cos_wtd], dtype=np.float32)
+    counts = np.array([w for _, w in cos_wtd], dtype=np.float32)
 
     # Shade semantic regions as background bands
-    ax.axvspan(-1.0,  0.4,  alpha=0.10, color='#3498db', label='_nolegend_')
-    ax.axvspan( 0.4,  0.7,  alpha=0.10, color='#f39c12', label='_nolegend_')
-    ax.axvspan( 0.7,  1.01, alpha=0.10, color='#e74c3c', label='_nolegend_')
+    ax.axvspan(-1.0, 0.4, alpha=0.10, color='#3498db', label='_nolegend_')
+    ax.axvspan(0.4, 0.7, alpha=0.10, color='#f39c12', label='_nolegend_')
+    ax.axvspan(0.7, 1.01, alpha=0.10, color='#e74c3c', label='_nolegend_')
 
     bins = np.linspace(-1.0, 1.0, 41)
 
     # Unweighted (pair count) histogram
-    ax.hist(cos_arr, bins=bins, color='#95a5a6', alpha=0.5,
-            edgecolor='white', linewidth=0.3, label='# pairs')
+    ax.hist(cos_arr, bins=bins, color='#95a5a6', alpha=0.5, edgecolor='white', linewidth=0.3, label='# pairs')
 
     # Count-weighted histogram (shows where model spends most confusion)
-    ax.hist(cos_arr, bins=bins, weights=counts,
-            color='#e74c3c', alpha=0.7, edgecolor='white', linewidth=0.3,
+    ax.hist(cos_arr, bins=bins, weights=counts, color='#e74c3c', alpha=0.7, edgecolor='white', linewidth=0.3,
             label='weighted by count')
 
     # Threshold lines
     ax.axvline(0.4, color='#f39c12', linestyle='--', linewidth=1.0)
     ax.axvline(0.7, color='#e74c3c', linestyle='--', linewidth=1.0)
-    ax.axvline(float(np.mean(cos_arr)), color='white', linestyle=':',
-               linewidth=1.2, label=f'mean={np.mean(cos_arr):.3f}')
+    ax.axvline(float(np.mean(cos_arr)), color='white', linestyle=':', linewidth=1.2,
+               label=f'mean={np.mean(cos_arr):.3f}')
 
     # Category counts and weighted totals
-    n_syn  = int(np.sum(cos_arr >= 0.7))
-    n_rel  = int(np.sum((cos_arr >= 0.4) & (cos_arr < 0.7)))
-    n_unr  = int(np.sum(cos_arr < 0.4))
-    w_syn  = float(np.sum(counts[cos_arr >= 0.7]))
-    w_rel  = float(np.sum(counts[(cos_arr >= 0.4) & (cos_arr < 0.7)]))
-    w_unr  = float(np.sum(counts[cos_arr < 0.4]))
-    w_tot  = w_syn + w_rel + w_unr
+    n_syn = int(np.sum(cos_arr >= 0.7))
+    n_rel = int(np.sum((cos_arr >= 0.4) & (cos_arr < 0.7)))
+    n_unr = int(np.sum(cos_arr < 0.4))
+    w_syn = float(np.sum(counts[cos_arr >= 0.7]))
+    w_rel = float(np.sum(counts[(cos_arr >= 0.4) & (cos_arr < 0.7)]))
+    w_unr = float(np.sum(counts[cos_arr < 0.4]))
+    w_tot = w_syn + w_rel + w_unr
 
-    legend_text = (
-        f'Synonym ≥0.70:  {n_syn} pairs  ({100*w_syn/w_tot:.1f}% of confusion samples)\n'
-        f'Related 0.4–0.7: {n_rel} pairs  ({100*w_rel/w_tot:.1f}%)\n'
-        f'Unrelated <0.40: {n_unr} pairs  ({100*w_unr/w_tot:.1f}%)'
-    )
-    ax.text(0.02, 0.97, legend_text,
-            transform=ax.transAxes, va='top', fontsize=7,
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='#2c3e50',
-                      edgecolor='#7f8c8d', alpha=0.85),
-            color='white', family='monospace')
+    legend_text = (f'Synonym ≥0.70:  {n_syn} pairs  ({100*w_syn/w_tot:.1f}% of confusion samples)\n'
+                   f'Related 0.4–0.7: {n_rel} pairs  ({100*w_rel/w_tot:.1f}%)\n'
+                   f'Unrelated <0.40: {n_unr} pairs  ({100*w_unr/w_tot:.1f}%)')
+    ax.text(0.02, 0.97, legend_text, transform=ax.transAxes, va='top', fontsize=7, bbox=dict(
+        boxstyle='round,pad=0.3', facecolor='#2c3e50', edgecolor='#7f8c8d', alpha=0.85), color='white',
+            family='monospace')
 
     ax.set_xlabel('GloVe cosine similarity (true label vs predicted label)')
     ax.set_ylabel('Number of confusion pairs / weighted count')
-    ax.set_title('GloVe cosine similarity distribution across confusion pairs\n'
-                 '(red=count-weighted, grey=pair count)', fontsize=9)
-    ax.legend(fontsize=7, loc='upper left',
-              bbox_to_anchor=(0.0, 0.72))   # below the stats box
+    ax.set_title(
+        'GloVe cosine similarity distribution across confusion pairs\n'
+        '(red=count-weighted, grey=pair count)', fontsize=9)
+    ax.legend(fontsize=7, loc='upper left', bbox_to_anchor=(0.0, 0.72))  # below the stats box
 
 
 # ---------------------------------------------------------------------------
@@ -549,27 +525,25 @@ def plot_count_vs_cosine(ax, confusion_pairs, top_n):
     Point colour encodes semantic category; point size is proportional to count.
     The top-N highest-count pairs are annotated with "true→pred" labels.
     """
-    pairs_with_cos = [(p['count'], p.get('glove_cos'),
-                       p['true_label'], p['pred_label'])
-                      for p in confusion_pairs
+    pairs_with_cos = [(p['count'], p.get('glove_cos'), p['true_label'], p['pred_label']) for p in confusion_pairs
                       if p.get('glove_cos') is not None]
     if not pairs_with_cos:
         ax.text(0.5, 0.5, 'No GloVe similarity data', ha='center', va='center')
         return
 
     counts = np.array([x[0] for x in pairs_with_cos], dtype=np.float32)
-    cos    = np.array([x[1] for x in pairs_with_cos], dtype=np.float32)
+    cos = np.array([x[1] for x in pairs_with_cos], dtype=np.float32)
     labels = [(x[2], x[3]) for x in pairs_with_cos]
 
     # Colour by semantic category
     colors = []
     for c in cos:
         if c >= 0.7:
-            colors.append('#e74c3c')   # synonym — red
+            colors.append('#e74c3c')  # synonym — red
         elif c >= 0.4:
-            colors.append('#f39c12')   # related — amber
+            colors.append('#f39c12')  # related — amber
         else:
-            colors.append('#3498db')   # unrelated — blue
+            colors.append('#3498db')  # unrelated — blue
 
     sizes = 10 + (counts / (counts.max() + 1e-6)) * 120
 
@@ -582,10 +556,8 @@ def plot_count_vs_cosine(ax, confusion_pairs, top_n):
         # Abbreviate long labels to keep annotations readable
         tl_s = tl[:12] + '…' if len(tl) > 13 else tl
         pl_s = pl[:12] + '…' if len(pl) > 13 else pl
-        ax.annotate(f'{tl_s}→{pl_s}',
-                    (cos[i], counts[i]),
-                    fontsize=5, alpha=0.85,
-                    xytext=(3, 2), textcoords='offset points')
+        ax.annotate(f'{tl_s}→{pl_s}', (cos[i], counts[i]), fontsize=5, alpha=0.85, xytext=(3, 2),
+                    textcoords='offset points')
 
     # Threshold lines
     ax.axvline(0.4, color='#f39c12', linestyle='--', linewidth=0.8, alpha=0.7)
@@ -593,11 +565,12 @@ def plot_count_vs_cosine(ax, confusion_pairs, top_n):
 
     # Legend patches
     import matplotlib.patches as mpatches
-    ax.legend(handles=[
-        mpatches.Patch(color='#e74c3c', label='synonym ≥ 0.70'),
-        mpatches.Patch(color='#f39c12', label='related  0.40–0.69'),
-        mpatches.Patch(color='#3498db', label='unrelated < 0.40'),
-    ], fontsize=7, loc='upper right')
+    ax.legend(
+        handles=[
+            mpatches.Patch(color='#e74c3c', label='synonym ≥ 0.70'),
+            mpatches.Patch(color='#f39c12', label='related  0.40–0.69'),
+            mpatches.Patch(color='#3498db', label='unrelated < 0.40'),
+        ], fontsize=7, loc='upper right')
 
     ax.set_xlabel('GloVe cosine similarity')
     ax.set_ylabel('Co-occurrence count')
@@ -610,39 +583,37 @@ def plot_count_vs_cosine(ax, confusion_pairs, top_n):
 # ---------------------------------------------------------------------------
 def plot_overview(data, args):
     names, tp, fp, fn, precision, recall, f1, gt_freq = per_class_arrays(data)
-    serial  = data.get('serial', '?')
-    top_n   = args.top
+    serial = data.get('serial', '?')
+    top_n = args.top
 
     has_cos = any(p.get('glove_cos') is not None for p in data['confusion_pairs'])
 
     # Expand to 3 rows when GloVe cosine data is available
     n_rows = 3 if has_cos else 2
-    fig_h  = 24 if has_cos else 16
+    fig_h = 24 if has_cos else 16
 
     fig = plt.figure(figsize=(20, fig_h))
     fig.suptitle(
         f'Token evaluation — model v{serial}  |  '
         f'{data["n_active_classes"]} active classes  |  '
         f'{data["n_confusion_pairs"]} confusion pairs  |  '
-        f'{data["total_samples"]} validation samples',
-        fontsize=11, fontweight='bold', y=0.99)
+        f'{data["total_samples"]} validation samples', fontsize=11, fontweight='bold', y=0.99)
 
-    gs = fig.add_gridspec(n_rows, 2, hspace=0.40, wspace=0.30,
-                          left=0.07, right=0.97, top=0.96, bottom=0.04)
+    gs = fig.add_gridspec(n_rows, 2, hspace=0.40, wspace=0.30, left=0.07, right=0.97, top=0.96, bottom=0.04)
 
-    ax_bar   = fig.add_subplot(gs[0, 0])
-    ax_hist  = fig.add_subplot(gs[0, 1])
-    ax_pr    = fig.add_subplot(gs[1, 0])
+    ax_bar = fig.add_subplot(gs[0, 0])
+    ax_hist = fig.add_subplot(gs[0, 1])
+    ax_pr = fig.add_subplot(gs[1, 0])
     ax_table = fig.add_subplot(gs[1, 1])
 
-    plot_top_classes(ax_bar,   names, tp, fp, fn, f1, gt_freq, top_n)
+    plot_top_classes(ax_bar, names, tp, fp, fn, f1, gt_freq, top_n)
     plot_f1_histogram(ax_hist, f1, data['n_active_classes'])
     plot_precision_recall(ax_pr, names, precision, recall, f1, gt_freq, top_n)
     plot_confusion_table(ax_table, data['confusion_pairs'], top_n)
 
     if has_cos:
-        ax_cos_hist  = fig.add_subplot(gs[2, 0])
-        ax_cos_scat  = fig.add_subplot(gs[2, 1])
+        ax_cos_hist = fig.add_subplot(gs[2, 0])
+        ax_cos_scat = fig.add_subplot(gs[2, 1])
         plot_glove_cos_histogram(ax_cos_hist, data['confusion_pairs'])
         plot_count_vs_cosine(ax_cos_scat, data['confusion_pairs'], top_n)
 
@@ -692,8 +663,8 @@ def main():
         matplotlib.use('Agg')
 
     plot_overview(data, args)
-    plot_confusion_heatmap(data['confusion_pairs'], args.heatmap_top,
-                           data.get('serial', '?'), args.output, args.no_show)
+    plot_confusion_heatmap(data['confusion_pairs'], args.heatmap_top, data.get('serial', '?'), args.output,
+                           args.no_show)
 
     print('Done.')
 
