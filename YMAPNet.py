@@ -1593,7 +1593,7 @@ class YMAPNet:
     def __init__(self, modelPath, threshold=30, keypoint_threshold=50.0, engine="tensorflow", profiling=False,
                  illustrate=False, pruneTokens=False, monitor=list(), window_arrangement=list(), screen_w=3840,
                  screen_h=2400, depth_iterations=10, estimate_person_id=True, resolve_skeleton=True, vram_limit=4800,
-                 compileModel=True, show=True):
+                 compileModel=True, show=True, addedNoise=0.0):
         self.model_path = '2d_pose_estimation'
         self.cfg = loadJSONConfiguration("%s/configuration.json" % self.model_path)
         self.serial = self.cfg["serial"]
@@ -1652,7 +1652,7 @@ class YMAPNet:
         self.saveFrame = 0
         #---------------------------------------------------------------------
         self.illustrate = illustrate
-        self.addedNoise = 0.0
+        self.addedNoise = addedNoise
         #---------------------------------------------------------------------
         self.skeletons = None
         self.vocabulary = None
@@ -2130,6 +2130,13 @@ class YMAPNet:
         #visualize_activity(self.activity, self.labels, threshold=self.activityThreshold)
         #      pass
 
+        # Person IDs and the Unsegmented preview are only meaningful from
+        # serial 260 onwards (output-channel layout changed). Skip them on legacy models.
+        try:
+            _show_person_extras = int(self.cfg.get('serial', '0')) >= 260
+        except (ValueError, TypeError):
+            _show_person_extras = True  # unknown serial → assume modern
+
         # Visualize the heatmaps on the source image
         if show:
             visualize_heatmaps(self.cfg, self.instanceLabels, self.imageIn, self.frameNumber, self.heatmapsOut,
@@ -2171,7 +2178,8 @@ class YMAPNet:
             #print(f"DEBUG union_segms: dtype={union_segms.dtype}, min={np.min(union_segms)}, max={np.max(union_segms)}")
             _h, _w = union_segms.shape[:2]
             cv2.imshow('Class segmentation Union', cv2.resize(union_segms, (int(_w * 1.5), int(_h * 1.5))))
-            cv2.imshow('Unsegmented', (not_segmented * 255).astype(np.uint8))
+            if _show_person_extras:
+                cv2.imshow('Unsegmented', (not_segmented * 255).astype(np.uint8))
 
         human_segms = None
         if "Face" in self.cfg.get('heatmaps', []):
@@ -2238,7 +2246,7 @@ class YMAPNet:
 
         if (not self.labeled_map is None) and (not self.bounding_boxes is None):
             labelsVisualiation = draw_labeled_blobs(self.labeled_map, self.bounding_boxes)
-            if show:
+            if show and _show_person_extras:
                 cv2.imshow('Person IDs', labelsVisualiation)
 
         if (self.description):
@@ -2354,7 +2362,7 @@ class YMAPNet:
                 _pri("Overlay", visRGB)
                 if human_segms is not None:
                     _pri("Person Union", human_segms)
-                if (self.labeled_map is not None) and (self.bounding_boxes is not None):
+                if (self.labeled_map is not None) and (self.bounding_boxes is not None) and _show_person_extras:
                     _pri("Person IDs", labelsVisualiation)
                 primary_specs.append(("Skeletons", 640, 480))
                 if self.description:
@@ -2372,7 +2380,8 @@ class YMAPNet:
                 _pro("Joint Heatmap Union", union_joints, scale=1.5)
                 _pro("PAFs Union", union_pafs, scale=1.5)
                 _pro("Class segmentation Union", union_segms, scale=1.5)
-                _pro("Unsegmented", not_segmented)
+                if _show_person_extras:
+                    _pro("Unsegmented", not_segmented)
                 if normals_on:
                     _pro("Improved Depth", improved_depth, scale=1.5)
                     _pro("Combined Normals", self.heatmapsOut[self.chanNormalX], scale=1.5)

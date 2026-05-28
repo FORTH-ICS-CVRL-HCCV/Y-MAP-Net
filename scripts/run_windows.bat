@@ -93,20 +93,12 @@ if exist "%MODEL_DIR%\configuration.json" (
     echo        Downloading model from %MODEL_URL% ...
     echo        This may take a few minutes depending on your connection.
 
-    :: curl.exe ships with Windows 10 1803+. The .exe suffix avoids
-    :: conflicts with any PowerShell curl alias.
-    curl.exe -L --progress-bar -o "%MODEL_ZIP%" "%MODEL_URL%"
+    :: Use the cross-platform helpers in tools.py (stdlib urllib + zipfile).
+    :: Falls back to curl.exe/unzip if those happen to be on PATH.
+    cd /d "%REPO_DIR%"
+    python -c "from tools import download, unzip; download(r'%MODEL_URL%', r'%MODEL_ZIP%'); unzip(r'%MODEL_ZIP%', r'%REPO_DIR%')"
     if errorlevel 1 (
-        echo ERROR: Download failed. Check your internet connection.
-        goto :error
-    )
-    echo        Download complete. Extracting...
-
-    :: Expand-Archive is available on all PowerShell 5+ systems (Win10+).
-    powershell -NoProfile -Command ^
-        "Expand-Archive -Path '%MODEL_ZIP%' -DestinationPath '%REPO_DIR%' -Force"
-    if errorlevel 1 (
-        echo ERROR: Extraction failed.
+        echo ERROR: Download or extraction failed. Check your internet connection.
         goto :error
     )
 

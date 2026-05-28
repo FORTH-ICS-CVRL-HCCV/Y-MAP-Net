@@ -34,6 +34,7 @@ def load_keypoints_model(model_path, compile=True):
     from tools import bcolors
     from NNLosses import HeatmapDistanceMetric, GloVeMSELoss, HeatmapCoreLoss, WeightedBinaryCrossEntropy, HeatmapDistanceMetricPartial, CustomTopKCategoricalAccuracy
     print(bcolors.OKGREEN, "Loading %s model.. " % model_path, bcolors.ENDC)
+    print(bcolors.OKGREEN, "This takes a while to compile the model and ensure the best possible performance.. ", bcolors.ENDC)
     try:
         #Regular keras loading until V3 that breaks
         import keras
@@ -1010,7 +1011,7 @@ def build_unet(inputHeight, inputWidth, inputChannels, outputWidth, outputHeight
                gaussianNoiseSTD=0.0, dropoutRate=0.0, nextTokenStrength=0.5, quantize=False, serial="",
                useDescriptors=False, depth_channel_start=-1, depth_channel_end=-1, useASPPBridge=False,
                useDepthRefinementHead=False, useCoordConv=False, useBottleneckAttention=False, convBlockRepetitions=2,
-               deconCheckerboardSmoothing=''):
+               deconCheckerboardSmoothing='', useDepthNormalsUncertainty=False):
 
     #Uncomment to go "single
     ###if (num16BitHeatmaps>0):
@@ -1067,7 +1068,11 @@ def build_unet(inputHeight, inputWidth, inputChannels, outputWidth, outputHeight
     #   'bilinear' → bilinear upsample + 3×3 Conv2D
     # The empty-string-to-'deconv' mapping keeps the config value human-readable
     # ("not set" vs an explicit mode name) while keeping the internal code clean.
-    _upsampling_mode = deconCheckerboardSmoothing if deconCheckerboardSmoothing else 'deconv'
+    _upsampling_mode = 'deconv'
+    if deconCheckerboardSmoothing!="":
+        _upsampling_mode = deconCheckerboardSmoothing
+
+
     decoder_layers = [b]
     for i in range(decoderRepetitions):
         thisLayerFilters = int(baseChannels * (decoderGrowthBase**(encoderRepetitions - i - 1)))
@@ -1156,6 +1161,22 @@ def build_unet(inputHeight, inputWidth, inputChannels, outputWidth, outputHeight
             heatmap_output = Cropping2D(
                 cropping=((crop_height // 2, crop_height - (crop_height // 2)),
                           (crop_width // 2, crop_width - (crop_width // 2))), name="final_crop")(heatmap_output)
+    # Depth+Normals aleatoric uncertainty head (optional)
+    # hm_nll output: [B, H, W, 2*C] where first C channels = mean (tanh space),
+    # last C channels = log-variance (unconstrained). Supervised by DepthNormalsNLLLoss.
+    hm_nll = None
+    _unc_enabled = (useDepthNormalsUncertainty and depth_channel_start >= 0
+                    and depth_channel_end > depth_channel_start
+                    and depth_channel_end <= numKeypoints)
+    if _unc_enabled:
+        _num_unc = depth_channel_end - depth_channel_start
+        # Tap heatmap_output in tanh space [-1,1] (before Rescaling below)
+        hm_dn_tanh   = heatmap_output[..., depth_channel_start:depth_channel_end]
+        hm_unc_logvar = Conv2D(_num_unc, 1, padding='same', name='hm_unc')(pixelwise)
+        hm_nll = Concatenate(name='hm_nll')([hm_dn_tanh, hm_unc_logvar])
+        print(f"Depth+Normals uncertainty head: {_num_unc} channels "
+              f"(depth+normals ch {depth_channel_start}–{depth_channel_end - 1})")
+
     #Scale back to min/max Heatmap values ( [-120..120] )
     scale_factor = max(abs(minHeatmapValue), abs(maxHeatmapValue))
     # Only force float32 under mixed precision; when global policy is already
@@ -1224,6 +1245,8 @@ def build_unet(inputHeight, inputWidth, inputChannels, outputWidth, outputHeight
                 modelOutputs.append(descriptor_outputs)
             modelOutputs.extend(glove_outputs)
             modelOutputs.append(token_output)
+            if hm_nll is not None:
+                modelOutputs.append(hm_nll)
             model = Model(inputs, modelOutputs, name="Y-Net-v%s" % serial)
         else:
             modelOutputs.append(heatmap_output)
@@ -1231,14 +1254,23 @@ def build_unet(inputHeight, inputWidth, inputChannels, outputWidth, outputHeight
                 modelOutputs.append(descriptor_outputs)
             modelOutputs.extend(glove_outputs)
             modelOutputs.append(token_output)
+            if hm_nll is not None:
+                modelOutputs.append(hm_nll)
             model = Model(inputs, modelOutputs, name="Y-Net-v%s" % serial)
     else:
         if (heatmaps_16bit_declared):
             modelOutputs.append(heatmap_output)
             modelOutputs.append(heatmaps_16bit)
+            if hm_nll is not None:
+                modelOutputs.append(hm_nll)
             model = Model(inputs, modelOutputs, name="U-Net-v%s" % serial)
         else:
-            model = Model(inputs, heatmap_output, name="U-Net-v%s" % serial)
+            if hm_nll is not None:
+                modelOutputs.append(heatmap_output)
+                modelOutputs.append(hm_nll)
+                model = Model(inputs, modelOutputs, name="U-Net-v%s" % serial)
+            else:
+                model = Model(inputs, heatmap_output, name="U-Net-v%s" % serial)
 
     # Quantization aware model ( if it is enabled..)
     #----------------------------------------------------------------------

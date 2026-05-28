@@ -52,7 +52,7 @@ except Exception as e:
     print("Before running this script")
     sys.exit(1)
 #-------------------------------------------------------------------------------
-from NNLosses import RSquaredMetric, HeatmapDistanceMetric, HeatmapCoreLoss, VanillaMSELossSimple, AdamWCautious
+from NNLosses import RSquaredMetric, HeatmapDistanceMetric, HeatmapCoreLoss, VanillaMSELossSimple, AdamWCautious, DepthNormalsNLLLoss
 from tools import bcolors, read_json_file, checkIfPathExists, checkIfFileExists, convert_bytes
 
 
@@ -141,7 +141,8 @@ def createSelectedModel(cfg, testModel=True):
                            useCoordConv=cfg.get('useCoordConv',False),
                            useBottleneckAttention=cfg.get('useBottleneckAttention',False),
                            convBlockRepetitions=cfg.get('convBlockRepetitions',2),
-                           deconCheckerboardSmoothing=cfg.get('deconCheckerboardSmoothing','')
+                           deconCheckerboardSmoothing=cfg.get('deconCheckerboardSmoothing',''),
+                           useDepthNormalsUncertainty=cfg.get('heatmapAddDepthNormalsUncertainty', False)
                            )
         
         # "deconCheckerboardSmoothing": "" (default/omitted) → Conv2DTranspose,
@@ -371,6 +372,7 @@ if __name__ == '__main__':
                 sys.exit(0)
                 tf.saved_model.save(model, 'test_model')
                 model.save('test_model/model.keras')
+                print(bcolors.OKGREEN, "Test successful!", bcolors.ENDC)
                 sys.exit(0)
 
     #--------------------------------------------------------------------------------------------------------------------------------
@@ -843,6 +845,10 @@ if __name__ == '__main__':
                                                           weight=cfg["lossWeightMultihotTokens"])
             losses['hm'] = hmloss
             losses['hm_16b'] = hmloss16b
+            if cfg.get('heatmapAddDepthNormalsUncertainty', False):
+                losses['hm_nll'] = DepthNormalsNLLLoss(
+                    scale=float(cfg.get('heatmapActive', 120)),
+                    weight=cfg.get('lossWeightDepthNormalsUncertainty', 1.0))
             if cfg.get('outputDescriptors', False):
                 from NNLosses import DescriptorLoss
                 losses['descriptors'] = DescriptorLoss(weight=cfg.get('lossWeightDescriptors', 1.0))

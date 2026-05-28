@@ -593,6 +593,15 @@ class TrainingDataGenerator(keras.utils.PyDataset):
                 npArrayOutputList["hm"] = npArrayOut
                 if npArrayOut16Bit is not None:
                     npArrayOutputList["hm_16b"] = npArrayOut16Bit
+                if self.cfg.get('heatmapAddDepthNormalsUncertainty', False) and npArrayOut is not None:
+                    # Slice depth+normals channels for the hm_nll NLL head.
+                    # DepthNormalsNLLLoss normalises by scale internally, so we pass
+                    # the raw values here (same convention as "hm" above).
+                    _DN = {'depthmap', 'normalX', 'normalY', 'normalZ'}
+                    _heatmaps = self.cfg.get('heatmaps', [])
+                    _dn_idx = sorted(i for i, h in enumerate(_heatmaps) if h in _DN)
+                    if _dn_idx:
+                        npArrayOutputList["hm_nll"] = npArrayOut[..., _dn_idx[0]:_dn_idx[-1] + 1]
 
             log_thread_progress("dataloader_python", 0, "update_cpu_batch")
             return npArrayIn, npArrayOutputList

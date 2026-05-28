@@ -1182,6 +1182,41 @@ class HeatmapCoreLoss(keras.losses.Loss):
 
 
 #-------------------------------------------------------------------------------
+class DepthNormalsNLLLoss(keras.losses.Loss):
+    """Aleatoric uncertainty loss for the depth+normals hm_nll output.
+
+    The model emits hm_nll with shape [B, H, W, 2*C]:
+      - first C channels : mean prediction  (tanh space, same as hm before Rescaling)
+      - last  C channels : log-variance     (unconstrained)
+
+    y_true has shape [B, H, W, C]: the raw depth+normals ground-truth in the
+    same integer scale as the hm output (divided by `scale` inside call to get
+    it to tanh space for a numerically consistent NLL).
+
+    NLL = 0.5 * exp(-log_var) * (gt - mu)^2 + 0.5 * log_var
+    """
+
+    def __init__(self, scale=120.0, weight=1.0, **kwargs):
+        super().__init__(**kwargs)
+        self.scale = float(scale)
+        self.weight = weight
+
+    def call(self, y_true, y_pred):
+        y_pred  = tf.cast(y_pred, tf.float32)
+        gt      = tf.cast(y_true, tf.float32) / self.scale  # → tanh space [-1, 1]
+        n       = tf.shape(y_pred)[-1] // 2
+        mu      = y_pred[..., :n]
+        log_var = tf.clip_by_value(y_pred[..., n:], -10.0, 10.0)
+        nll     = 0.5 * tf.exp(-log_var) * tf.square(gt - mu) + 0.5 * log_var
+        return tf.reduce_mean(nll) * self.weight
+
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update({'scale': self.scale, 'weight': self.weight})
+        return cfg
+
+
+#-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------
 #-------------------------------------------------------------------------------

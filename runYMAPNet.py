@@ -13,10 +13,9 @@ import glob
 import os
 import re
 import sys
-import subprocess
 import argparse
 import time
-from tools import bcolors
+from tools import bcolors, run_tool, rm_rf, download, unzip, upload_file, warn_unsupported_platform
 
 try:
     import cv2
@@ -26,6 +25,18 @@ except Exception as e:
     print("An exception occurred:", str(e))
     print("Issue:\n source venv/bin/activate\nBefore running this script")
     sys.exit(1)
+
+# =============================================================================
+# Constants
+# =============================================================================
+MAX_BLUR_KERNEL               = 40                # capped Gaussian kernel size
+MAX_CONSECUTIVE_READ_FAILURES = 100               # give up after this many cap.read() misses
+FALLBACK_SCREEN_RES           = (3840, 2400)      # used when every detect method fails
+DEMO_SCREENSHOT_REGION        = "800,10,1157,570" # scrot crop window for the 'a' hotkey
+DEFAULT_UPLOAD_URL            = "http://ammar.gr/datasets/uploads.php"
+DEFAULT_MODEL_URL             = "http://ammar.gr/2d_pose_estimation.zip"
+MODEL_ZIP_NAME                = "2d_pose_estimation.zip"
+
 
 # =============================================================================
 # Argument parser
@@ -69,8 +80,10 @@ def build_arg_parser():
                    help="Window arrangement entry (repeatable)")
     p.add_argument("--monitor", nargs=4, action="append", default=[], metavar=("HM", "X", "Y", "LABEL"),
                    help="Heatmap monitor entry (repeatable)")
-    p.add_argument("--upload-url", default="http://ammar.gr/datasets/uploads.php", metavar="URL",
+    p.add_argument("--upload-url", default=DEFAULT_UPLOAD_URL, metavar="URL",
                    help="Frame upload endpoint")
+    p.add_argument("--model-url", default=DEFAULT_MODEL_URL, metavar="URL",
+                   help="Model zip download URL used with --update")
     p.add_argument("--screen", nargs=2, type=int, default=None, metavar=("W", "H"),
                    help="Physical display resolution for auto window tiling (auto-detected if omitted)")
     p.add_argument("--fallen-person-detector", action="store_true", dest="fallen_person_detector",
@@ -113,6 +126,12 @@ class LiveStreamSyncer:
     def __init__(self, cap, nominal_fps: float):
         self.cap = cap
         self.fps = max(nominal_fps, 1.0)
+        self._t_last = time.perf_counter()
+
+    def sync_start(self):
+        """Reset the drift clock to now. Call once after setup (model load, etc.)
+        finishes and right before the steady-state read loop begins, so the
+        startup gap isn't counted as accumulated lag on the first read."""
         self._t_last = time.perf_counter()
 
     def read(self):
@@ -188,27 +207,28 @@ def save_and_upload_frame(frame, url):
     print("Saving frame")
     cv2.imwrite('frame.jpg', frame)
     print("Uploading frame to", url)
-    subprocess.run(["curl", "-F", "file=@frame.jpg", url], check=False)
+    try:
+        upload_file(url, 'frame.jpg')
+    except Exception as e:
+        print(f"Upload failed: {e}")
 
 
 def prevent_screensaver():
-    subprocess.run(
-        "xdotool mousemove_relative -- 1 0 && sleep 1 && xdotool mousemove_relative -- -1 0",
-        shell=True,
-        check=False,
-    )
+    run_tool(["xdotool", "mousemove_relative", "--", "1", "0"])
+    time.sleep(1)
+    run_tool(["xdotool", "mousemove_relative", "--", "-1", "0"])
 
 
 def disable_screensaver():
-    subprocess.run(["xset", "s", "off"], check=False)
+    run_tool(["xset", "s", "off"])
 
 
 def enable_screensaver():
-    subprocess.run(["xset", "s", "on"], check=False)
+    run_tool(["xset", "s", "on"])
 
 
 def screenshot(framenumber):
-    subprocess.run(["scrot", f"colorFrame_0_{framenumber:05}.png"], check=False)
+    run_tool(["scrot", f"colorFrame_0_{framenumber:05}.png"])
 
 
 # =============================================================================
@@ -309,42 +329,43 @@ def detect_screen_resolution():
       3. xdpyinfo 'dimensions: WxH pixels'.
       4. tkinter root window geometry.
 
-    Falls back to (3840, 2400) if every method fails.
+    Falls back to FALLBACK_SCREEN_RES if every method fails.
     """
     # 1. xrandr — bounding box of all active (mode-set) monitors
     try:
-        out = subprocess.run(["xrandr"], capture_output=True, text=True, timeout=3)
+        out = run_tool(["xrandr"], capture_output=True, timeout=3)
+        if out is not None:
+            # Match lines like:  HDMI-1 connected [primary] 1920x1080+3840+0 (…)
+            # Groups:  (width, height, x_offset, y_offset)
+            monitors = re.findall(
+                r'\bconnected\b(?:\s+primary)?\s+(\d+)x(\d+)\+(\d+)\+(\d+)',
+                out.stdout,
+            )
+            if monitors:
+                total_w = max(int(mx) + int(mw) for mw, mh, mx, my in monitors)
+                total_h = max(int(my) + int(mh) for mw, mh, mx, my in monitors)
+                print(f"Screen resolution computed from {len(monitors)} active "
+                      f"xrandr monitor(s): {total_w}x{total_h}")
+                return total_w, total_h
 
-        # Match lines like:  HDMI-1 connected [primary] 1920x1080+3840+0 (…)
-        # Groups:  (width, height, x_offset, y_offset)
-        monitors = re.findall(
-            r'\bconnected\b(?:\s+primary)?\s+(\d+)x(\d+)\+(\d+)\+(\d+)',
-            out.stdout,
-        )
-        if monitors:
-            total_w = max(int(mx) + int(mw) for mw, mh, mx, my in monitors)
-            total_h = max(int(my) + int(mh) for mw, mh, mx, my in monitors)
-            print(f"Screen resolution computed from {len(monitors)} active "
-                  f"xrandr monitor(s): {total_w}x{total_h}")
-            return total_w, total_h
-
-        # Fallback within xrandr: 'Screen 0: current W x H'
-        m = re.search(r'current\s+(\d+)\s*x\s*(\d+)', out.stdout)
-        if m:
-            w, h = int(m.group(1)), int(m.group(2))
-            print(f"Screen resolution detected via xrandr (Screen 0 current): {w}x{h}")
-            return w, h
+            # Fallback within xrandr: 'Screen 0: current W x H'
+            m = re.search(r'current\s+(\d+)\s*x\s*(\d+)', out.stdout)
+            if m:
+                w, h = int(m.group(1)), int(m.group(2))
+                print(f"Screen resolution detected via xrandr (Screen 0 current): {w}x{h}")
+                return w, h
     except Exception:
         pass
 
     # 2. xdpyinfo
     try:
-        out = subprocess.run(["xdpyinfo"], capture_output=True, text=True, timeout=3)
-        m = re.search(r'dimensions:\s+(\d+)x(\d+)', out.stdout)
-        if m:
-            w, h = int(m.group(1)), int(m.group(2))
-            print(f"Screen resolution detected via xdpyinfo: {w}x{h}")
-            return w, h
+        out = run_tool(["xdpyinfo"], capture_output=True, timeout=3)
+        if out is not None:
+            m = re.search(r'dimensions:\s+(\d+)x(\d+)', out.stdout)
+            if m:
+                w, h = int(m.group(1)), int(m.group(2))
+                print(f"Screen resolution detected via xdpyinfo: {w}x{h}")
+                return w, h
     except Exception:
         pass
 
@@ -360,9 +381,9 @@ def detect_screen_resolution():
     except Exception:
         pass
 
-    fallback = (3840, 2400)
-    print(f"Could not detect screen resolution; using fallback {fallback[0]}x{fallback[1]}")
-    return fallback
+    print(f"Could not detect screen resolution; using fallback "
+          f"{FALLBACK_SCREEN_RES[0]}x{FALLBACK_SCREEN_RES[1]}")
+    return FALLBACK_SCREEN_RES
 
 
 from appFallDetection import _run_fallen_person_detector, _save_fallen_frame, _print_fallen_result
@@ -417,10 +438,8 @@ def build_estimator(args):
         resolve_skeleton=args.skeleton,
         vram_limit=args.vram,
         compileModel=False,  # skip optimizer state loading — not needed for inference
-        show=show)
-    # noise is [0,1]; add_noise_to_image expects the same range
-    estimator.addedNoise = np.clip(args.noise, 0.0, 1.0)
-    estimator.show = show
+        show=show,
+        addedNoise=float(np.clip(args.noise, 0.0, 1.0)))
 
     tiler = PoseEstimatorTiler(
         estimator,
@@ -448,7 +467,7 @@ def preprocess_frame(frame, args, estimator):
         bigBorder = frame.shape[0] * (args.border / estimator.cfg['inputHeight'])
         frame = add_horizontal_stripes(frame, int(bigBorder))
 
-    blur = min(40, abs(args.blur))
+    blur = min(MAX_BLUR_KERNEL, abs(args.blur))
     if blur:
         frame = apply_blur_to_image(frame, blur_strength=blur)
 
@@ -479,10 +498,8 @@ def handle_keypress(key, args, estimator, frame, pose_matcher):
         print("Left Arrow")
     elif key in KEY_SCREENSHOT:
         print("Save demo screenshot")
-        subprocess.run(
-            ["scrot", "-a", "800,10,1157,570", f"scrot{estimator.frameNumber}.png"],
-            check=False,
-        )
+        run_tool(["scrot", "-a", DEMO_SCREENSHOT_REGION,
+                  f"scrot{estimator.frameNumber}.png"])
     elif key in KEY_QUIT:
         print("Terminating after receiving keyboard request")
         return True
@@ -499,7 +516,7 @@ def handle_keypress(key, args, estimator, frame, pose_matcher):
 
 def encode_video(input_pattern, output, cleanup_glob, fps=25):
     """Run ffmpeg over a numbered PNG sequence and remove the source frames."""
-    subprocess.run([
+    run_tool([
         "ffmpeg", "-nostdin",
         "-framerate", str(fps),
         "-i", input_pattern,
@@ -508,7 +525,7 @@ def encode_video(input_pattern, output, cleanup_glob, fps=25):
         "-pix_fmt", "yuv420p",
         "-threads", "8",
         output,
-    ], check=False)
+    ])
     for f in glob.glob(cleanup_glob):
         os.remove(f)
 
@@ -551,6 +568,9 @@ def main_pose_estimation(args):
     eco_threshold = args.eco[0]
     eco_max_skip = int(args.eco[1]) if len(args.eco) > 1 else 20
 
+    if is_live:
+        _syncer.sync_start()
+
     failedFrames = 0
     try:
         while True:
@@ -558,7 +578,7 @@ def main_pose_estimation(args):
             if not ret:
                 print("Failed to capture frame")
                 failedFrames += 1
-                if failedFrames > 100:
+                if failedFrames > MAX_CONSECUTIVE_READ_FAILURES:
                     break
                 continue
 
@@ -630,6 +650,8 @@ if __name__ == '__main__':
     parser = build_arg_parser()
     args = parser.parse_args()
 
+    warn_unsupported_platform()
+
     if args.fast:
         args.depth_iterations = 0
         args.no_person_id = True
@@ -642,11 +664,12 @@ if __name__ == '__main__':
         args.screen = list(detect_screen_resolution())
 
     if args.update:
-        subprocess.run(["rm", "-rf", "2d_pose_estimation/"], check=False)
-        if os.path.exists("2d_pose_estimation.zip"):
-            os.remove("2d_pose_estimation.zip")
-        subprocess.run(["wget", "http://ammar.gr/2d_pose_estimation.zip"], check=True)
-        subprocess.run(["unzip", "2d_pose_estimation.zip"], check=True)
+        rm_rf("2d_pose_estimation")
+        rm_rf(MODEL_ZIP_NAME)
+        print(f"Downloading {args.model_url} -> {MODEL_ZIP_NAME}")
+        download(args.model_url, MODEL_ZIP_NAME)
+        print(f"Extracting {MODEL_ZIP_NAME}")
+        unzip(MODEL_ZIP_NAME)
 
     if args.fallen_person_detector:
         for f in glob.glob("fallen_*.jpg"):

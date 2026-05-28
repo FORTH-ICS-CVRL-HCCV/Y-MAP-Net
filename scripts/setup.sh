@@ -16,8 +16,11 @@ if [ "$USE_VENV" -eq "1" ]; then
 #If we are not in collab mode.. :
 
 
-#Simple dependency checker that will apt-get stuff if something is missing
-# sudo apt-get install python3-pip python3-venv build-essential wget unzip libjpeg-dev libpng-dev libzstd-dev liblz4-dev libpthread-stubs0-dev
+#Simple dependency checker that will apt-get stuff if something is missing.
+# Note: wget and unzip are now OPTIONAL — the new tools.py wrappers use the
+# Python stdlib (urllib + zipfile) first and only fall back to these binaries
+# if the stdlib path fails. They remain in the list so existing scripts under
+# scripts/ that shell out directly (downloadPretrained.sh etc.) keep working.
 SYSTEM_DEPENDENCIES="python3-pip python3-venv build-essential wget unzip libjpeg-dev libpng-dev libzstd-dev liblz4-dev libpthread-stubs0-dev"
 
 for REQUIRED_PKG in $SYSTEM_DEPENDENCIES
@@ -83,6 +86,11 @@ else
 
 
 
+  #Translation Layer
+  #python3 -m pip install argostranslate
+  #argospm update
+  #argospm install translate-en_el
+  #argos-translate --from en --to el "Hello World!"
 
 
   #python3 -m pip install nvidia-cudnn-cu12 tensorflow==2.17.0 tensorflow-model-optimization tf_keras numpy numba tensorboard tensorboard-plugin-profile tf2onnx onnxruntime onnx opencv-python wget gradio

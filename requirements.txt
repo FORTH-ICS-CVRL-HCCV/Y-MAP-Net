@@ -27,3 +27,9 @@ opencv-python
 # UI / demos
 gradio
 
+# Cross-platform system wrappers in tools.py (download/unzip/upload/rm_rf/run_tool)
+# rely only on the Python stdlib (urllib, zipfile, shutil, mimetypes), so no
+# additional Python package is required here. External CLI tools — wget/curl/
+# unzip on Linux/macOS, curl.exe/Expand-Archive on Windows — are tried as
+# fallbacks only when the stdlib path fails.
+
