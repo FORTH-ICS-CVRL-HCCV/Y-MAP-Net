@@ -563,6 +563,15 @@ class JAXExecutor():
         outputChannels=18,
     ):
         print("Using JAX Runtime")
+        # These must be set before TF/JAX C extensions are loaded.
+        # Disable JAX's upfront GPU pre-allocation so TF and XLA share VRAM.
+        os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+        # Use CUDA's async pool allocator — handles fragmentation far better than
+        # the default BFC allocator, which lets XLA get the ~4 GB contiguous block
+        # it needs for the compiled inference kernel on a 6 GB GPU.
+        os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
+        # Let TF grow its allocation incrementally rather than reserving everything.
+        os.environ.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
         # ── deferred core import ──────────────────────────────────────
         import jax
         import jax.numpy as jnp
@@ -594,9 +603,18 @@ class JAXExecutor():
             print('       Install with:  pip install jax jaxlib tensorflow')
             raise
 
+        # Allow TF to grow its GPU allocation on demand rather than grabbing
+        # all remaining VRAM at init time (JAX already owns part of the device).
+        for gpu in tf.config.list_physical_devices('GPU'):
+            try:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            except RuntimeError:
+                pass  # GPU already initialised — growth setting has no effect
+
         from NNModel import load_keypoints_model
+        # compile=False skips loading Adam optimizer state (~2× model params in GPU memory).
         model, self.input_size, self.output_size, self.numberOfHeatmaps = \
-            load_keypoints_model(modelPath)
+            load_keypoints_model(modelPath, compile=False)
 
         # For the .keras path there is no JAX-native JIT benefit: call_tf without
         # jax.jit is pure eager TF dispatch, and call_tf under jax.jit fails when
@@ -637,6 +655,19 @@ class JAXExecutor():
             from jax.experimental import jax2tf as _jax2tf_reg  # noqa: registers CallTfEffect
         except ImportError:
             pass
+
+        # Persistent XLA compilation cache — compiled CUDA kernels are written to
+        # disk on the first run and reloaded on subsequent runs, cutting the ~2-min
+        # JIT warmup down to a few seconds.  The cache is keyed by computation
+        # hash so it auto-invalidates whenever the model or JAX version changes.
+        _cache_dir = os.path.join(os.path.dirname(os.path.abspath(modelPath)), '.jax_cache')
+        try:
+            jax.config.update('jax_compilation_cache_dir', _cache_dir)
+            jax.config.update('jax_persistent_cache_min_compile_time_secs', 1.0)
+            os.makedirs(_cache_dir, exist_ok=True)
+            print(f'JAX compilation cache: {_cache_dir}')
+        except Exception:
+            pass  # cache is optional — non-fatal if unsupported
 
         with open(modelPath, 'rb') as f:
             payload = f.read()
