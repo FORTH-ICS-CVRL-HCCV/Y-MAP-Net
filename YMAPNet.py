@@ -13,6 +13,42 @@ import os
 import sys
 import json
 from tools import bcolors
+
+
+def _get_qt_scale() -> float:
+    """Return the effective Qt window-coordinate scale factor.
+
+    xrandr / detect_screen_resolution() returns *physical* pixels.
+    cv2.moveWindow() / cv2.resizeWindow() operate in *logical* pixels
+    (physical / scale).  When QT_SCALE_FACTOR != 1 or
+    QT_AUTO_SCREEN_SCALE_FACTOR != 0 the two spaces diverge and every
+    pixel coordinate we compute must be divided by this value before
+    passing it to OpenCV's HighGUI.
+
+    Precedence (mirrors Qt's own resolution):
+      QT_SCALE_FACTOR overrides everything when set.
+      QT_AUTO_SCREEN_SCALE_FACTOR=0 suppresses DPI-based auto-scaling.
+      Anything else → assume 1.0 (safe default matching the "no env"
+      behaviour the code was originally written for).
+    """
+    qt_scale_env = os.environ.get("QT_SCALE_FACTOR", "")
+    if qt_scale_env:
+        try:
+            s = float(qt_scale_env)
+            if s > 0:
+                return s
+        except ValueError:
+            pass
+    # QT_AUTO_SCREEN_SCALE_FACTOR=0 means "no DPI scaling" → treat as 1.
+    # Any non-zero value means Qt may apply DPI-based scaling but we cannot
+    # determine the exact factor without querying Qt itself, so we warn and
+    # fall back to 1.
+    auto = os.environ.get("QT_AUTO_SCREEN_SCALE_FACTOR", "0")
+    if auto != "0":
+        print(f"[layout] WARNING: QT_AUTO_SCREEN_SCALE_FACTOR={auto} but "
+              "QT_SCALE_FACTOR is unset — cannot determine logical scale; "
+              "window placement may be off.  Set QT_SCALE_FACTOR explicitly.")
+    return 1.0
 #----------------------------------------------------------------------------------------
 try:
     import cv2
@@ -1662,8 +1698,14 @@ class YMAPNet:
         self.D = 300
         #---------------------------------------------------------------------
         self.window_arrangement = window_arrangement
-        self.screen_w = screen_w
-        self.screen_h = screen_h
+        # screen_w/h arrive as *physical* pixels from xrandr/detect_screen_resolution.
+        # cv2.moveWindow takes *logical* pixels (physical / qt_scale).
+        self.qt_scale = _get_qt_scale()
+        self.screen_w = int(screen_w / self.qt_scale)
+        self.screen_h = int(screen_h / self.qt_scale)
+        if self.qt_scale != 1.0:
+            print(f"[layout] QT_SCALE_FACTOR={self.qt_scale}: logical screen "
+                  f"{self.screen_w}x{self.screen_h} (physical {screen_w}x{screen_h})")
         self.depth_iterations = depth_iterations
         self.estimate_person_id = estimate_person_id
         self.resolve_skeleton = resolve_skeleton
@@ -2212,7 +2254,13 @@ class YMAPNet:
             #improved_depth = integrate_normals(normalX, normalY, normalZ, initial_depth=depthmap, iterations=5000)
             if show:
                 _h, _w = improved_depth.shape[:2]
-                cv2.imshow('Improved Depth', cv2.resize(improved_depth, (int(_w * 1.5), int(_h * 1.5))))
+                _disp_size = (int(_w * 1.5), int(_h * 1.5))
+                cv2.imshow('Improved Depth', cv2.resize(improved_depth, _disp_size))
+                if int(self.serial) <= 180:
+                    cv2.imshow('RGB Visualization', cv2.resize(self.imageIn, _disp_size))
+                    cv2.imshow('Person', cv2.resize(self.person_union, _disp_size))
+                    if self.chanVehicle >= 0 and len(self.heatmapsOut) > self.chanVehicle:
+                        cv2.imshow('Vehicle', cv2.resize(self.heatmapsOut[self.chanVehicle], _disp_size))
                 #print("Improved Depth 8 bit MIN: ",np.min(improved_depth))
                 #print("Improved Depth 8 bit MAX: ",np.max(improved_depth))
 
@@ -2406,25 +2454,29 @@ class YMAPNet:
                         offset_x=0,
                     )
                 else:
-                    # Monitor 1: fixed layout optimised for 1920×1080.
-                    # Any named window absent from this dict is auto-placed on monitors 2+3.
+                    # Monitor 1: fixed layout optimised for 1920×1080 at QT_SCALE_FACTOR=1.
+                    # Coordinates are in *physical* pixels at scale=1; divide by qt_scale
+                    # so that cv2.moveWindow receives correct *logical* pixel positions.
+                    def _s(v):
+                        return int(round(v / self.qt_scale))
+
                     MONITOR1_FIXED = {
-                        "Overlay": (1, 1),
-                        "Description": (0, 930),
-                        "Person IDs": (0, 650),
-                        "Threshold Controls": (0, 650),
-                        "Depthmap": (480, 0),
-                        "Improved Depth": (480, 350),
-                        "Combined Normals": (480, 650),
-                        "Class segmentation Union": (820, 0),
-                        "Joint Heatmap Union": (830, 350),
-                        "PAFs Union": (830, 650),
-                        "Normals X": (1180, 0),
-                        "Normals Y": (1180, 350),
-                        "Normals Z": (1180, 650),
-                        "Very Close": (1550, 0),
-                        "Person": (1550, 270),
-                        "Text": (1550, 530),
+                        "Overlay":                    (_s(1),    _s(1)),
+                        "Description":                (_s(0),    _s(930)),
+                        "Person IDs":                 (_s(0),    _s(650)),
+                        "Threshold Controls":         (_s(0),    _s(650)),
+                        "Depthmap":                   (_s(480),  _s(0)),
+                        "Improved Depth":             (_s(480),  _s(350)),
+                        "Combined Normals":           (_s(480),  _s(650)),
+                        "Class segmentation Union":   (_s(820),  _s(0)),
+                        "Joint Heatmap Union":        (_s(830),  _s(350)),
+                        "PAFs Union":                 (_s(830),  _s(650)),
+                        "Normals X":                  (_s(1180), _s(0)),
+                        "Normals Y":                  (_s(1180), _s(350)),
+                        "Normals Z":                  (_s(1180), _s(650)),
+                        "Very Close":                 (_s(1550), _s(0)),
+                        "Person":                     (_s(1550), _s(270)),
+                        "Text":                       (_s(1550), _s(530)),
                     }
                     layout = dict(MONITOR1_FIXED)  # copy; only entries whose windows exist matter
 

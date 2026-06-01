@@ -78,6 +78,9 @@ def build_arg_parser():
     # Repeatable multi-value options
     p.add_argument("--win", nargs=3, action="append", default=[], metavar=("X", "Y", "LABEL"),
                    help="Window arrangement entry (repeatable)")
+    p.add_argument("--layout", default=None, metavar="FILE",
+                   help="JSON file with window/monitor layout; merged with any --win/--monitor flags. "
+                        'Format: {"windows": [[x, y, "label"], ...], "monitors": [[hm, x, y, "label"], ...]}')
     p.add_argument("--monitor", nargs=4, action="append", default=[], metavar=("HM", "X", "Y", "LABEL"),
                    help="Heatmap monitor entry (repeatable)")
     p.add_argument("--upload-url", default=DEFAULT_UPLOAD_URL, metavar="URL",
@@ -102,7 +105,26 @@ def build_arg_parser():
         "consecutive skipped frames (default: 20, e.g. --eco 8.0 30).")
     p.add_argument("--vram", type=int, default=4800, metavar="MB",
                    help="GPU VRAM limit in MB for TensorFlow (default: 4800)")
+    p.add_argument("--loop", action="store_true",
+                   help="Loop the input video when it ends (ignored for live sources)")
     return p
+
+
+def apply_layout(args):
+    """Merge a --layout JSON file into args.win and args.monitor."""
+    if args.layout is None:
+        return
+    import json
+    with open(args.layout) as f:
+        layout = json.load(f)
+    for entry in layout.get("windows", []):
+        if len(entry) != 3:
+            raise ValueError(f"--layout windows entry must be [x, y, label], got {entry!r}")
+        args.win.append([str(entry[0]), str(entry[1]), str(entry[2])])
+    for entry in layout.get("monitors", []):
+        if len(entry) != 4:
+            raise ValueError(f"--layout monitors entry must be [hm, x, y, label], got {entry!r}")
+        args.monitor.append([str(entry[0]), str(entry[1]), str(entry[2]), str(entry[3])])
 
 
 # =============================================================================
@@ -555,6 +577,7 @@ def main_pose_estimation(args):
         _syncer = LiveStreamSyncer(cap, nominal_fps)
         print(f"[sync] Live source — frame-drop sync enabled at {nominal_fps:.1f} fps")
 
+    apply_layout(args)
     estimator, tiler = build_estimator(args)
 
     if save and show:
@@ -576,6 +599,9 @@ def main_pose_estimation(args):
         while True:
             ret, frame = _syncer.read() if is_live else cap.read()
             if not ret:
+                if args.loop and not is_live and hasattr(cap, 'set'):
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
                 print("Failed to capture frame")
                 failedFrames += 1
                 if failedFrames > MAX_CONSECUTIVE_READ_FAILURES:
