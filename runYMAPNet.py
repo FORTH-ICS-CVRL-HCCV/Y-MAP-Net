@@ -50,6 +50,8 @@ def build_arg_parser():
     p.add_argument("--from", dest="videoFilePath", default="webcam", metavar="PATH",
                    help="Source: path, webcam, screen, esp, /dev/videoN")
     p.add_argument("--size", nargs=2, type=int, default=[640, 480], metavar=("W", "H"))
+    p.add_argument("--fps", type=float, default=None, metavar="HZ",
+                   help="Requested webcam capture framerate (e.g. 125 for 320x240@125Hz)")
     p.add_argument("--scale", type=float, default=1.0)
     p.add_argument("--threshold", type=float, default=84.0, metavar="T")
     p.add_argument("--border", type=int, default=0)
@@ -183,9 +185,12 @@ def getCaptureDeviceFromPath(videoFilePath, videoWidth, videoHeight, videoFramer
             cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
         else:
             cap = cv2.VideoCapture(index)
-        cap.set(cv2.CAP_PROP_FPS, videoFramerate)
+        # Request MJPG first: most UVC webcams only expose high framerates (e.g.
+        # 320x240@125Hz) under MJPG; the default raw YUYV format is capped low.
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, videoWidth)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, videoHeight)
+        cap.set(cv2.CAP_PROP_FPS, videoFramerate)
         # Keep the internal buffer small so at most one extra frame queues up.
         # Not all backends honour this, but it limits passive lag where supported.
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -567,13 +572,42 @@ def main_pose_estimation(args):
     print("Keypoint Threshold :", args.threshold)
     print("Threshold          :", int(args.threshold))
 
+    requested_fps = args.fps if args.fps is not None else 30.0
     cap = getCaptureDeviceFromPath(args.videoFilePath, videoWidth, videoHeight,
-                                   model_path=args.model)
+                                   videoFramerate=requested_fps, model_path=args.model)
 
     is_live = _is_live_source(args.videoFilePath)
+
+    # When --fps was explicitly requested, verify the driver actually honoured the
+    # requested capture mode and warn loudly if it silently fell back to something else.
+    if args.fps is not None and is_live and hasattr(cap, 'get'):
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        actual_w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cc         = int(cap.get(cv2.CAP_PROP_FOURCC))
+        fourcc_str = "".join(chr((cc >> (8 * i)) & 0xFF) for i in range(4)).strip() if cc else "?"
+        print(f"[fps] Requested {videoWidth}x{videoHeight}@{args.fps:.0f}Hz  ->  "
+              f"got {actual_w}x{actual_h}@{actual_fps:.0f}Hz (fourcc={fourcc_str})")
+        if actual_fps > 0 and abs(actual_fps - args.fps) > 1.0:
+            print(f"[fps] WARNING: camera negotiated {actual_fps:.0f}Hz, not the requested "
+                  f"{args.fps:.0f}Hz.")
+            dev = args.videoFilePath
+            if dev == "webcam":
+                dev = "/dev/video0"
+            elif isinstance(dev, str) and dev.isdigit():
+                dev = f"/dev/video{dev}"
+            print(f"[fps]          Check supported modes with: "
+                  f"v4l2-ctl -d {dev} --list-formats-ext")
+        if (actual_w, actual_h) != (videoWidth, videoHeight):
+            print(f"[fps] WARNING: camera negotiated {actual_w}x{actual_h}, not the requested "
+                  f"{videoWidth}x{videoHeight}.")
+        if fourcc_str and fourcc_str not in ("MJPG", "?"):
+            print(f"[fps] WARNING: capture format is {fourcc_str}, not MJPG — high framerates "
+                  f"are usually unavailable in raw formats.")
+
     if is_live:
-        nominal_fps = cap.get(cv2.CAP_PROP_FPS) if hasattr(cap, 'get') else 30.0
-        nominal_fps = nominal_fps if nominal_fps > 0 else 30.0
+        nominal_fps = cap.get(cv2.CAP_PROP_FPS) if hasattr(cap, 'get') else 0.0
+        nominal_fps = nominal_fps if nominal_fps > 0 else requested_fps
         _syncer = LiveStreamSyncer(cap, nominal_fps)
         print(f"[sync] Live source — frame-drop sync enabled at {nominal_fps:.1f} fps")
 
