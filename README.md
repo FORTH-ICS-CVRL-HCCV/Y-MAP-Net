@@ -4,9 +4,16 @@ We present Y-MAP-Net, a Y-shaped neural network architecture designed for real-t
 
 ![Graphical Abstract](https://github.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/doc/ICRA26GraphicalAbstract.png?raw=true)
 
-[ICRA 2026 Poster](https://github.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/doc/Y-MAP-Net-ICRA26-Poster.png?raw=true)
+[ICRA 2026 Oral Presentation, Click here to view the Poster](https://github.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/doc/Y-MAP-Net-ICRA26-Poster.png?raw=true)
 
 One click deployment in Google Collab : [![Open Y-MAP-Net In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/scripts/y-map-net.ipynb)
+
+---
+
+[![YouTube Link](https://raw.githubusercontent.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/refs/heads/main/doc/ymapytb.png)](https://www.youtube.com/watch?v=n6P_nXLWz1A)
+
+Youtube Supplementary Video of Y-MAP-Net
+
 
 ---
 
@@ -16,13 +23,6 @@ One click deployment in Google Collab : [![Open Y-MAP-Net In Colab](https://cola
 - **Multi-task outputs**: 2D pose (17 COCO joints), depth, surface normals, segmentation, and text token embeddings
 - **Multiple backends**: TensorFlow, TFLite, JAX and ONNX
 - **Interactive web UI** via Gradio
-
----
-
-[![YouTube Link](https://raw.githubusercontent.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/refs/heads/main/doc/ymapytb.png)](https://www.youtube.com/watch?v=n6P_nXLWz1A)
-
-Youtube Supplementary Video of Y-MAP-Net
-
 
 ## Quick Start
 
