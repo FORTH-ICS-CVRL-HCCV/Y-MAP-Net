@@ -1,11 +1,10 @@
-# Y-MAP-Net
-
+# Y-MAP-Net: Learning from Foundation Models for Real-Time, Multi-Task Scene Perception
 
 We present Y-MAP-Net, a Y-shaped neural network architecture designed for real-time multi-task learning on RGB images. Y-MAP-Net simultaneously predicts depth, surface normals, human pose, semantic segmentation, and generates multi-label captions in a single forward pass. To achieve this, we adopt a multi-teacher, single-student training paradigm, where task-specific foundation models supervise the learning of the network, allowing it to distill their capabilities into a unified real-time inference architecture. Y-MAP-Net exhibits strong generalization, architectural simplicity, and computational efficiency, making it well-suited for resource-constrained robotic platforms. By providing rich 3D, semantic, and contextual scene understanding from low-cost RGB cameras, Y-MAP-Net supports key robotic capabilities such as object manipulation and human–robot interaction.
 
+![Graphical Abstract](https://github.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/doc/ICRA26GraphicalAbstract.png?raw=true)
 
-![Illustration](https://github.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/doc/illu.png?raw=true)
-
+[ICRA 2026 Poster](https://github.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/doc/Y-MAP-Net-ICRA26-Poster.png?raw=true)
 
 One click deployment in Google Collab : [![Open Y-MAP-Net In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/scripts/y-map-net.ipynb)
 
@@ -27,6 +26,7 @@ Youtube Supplementary Video of Y-MAP-Net
 
 ## Quick Start
 
+![Illustration](https://github.com/FORTH-ICS-CVRL-HCCV/Y-MAP-Net/blob/main/doc/illu.png?raw=true)
 
 ### 1. Setup
 
