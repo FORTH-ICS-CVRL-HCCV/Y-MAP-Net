@@ -1,7 +1,12 @@
 # Core ML / TensorFlow
-tensorflow[and-cuda]
+# Pinned for local/server parity (avoids the TF 2.20+ protobuf-7 / CUDA-12.9 jump and
+# keeps the proven CUDA-12.5 stack). Bump deliberately, testing tf2onnx/onnx/model-opt.
+tensorflow[and-cuda]==2.18.0
 tensorflow-model-optimization
-tf_keras
+# Keras 3.6.0 (bundled with TF 2.18) maps a dict `loss`/labels to a model's
+# list-of-outputs by SORTED key order instead of by output name, mismapping every
+# multi-output head (e.g. DescriptorLoss got the hm tensor). Fixed in 3.9+, so pin it.
+keras>=3.9
 
 # Numerical / acceleration
 numpy

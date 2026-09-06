@@ -1,72 +1,101 @@
 #!/bin/bash
+# Pulls the public subset of the internal development repo (RGBToPoseDetect2D)
+# into this release snapshot. The internal repo organizes code as an installable
+# "ymapnet" package (ymapnet/core, ymapnet/utils, ...); this release mirrors that
+# same package layout 1:1 -- imports are NOT rewritten, files are copied verbatim.
+#
+# Add a new module to a released feature? Add its path to the matching list below
+# (and to any transitive ymapnet.* dependency it pulls in that isn't listed yet).
 
+set -euo pipefail
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-cd "$DIR"
-cd ..
+cd "$DIR/.."
 
-SOURCE="../Y-MAP-Net-Development-Repository/"
+SOURCE="../RGBToPoseDetect2D"
 
-mkdir scripts/
-cp "$SOURCE/scripts/downloadPretrained.sh" scripts/ 
-cp "$SOURCE/scripts/downloadModel.sh" scripts/
-cp "$SOURCE/scripts/setup.sh" scripts/ 
+if [ ! -d "$SOURCE" ]; then
+    echo "ERROR: expected internal repo checkout at $SOURCE" >&2
+    exit 1
+fi
 
+# ---------------------------------------------------------------------------
+# ymapnet/ package -- verbatim copy, one file per line so additions are explicit
+# ---------------------------------------------------------------------------
+PACKAGE_FILES=(
+    apps/appFace.py
+    apps/appFallDetection.py
+    apps/appPoseMatch.py
+    apps/runYMAPNet.py
+    conversion/convertModelToJAX.py
+    conversion/validate_cpp.py
+    core/NNCheckpointAveraging.py
+    core/NNConverter.py
+    core/NNExecutor.py
+    core/NNLosses.py
+    core/NNModel.py
+    core/NNOptimize.py
+    core/NNTraining.py
+    core/NNTransplant.py
+    core/YMAPNet.py
+    evaluation/analyzeDepthErrors.py
+    evaluation/analyzeHeadAblation.py
+    evaluation/analyzeNormalsErrors.py
+    evaluation/analyzeSegmentationConfusion.py
+    evaluation/evaluateYMAPNet.py
+    reporting/illustrate.py
+    reporting/plotTrainingProgressToSVG.py
+    reporting/statusServer.py
+    streams/datasetStream.py
+    streams/espStream.py
+    streams/folderStream.py
+    streams/screenStream.py
+    tokens/TokenEstimator.py
+    tokens/visualizeTokenConfusion.py
+    training/trainFaceIdentification.py
+    training/trainGloVeTokensOnly.py
+    training/trainTokensOnly.py
+    training/trainYMAPNet.py
+    utils/calculateNormalsFromDepthmap.py
+    utils/createJSONConfiguration.py
+    utils/imageProcessing.py
+    utils/resolveJointHierarchy.py
+    utils/tools.py
+    webui/gradioClient.py
+    webui/gradioServer.py
+)
 
-mkdir datasets/
+mkdir -p ymapnet
+touch ymapnet/__init__.py
+for sub in apps core utils tokens streams webui reporting training conversion evaluation; do
+    mkdir -p "ymapnet/$sub"
+    touch "ymapnet/$sub/__init__.py"
+done
 
-#Dataloader
+for f in "${PACKAGE_FILES[@]}"; do
+    mkdir -p "ymapnet/$(dirname "$f")"
+    cp "$SOURCE/ymapnet/$f" "ymapnet/$f"
+done
+
+# ---------------------------------------------------------------------------
+# Native DataLoader (C sources are not tracked by this script -- update them
+# by hand if datasets/DataLoader/ has drifted; see the internal repo's copy)
+# ---------------------------------------------------------------------------
 mkdir -p datasets/DataLoader
-mkdir -p datasets/DataLoader/codecs
-mkdir -p datasets/DataLoader/processing
-mkdir -p datasets/DataLoader/processing/AVX2
-cp $SOURCE/datasets/DataLoader/*.py datasets/DataLoader/
-cp $SOURCE/datasets/DataLoader/*.c datasets/DataLoader/
-cp $SOURCE/datasets/DataLoader/*.h datasets/DataLoader/
-cp $SOURCE/datasets/DataLoader/*.sh datasets/DataLoader/
-cp $SOURCE/datasets/DataLoader/codecs/*.c datasets/DataLoader/codecs/
-cp $SOURCE/datasets/DataLoader/codecs/*.h datasets/DataLoader/codecs/
-cp $SOURCE/datasets/DataLoader/processing/*.c datasets/DataLoader/processing/
-cp $SOURCE/datasets/DataLoader/processing/*.h datasets/DataLoader/processing/
-cp $SOURCE/datasets/DataLoader/processing/AVX2/*.c datasets/DataLoader/processing/AVX2/
-cp $SOURCE/datasets/DataLoader/processing/AVX2/*.h datasets/DataLoader/processing/AVX2/
+cp "$SOURCE/datasets/DataLoader/"*.py datasets/DataLoader/ 2>/dev/null || true
 
+# ---------------------------------------------------------------------------
+# Public-facing scripts/
+# ---------------------------------------------------------------------------
+cp "$SOURCE/scripts/downloadPretrained.sh" scripts/
+cp "$SOURCE/scripts/downloadModel.sh" scripts/
+cp "$SOURCE/scripts/setup.sh" scripts/
+cp "$SOURCE/scripts/run_windows.bat" scripts/
 
-
-#Runtime
-cp "$SOURCE/NNConverter.py" ./
-cp "$SOURCE/NNExecutor.py" ./
-cp "$SOURCE/NNLosses.py" ./
-cp "$SOURCE/NNModel.py" ./
-cp "$SOURCE/NNOptimize.py" ./
-cp "$SOURCE/NNTraining.py" ./
-cp "$SOURCE/NNTransplant.py" ./
-cp "$SOURCE/PoseEstimator2D.py" ./
-cp "$SOURCE/TokenEstimator.py" ./
-cp "$SOURCE/createJSONConfiguration.py" ./
-cp "$SOURCE/espStream.py" ./
-cp "$SOURCE/datasets/calculateNormalsFromDepthmap.py" ./ 
-cp "$SOURCE/folderStream.py" ./
-cp "$SOURCE/gradioClient.py" ./
-cp "$SOURCE/gradioServer.py" ./
-cp "$SOURCE/gradioShared.py" ./
-cp "$SOURCE/illustrate.py" ./
-cp "$SOURCE/imageProcessing.py" ./
+# ---------------------------------------------------------------------------
+# Other top-level files
+# ---------------------------------------------------------------------------
 cp "$SOURCE/license.txt" ./
-cp "$SOURCE/resolveJointHierarchy.py" ./
-cp "$SOURCE/YMAPNet.py" ./
-cp "$SOURCE/runYMAPNet.py" ./
-cp "$SOURCE/screenStream.py" ./
-cp "$SOURCE/tools.py" ./
-	 
-
-#Training code
-cp "$SOURCE/trainYMAPNet.py" ./
-cp "$SOURCE/trainTokensOnly.py" ./
-
-#Other..
 cp "$SOURCE/requirements.txt" ./
-
-cp 
 
 exit 0

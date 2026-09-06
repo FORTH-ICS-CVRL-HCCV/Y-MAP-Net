@@ -15,7 +15,19 @@ else
     echo "Virtual environment not found. Exiting."
     exit 1
 fi
-ZIPFILE="2d_pose_estimation_v${VERSION}.zip"
+
+
+
+# Strip any trailing letter suffix (e.g. "283a" -> "283") for numeric comparison
+VERSION_NUM="${VERSION%%[a-zA-Z]*}"
+if [ "$VERSION_NUM" -lt 285 ]; then
+    ZIPFILE="2d_pose_estimation_v${VERSION}.zip"
+else
+    ZIPFILE="ymapnet_model_v${VERSION}.zip"
+fi
+
+
+
 # Define URLs to try
 URLS=(
     "http://ammar.gr/ymapnet/archive/${ZIPFILE}"
@@ -50,6 +62,13 @@ fi
 # Unzip, overwriting if needed
 echo "Extracting $ZIPFILE..."
 unzip -o "$ZIPFILE"
+# Accumulate tensorboard logs before notifying
+TENSORBOARD_SRC="2d_pose_estimation/tensorboard"
+if [ -d "$TENSORBOARD_SRC" ] && [ -n "$(ls -A "$TENSORBOARD_SRC" 2>/dev/null)" ]; then
+    mkdir -p logs
+    mv "$TENSORBOARD_SRC"/* logs/
+    echo "Tensorboard logs moved to logs/"
+fi
 # Notify user
 if command -v notify-send >/dev/null 2>&1; then
     notify-send "Model v$VERSION ready to run"

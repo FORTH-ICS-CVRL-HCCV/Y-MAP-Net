@@ -1,0 +1,1359 @@
+#!/usr/bin/python3
+"""
+Author : "Ammar Qammaz"
+Copyright : "2024 Foundation of Research and Technology, Computer Science Department Greece, See license.txt"
+License : "FORTH"
+"""
+#Dependencies should be :
+#tensorflow-2.16.1 needs CUDA 12.3, CUDNN 8.9.6 and is built with Clang 17.0.6 Bazel 6.5.0
+#python3 -m pip install tf_keras tensorflow==2.16.1 numpy tensorboard opencv-python wget
+#----------------------------------------------
+import sys
+import os
+import time
+import gc
+import math
+import traceback
+import numpy as np
+import datetime
+#----------------------------------------------
+useGPU = True
+if (len(sys.argv) > 1):
+    #print('Argument List:', str(sys.argv))
+    for i in range(0, len(sys.argv)):
+        if (sys.argv[i] == "--cpu"):
+            useGPU = False
+# Set CUDA_VISIBLE_DEVICES to an empty string to force TensorFlow to use the CPU
+if (not useGPU):
+    os.environ['CUDA_VISIBLE_DEVICES'] = ''  # <- Force CPU
+# Persist XLA/cuDNN autotuning results across runs so the first-step
+# algorithm benchmarking only happens once.
+# XLA_PERSISTENT_CACHE_PATH must point to an existing directory or it is silently ignored.
+_xla_cache_dir = 'xla_cache'
+os.makedirs(_xla_cache_dir, exist_ok=True)
+os.environ['XLA_PERSISTENT_CACHE_PATH'] = _xla_cache_dir
+#----------------------------------------------
+try:
+    import cv2
+    import tensorflow as tf
+    import keras
+    from keras import callbacks
+    from keras.callbacks import TensorBoard
+    from keras import layers, models
+    from keras.models import Sequential
+
+    #C Dataloader
+    sys.path.append('datasets/DataLoader')
+    from DataLoader import DataLoader
+
+    from ymapnet.core.NNConverter import saveNNModel
+except Exception as e:
+    print("An exception occurred:", str(e))
+    print("Issue:\n source venv/bin/activate")
+    print("Before running this script")
+    sys.exit(1)
+#-------------------------------------------------------------------------------
+from ymapnet.core.NNLosses import RSquaredMetric, HeatmapDistanceMetric, HeatmapCoreLoss, VanillaMSELossSimple, AdamWCautious, DepthNormalsNLLLoss
+from ymapnet.utils.tools import bcolors, read_json_file, checkIfPathExists, checkIfFileExists, convert_bytes
+
+
+#-------------------------------------------------------------------------------
+def resolveModelDir():
+    """The model directory used to be 2d_pose_estimation/ everywhere; some machines have
+    since been renamed to ymapnet_model/ (the new convention -- 2d_pose_estimation/ is
+    legacy, see PLAN.md). Detect which one actually exists on THIS machine rather than
+    hardcoding either name, so the same configuration.json/code works whether or not a
+    given checkout has been renamed yet."""
+    if os.path.isdir('ymapnet_model'):
+        return 'ymapnet_model'
+    return '2d_pose_estimation'
+
+
+def rebaseModelPath(path, modelDir):
+    """cfg values like embeddingsPath/synonymPath store a literal '2d_pose_estimation/...'
+    (or 'ymapnet_model/...') prefix baked in when the config was written. Rewrite that
+    prefix to whichever directory actually exists on this machine, so the same
+    configuration.json works whether this checkout has been renamed or not."""
+    for oldPrefix in ('2d_pose_estimation/', 'ymapnet_model/'):
+        if path.startswith(oldPrefix):
+            return modelDir + '/' + path[len(oldPrefix):]
+    return path
+
+
+#-------------------------------------------------------------------------------
+def deriveRGBChannelsFromCFG(cfg):
+    numberOfChannels = 3
+
+    if ("inputChannels" in cfg):
+        numberOfChannels = cfg["inputChannels"]
+        return numberOfChannels
+
+    if (cfg['RGBImageEncoding'] == 'rgb8'):
+        numberOfChannels = 1
+    if (cfg['RGBImageEncoding'] == 'rgb16'):
+        numberOfChannels = 2
+    return numberOfChannels
+
+
+#-------------------------------------------------------------------------------
+_DEPTH_NORMAL_CHANNELS = {"depthmap", "normalX", "normalY", "normalZ"}
+
+
+def _resolve_depth_channel_start(cfg):
+    heatmaps = cfg.get('heatmaps', [])
+    indices = [i for i, h in enumerate(heatmaps) if h in _DEPTH_NORMAL_CHANNELS]
+    if not indices:
+        return -1
+    return min(indices)
+
+
+def _resolve_depth_channel_end(cfg):
+    heatmaps = cfg.get('heatmaps', [])
+    indices = [i for i, h in enumerate(heatmaps) if h in _DEPTH_NORMAL_CHANNELS]
+    if not indices:
+        return -1
+    return max(indices) + 1
+
+
+def createSelectedModel(cfg, testModel=True):
+    channels = deriveRGBChannelsFromCFG(cfg)
+    if (cfg['model'] == 'unet'):
+        from ymapnet.core.NNModel import build_unet
+
+        numTokens = 0
+        if ("outputTokens" in cfg) and (cfg["outputTokens"]):
+            if ("tokensOut" in cfg):
+                numTokens = int(cfg["tokensOut"])
+
+
+        model = build_unet(
+                           inputHeight=cfg['inputHeight'],
+                           inputWidth=cfg['inputWidth'], 
+                           inputChannels=channels, 
+                           outputWidth=cfg['outputWidth'], 
+                           outputHeight=cfg['outputHeight'], 
+                           numKeypoints=cfg['outputChannels'], 
+                           num16BitHeatmaps=cfg['output16BitChannels'],
+                           numTokens=numTokens, 
+                           numClasses=cfg['tokensClasses'], 
+                           tokenEmbeddingD=cfg.get('tokenEmbeddingD',300),
+                           minHeatmapValue=cfg['heatmapDeactivated'],
+                           maxHeatmapValue=cfg['heatmapActive'], 
+                           encoderGrowthBase=cfg.get('encoderGrowthBase',1.4),
+                           decoderGrowthBase=cfg.get('decoderGrowthBase',2.0),
+                           baseChannels=cfg['baseChannels'],
+                           pixelwiseChannels=cfg['pixelwiseChannels'],
+                           encoderRepetitions=cfg['encoderRepetitions'],
+                           decoderRepetitions=cfg['decoderRepetitions'],
+                           midSectionRepetitions=cfg['midSectionRepetitions'],
+                           gloveLayers=cfg['gloveLayers'],
+                           multihotLayers=cfg['multihotLayers'],
+                           multihotLayerWidth=cfg.get('multihotLayerWidth',0),
+                           tokenLayerWidth=cfg.get('tokenLayerWidth',0),
+                           use_learnable_residuals=cfg['learnableTokenResiduals'],
+                           bridgeRatio=cfg['bridgeRatio'],
+                           forceBridgeSize=cfg['forceBridgeSize'],
+                           activation=cfg['activation'],
+                           gaussianNoiseSTD=cfg['RGBgaussianNoiseSTD'],
+                           dropoutRate=cfg['dropoutRate'],
+                           nextTokenStrength=cfg['nextTokenStrength'],
+                           quantize=cfg['quantizeModel'],
+                           serial=cfg['serial'],
+                           useDescriptors=cfg['outputDescriptors'],
+                           depth_channel_start=_resolve_depth_channel_start(cfg),
+                           depth_channel_end=_resolve_depth_channel_end(cfg),
+                           useASPPBridge=cfg.get('useASPPBridge',False),
+                           useDepthRefinementHead=cfg.get('useDepthRefinementHead',False),
+                           useCoordConv=cfg.get('useCoordConv',False),
+                           useBottleneckAttention=cfg.get('useBottleneckAttention',False),
+                           convBlockRepetitions=cfg.get('convBlockRepetitions',2),
+                           deconCheckerboardSmoothing=cfg.get('deconCheckerboardSmoothing',''),
+                           useDepthNormalsUncertainty=cfg.get('heatmapAddDepthNormalsUncertainty', False),
+                           maxDecoderChannels=cfg.get('maxDecoderChannels', 0),
+                           tanhHeadroom8bit=cfg.get('heatmapTanhHeadroom8bit', 1.0),
+                           tanhHeadroom16bit=cfg.get('heatmapTanhHeadroom16bit', 1.0),
+                           useGeolocationHead=cfg.get('useGeolocationHead', False),
+                           geoHeadHidden=cfg.get('geoHeadHidden', 512),
+                           geoGridHeight=cfg.get('geoGridHeight', 64),
+                           geoGridWidth=cfg.get('geoGridWidth', 128),
+                           useDepthwiseSeparable=cfg.get('useDepthwiseSeparable', False)
+                           )
+        
+        # "deconCheckerboardSmoothing": "" (default/omitted) → Conv2DTranspose,
+        # "nearest" or "bilinear" → UpSampling2D + Conv2D (no tiling artefacts).
+        # See decoder_block() in NNModel.py for the full rationale.
+    else:
+        print("ERROR, incorrect model type ", cfg['model'])
+        sys.exit(1)
+
+    if (testModel):
+        from ymapnet.core.NNModel import test_model_IO
+        test_model_IO(model)
+    return model
+
+
+#-------------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
+#============================================================================================
+#============================================================================================
+#============================================================================================
+from ymapnet.core.NNTraining import logTrainingHistory, logText, logSomeInputsAndOutputs, printTFVersion, TrainingDataGenerator, PerfProfiler, getOptimizerFromCFG, custom_lr_scheduler, custom_lr_schedulerWarmup, DataAugmentation, weighted_token_loss, extract_validation_losses, check_vram_and_suggest_batch_size
+
+
+#============================================================================================
+#============================================================================================
+# Status server helpers
+#============================================================================================
+#============================================================================================
+def _start_status_server():
+    """Start statusServer.py in the background if it is not already running."""
+    import subprocess
+    import socket
+    port = 6005
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        already_running = s.connect_ex(("127.0.0.1", port)) == 0
+    if already_running:
+        print(bcolors.OKBLUE, "Status server already running on port %d" % port, bcolors.ENDC)
+        return
+    from ymapnet.reporting import statusServer as _status_server_mod
+    script = _status_server_mod.__file__
+    subprocess.Popen(
+        [sys.executable, script],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    print(bcolors.OKBLUE, "Status server started on port %d" % port, bcolors.ENDC)
+
+
+#============================================================================================
+#============================================================================================
+# Main Function
+#============================================================================================
+#============================================================================================
+if __name__ == '__main__':
+    # Test the custom learning rate scheduler
+    #for epoch in range(1, 200):
+    #  print(f"Epoch {epoch}: Learning Rate = {custom_lr_scheduler(epoch)}")
+    #sys.exit(0)
+    _start_status_server()
+
+    print("Ensuring the same seed for reproducible results always..\n")
+    from numpy.random import seed
+    seed(1)
+    tf.random.set_seed(2)
+
+    # --profile : quick benchmark mode — loads only the validation set (typically
+    # ~5 000 samples that fit in RAM) and uses it as training data so a single
+    # epoch completes in minutes rather than hours.  Identifies GPU compute
+    # regressions without waiting for a full training run.
+    # Forces  cfg['streamValidation'] = 1  locally (config file is NOT modified).
+    profileMode = '--profile' in sys.argv
+
+    # --config Key Value  : override one config entry after loading configuration.json.
+    # The value string is coerced to the most specific Python type automatically:
+    #   "true"/"false"  → bool,  integer strings → int,  float strings → float,
+    #   everything else → str.
+    # Multiple --config pairs are all applied before anything else reads cfg.
+    # Example:  python3 trainYMAPNet.py --config epochs 1 --config mixedPrecision true
+    _cli_overrides = {}
+    _argv = sys.argv[1:]
+    i = 0
+    while i < len(_argv):
+        if _argv[i] == '--config' and i + 2 <= len(_argv) - 1:
+            _key = _argv[i + 1]
+            _raw = _argv[i + 2]
+            # Type coercion: bool > int > float > str
+            if _raw.lower() == 'true': _val = True
+            elif _raw.lower() == 'false': _val = False
+            else:
+                try:
+                    _val = int(_raw)
+                except ValueError:
+                    try:
+                        _val = float(_raw)
+                    except ValueError:
+                        _val = _raw
+            _cli_overrides[_key] = _val
+            i += 3
+        else:
+            i += 1
+
+    #Have dataset variables on main scope
+    dataset_generator = None
+    shuffleData = True
+    dbTrain = None
+    dbValidation = None
+    testModel = True
+    useRAMfs = True
+
+    queueSize = 32
+
+    # Training reads the root (git-tracked) configuration.json as its source of truth.
+    # After a successful run the model is saved into 2d_pose_estimation/ and this file is
+    # copied there as 2d_pose_estimation/configuration.json (the packaged runtime config).
+    jsonPath = 'configuration.json'
+    if (checkIfFileExists(jsonPath)):
+        print(bcolors.OKGREEN, "Loading configuration from file ", jsonPath, bcolors.ENDC)
+        from ymapnet.utils.createJSONConfiguration import loadJSONConfiguration
+        cfg = loadJSONConfiguration(jsonPath, useRAMfs=useRAMfs)
+    else:
+        print(bcolors.FAIL, "CREATING FRESH CONFIGURATION!", bcolors.ENDC)
+        from ymapnet.utils.createJSONConfiguration import createJSONConfiguration
+        cfg = createJSONConfiguration(jsonPath, useRAMfs=useRAMfs)
+
+    # Resolve the model directory (2d_pose_estimation/ legacy, ymapnet_model/ new) once,
+    # and rebase any path-valued cfg entries onto whichever one actually exists here --
+    # BEFORE CLI overrides, so an explicit --config override is taken literally, not rewritten.
+    MODEL_DIR = resolveModelDir()
+    if MODEL_DIR != '2d_pose_estimation':
+        print(bcolors.OKGREEN, "Model directory: using %s/ (2d_pose_estimation/ not found on this machine)" % MODEL_DIR, bcolors.ENDC)
+    if cfg.get('embeddingsPath'):
+        cfg['embeddingsPath'] = rebaseModelPath(cfg['embeddingsPath'], MODEL_DIR)
+    if cfg.get('synonymPath'):
+        _sp = cfg['synonymPath']
+        cfg['synonymPath'] = rebaseModelPath(_sp, MODEL_DIR) if isinstance(_sp, str) \
+            else [rebaseModelPath(p, MODEL_DIR) for p in _sp]
+
+    if _cli_overrides:
+        print(bcolors.WARNING, "Applying CLI config overrides (--config):", bcolors.ENDC)
+        for _k, _v in _cli_overrides.items():
+            _old = cfg.get(_k, '<unset>')
+            cfg[_k] = _v
+            print(bcolors.WARNING, "  %-30s %s  →  %s" % (_k, repr(_old), repr(_v)), bcolors.ENDC)
+
+    if profileMode:
+        # Force validation streaming and doValidation so dbValidation is always
+        # loaded as a streamed generator (small set, fits in RAM).
+        # Neither change is written back to 2d_pose_estimation/configuration.json.
+        cfg['streamValidation'] = 1
+        cfg['doValidation'] = True
+        print(
+            bcolors.WARNING, "[PROFILE MODE] --profile active: forcing doValidation=True, "
+            "streamValidation=1 — validation DB will be reused as training data "
+            "for a fast 1-epoch timing benchmark.", bcolors.ENDC)
+
+    ourDType = tf.float32
+    useXLA = cfg.get('xlaJitCompile', False)
+    if (cfg['mixedPrecision']):
+        from tensorflow.keras import mixed_precision
+        # bfloat16 has the same dynamic range as float32 (8 exponent bits),
+        # so no overflow/underflow and no LossScaleOptimizer needed.
+        # Ampere+ GPUs (RTX A6000, A100, etc.) have native bfloat16 Tensor Cores
+        # with the same throughput as float16 Tensor Cores.
+        mp_policy = cfg.get('mixedPrecisionPolicy', 'mixed_bfloat16')
+        mixed_precision.set_global_policy(mp_policy)
+        policy = mixed_precision.global_policy()
+        print(bcolors.WARNING, "Using mixed precision mode!  Policy:", mp_policy, bcolors.ENDC)
+        print(bcolors.WARNING, 'Compute dtype:', policy.compute_dtype, bcolors.ENDC)
+        print(bcolors.WARNING, 'Variable dtype:', policy.variable_dtype, bcolors.ENDC)
+
+    if (useXLA):
+        print(bcolors.WARNING, "Using XLA JIT compilation!", bcolors.ENDC)
+        tf.config.optimizer.set_jit(True)
+
+    # Diagnostic: set env TF_CHECK_NUMERICS=1 to abort at the first op that emits a
+    # NaN/Inf, printing the op + tensor name. Used to pinpoint a bf16 NaN source.
+    # check_numerics cannot see inside XLA-compiled clusters, so run it WITHOUT XLA:
+    #   TF_CHECK_NUMERICS=1 python3 trainYMAPNet.py --save --config xlaJitCompile false
+    if os.environ.get("TF_CHECK_NUMERICS", "0") == "1":
+        print(bcolors.WARNING, "TF_CHECK_NUMERICS=1 — enabling check_numerics (aborts at first NaN/Inf op).",
+              bcolors.ENDC)
+        tf.debugging.enable_check_numerics()
+
+    #Before starting training log TF Versions
+    printTFVersion()
+
+    saveRestoredWeights = False
+    restoreBestWeights = False
+    resumePreviousTraining = False
+    packageTrainedModel = True
+    elevatePriority = False
+    startEpoch = 0
+    if (len(sys.argv) > 1):
+        print('Argument List:', str(sys.argv))
+        for i in range(0, len(sys.argv)):
+            if (sys.argv[i] == "--debug"):
+                #Enabling this multiplies training time from 6min to 1hour
+                tf.config.run_functions_eagerly(True)  # <- DEBUG
+                cfg['batchSize'] = 4  #<- Reduce batch size since eager executio requires more memory
+            if (sys.argv[i] == "--flush"):
+                os.system("rm -rf %s/ && mkdir %s/" % (MODEL_DIR, MODEL_DIR))
+            if (sys.argv[i] == "--novalidation"):
+                cfg['doValidation'] = False
+            if (sys.argv[i] == "--rt"):
+                elevatePriority = True
+            if (sys.argv[i] == "--nopackage"):
+                print("Disabling packaging of model at the end")
+                packageTrainedModel = False
+            if (sys.argv[i] == "--start"):
+                startEpoch = int(sys.argv[i + 1])
+            if (sys.argv[i] == "--queue"):
+                queueSize = int(sys.argv[i + 1])
+                print("Set queue size to ", queueSize)
+            if (sys.argv[i] == "--mem"):
+                cfg['datasetUsage'] = float(sys.argv[i + 1])
+            #if (sys.argv[i]=="--stream"): Model so large that we always need to stream now
+            #   cfg['streamDataset']      = True
+            #   cfg['streamBufferLength'] = 1000 #int(sys.argv[i+1])
+            if (sys.argv[i] == "--clear") or (sys.argv[i] == "--clean"):
+                os.system("rm -rf %s/tensorboard" % MODEL_DIR)
+                os.system("rm -f ymapnet_model.zip 2d_pose_estimation.zip")  #.zip legacy leftover, if any
+            if (sys.argv[i] == "--resume") or (sys.argv[i] == "--continue"):
+                resumePreviousTraining = True
+                cfg['earlyStoppingStart'] = 0
+                cfg['resumePreviousTraining'] = True
+            if (sys.argv[i] == "--restoreBestWeights") or (sys.argv[i] == "--restore"):
+                restoreBestWeights = True
+                resumePreviousTraining = False
+                saveRestoredWeights = False
+                cfg['earlyStoppingStart'] = 0
+            if (sys.argv[i] == "--saveRestoredWeights") or (sys.argv[i] == "--save"):
+                restoreBestWeights = True
+                resumePreviousTraining = False
+                saveRestoredWeights = True
+            if (sys.argv[i] == "--dumpWeights"):
+                from ymapnet.core.NNModel import load_keypoints_model
+                _model_path = "%s/model.keras" % MODEL_DIR
+                print(bcolors.OKGREEN, "Loading model from", _model_path, bcolors.ENDC)
+                _model, _, _, _ = load_keypoints_model(_model_path)
+                print(bcolors.OKGREEN, "Saving weights to best.weights.h5 ..", bcolors.ENDC)
+                _model.save_weights("best.weights.h5")
+                print(bcolors.OKGREEN, "Done.", bcolors.ENDC)
+                sys.exit(0)
+            if (sys.argv[i] == "--skiptest") or (sys.argv[i] == "--notest"):
+                print("Will not save model upon creating to check its I/O")
+                testModel = False
+            if (sys.argv[i] == "--test"):
+                model = createSelectedModel(cfg, testModel=True)
+                from ymapnet.core.NNModel import retrieveModelOutputDimensions
+                retrieveModelOutputDimensions(model)
+                sys.exit(0)
+                tf.saved_model.save(model, 'test_model')
+                model.save('test_model/model.keras')
+                print(bcolors.OKGREEN, "Test successful!", bcolors.ENDC)
+                sys.exit(0)
+
+    #--------------------------------------------------------------------------------------------------------------------------------
+    #if ("outputTokens" in cfg) and (cfg["outputTokens"]):
+    #           print(bcolors.FAIL,"Disabling validation until it is fixed..",bcolors.ENDC)
+    #           cfg['doValidation']=False
+    if (cfg['loss'] == "combine"):
+        print(bcolors.FAIL, "Disabling validation when using combined loss..", bcolors.ENDC)
+        cfg['doValidation'] = False
+
+    if (cfg['outputChannels'] > cfg['baseChannels']):
+        print(bcolors.FAIL, "Base channels should at least be the same as output channels..", bcolors.ENDC)
+        print(bcolors.FAIL, "go to ./configuration.json and make \"baseChannels\": ",
+              cfg['outputChannels'], bcolors.ENDC)
+        #sys.exit(1)
+
+    #Shorthand for number of GPUs used
+    numberOfGPUs = len(cfg['GPUsUsedForTraining'])
+
+    import contextlib
+
+    # Strategy: MirroredStrategy only when >1 GPU is listed in configuration.
+    # OneDeviceStrategy is deliberately avoided — it adds Python dispatch
+    # overhead with no benefit over plain training on a single device.
+    use_strategy = (numberOfGPUs > 1)
+    strategy = None
+    if use_strategy:
+        # Enable memory growth ONLY for multi-GPU.  For single-GPU, TF's default
+        # behaviour (pre-allocate all VRAM once) is faster: the BFC allocator
+        # avoids repeated cudaMalloc/GPU-sync calls and fragmentation that the
+        # grow-on-demand strategy causes on every step of a large model.
+        # For multi-GPU we need growth so that each replica doesn't claim 100%
+        # VRAM on its device before the others have had a chance to allocate.
+        # Must be set before MirroredStrategy() which initialises NCCL.
+        if useGPU:
+            for gpu in tf.config.list_physical_devices('GPU'):
+                try:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+                except RuntimeError as e:
+                    print(bcolors.WARNING, f"Could not set memory growth for {gpu}: {e}", bcolors.ENDC)
+
+        perGpuBatch = cfg['batchSize']
+        # Scale the global batch so each GPU still processes cfg['batchSize']
+        # samples per step. All DataLoaders are created AFTER this point so
+        # they inherit the updated value automatically.
+        cfg['batchSize'] = cfg['batchSize'] * numberOfGPUs
+
+        # Linear scaling rule (Goyal et al. 2017, https://arxiv.org/abs/1706.02677):
+        # When the global batch grows by N×, the learning rate should also grow
+        # by N× to keep the same effective weight update magnitude per sample.
+        # Without this, multi-GPU training converges slower — the larger batch
+        # reduces gradient noise, and the unchanged LR underutilizes that benefit.
+        # We scale both learningRateStart and learningRateEnd since they feed the
+        # LR scheduler (custom_lr_scheduler), and also learningRate which is the
+        # optimizer's initial LR (overridden from epoch 1, but used for warmup).
+        cfg['learningRate'] = cfg['learningRate'] * numberOfGPUs
+        cfg['learningRateStart'] = cfg['learningRateStart'] * numberOfGPUs
+        cfg['learningRateEnd'] = cfg['learningRateEnd'] * numberOfGPUs
+
+        # NCCL is the fastest all-reduce backend for NVIDIA multi-GPU.
+        # Set explicitly to avoid fallback to the slower ring/hierarchical copy.
+        strategy = tf.distribute.MirroredStrategy(devices=cfg['GPUsUsedForTraining'],
+                                                  cross_device_ops=tf.distribute.NcclAllReduce())
+        print(
+            bcolors.OKGREEN, f"MirroredStrategy: {numberOfGPUs} GPUs — "
+            f"global batch={cfg['batchSize']} "
+            f"({perGpuBatch} per GPU) — "
+            f"LR scaled {numberOfGPUs}× to {cfg['learningRateStart']}", bcolors.ENDC)
+    else:
+        device = cfg['GPUsUsedForTraining'][0] if numberOfGPUs == 1 else '/device:CPU:0'
+        print(bcolors.OKGREEN, f"Single-device training on {device} (no strategy overhead)", bcolors.ENDC)
+
+    scope = strategy.scope() if use_strategy else contextlib.nullcontext()
+    with scope:
+
+        #First of all create the Neural Network model
+        #Don't load other data in vain if this step fails due to bad configuration..
+        #----------------------------------------------------------------------------------------
+        if (resumePreviousTraining):
+            print(bcolors.OKGREEN, "Continuing training from pretrained network.. ", bcolors.ENDC)
+            model_path = "%s/model.keras" % MODEL_DIR
+            from ymapnet.core.NNModel import load_keypoints_model
+            model, input_size, output_size, numHeatmaps = load_keypoints_model(model_path)
+            cfg['inputWidth'] = input_size[0]
+            cfg['inputHeight'] = input_size[1]
+            cfg['outputWidth'] = output_size[0]
+            cfg['outputHeight'] = output_size[1]
+        else:
+            print(bcolors.OKGREEN, "Creating a new Neural Network.. ", bcolors.ENDC)
+            model = createSelectedModel(cfg, testModel=testModel)
+            from ymapnet.core.NNModel import retrieveModelOutputDimensions
+            cfg['outputWidth'], cfg['outputHeight'], numHeatmaps = retrieveModelOutputDimensions(model)
+            if (restoreBestWeights):
+                print(bcolors.OKGREEN, "Restoring best weights.. ", bcolors.ENDC)
+                model.load_weights("best.weights.h5")
+                if (saveRestoredWeights):
+                    print(bcolors.OKGREEN, "Saving best weights as model.. ", bcolors.ENDC)
+                    saveNNModel(MODEL_DIR, model, formats=[
+                        "keras"
+                    ])  #Only use keras format to save space! formats=["keras","tf","tflite","onnx"]
+                    #Promote the training config into the packaged runtime dir alongside the saved model.
+                    print(bcolors.OKGREEN, "Promoting ./configuration.json -> %s/configuration.json" % MODEL_DIR, bcolors.ENDC)
+                    os.system("cp configuration.json %s/configuration.json" % MODEL_DIR)
+                    if (packageTrainedModel):
+                        print(bcolors.OKGREEN, "Packaging model without doing any training and exiting ..",
+                              bcolors.ENDC)
+                        os.system("python3 packageYMAPNet.py")  #Zip exactly the files configuration.json needs, as ymapnet_model.zip
+                    sys.exit(0)
+        #----------------------------------------------------------------------------------------
+
+        print(bcolors.OKGREEN, "Cleaning previous training artifacts.. ", bcolors.ENDC)
+        os.system(
+            "rm %s/evaluation*.json %s/sample_report*.json %s/loss_history.txt" % (MODEL_DIR, MODEL_DIR, MODEL_DIR)
+        )
+        os.system("rm -rf %s/tensorboard" % MODEL_DIR)  #Always clean tensorboard from now on
+
+        #Command line parameter modifiers after loading the model
+        #----------------------------------------------------------------------------------------
+        transplantTokenInitialization = False
+        if ('transplantTokenInitialization' in cfg):
+            transplantTokenInitialization = cfg['transplantTokenInitialization']
+        if (len(sys.argv) > 1):
+            #print('Argument List:', str(sys.argv))
+            for i in range(0, len(sys.argv)):
+                if (sys.argv[i] == "--trans"):
+                    transplantTokenInitialization = True
+
+        if transplantTokenInitialization:
+            from ymapnet.core.NNTransplant import transplantLayersFromSourceToTarget, load_any_model
+            layerNameList = []
+
+            for i in range(int(65)):
+                layerNameList.append("layer_normalization_%u" % i)
+
+            for i in range(int(cfg["tokensOut"])):
+                #layerNameList.append("Y_l1_t%u"%i) <- This has different dimensions
+
+                if (i > 0):
+                    layerNameList.append("Y_l2X_t%u" % i)
+                else:
+                    layerNameList.append("Y_l2F_t%u" % i)
+
+                layerNameList.append("Y_l3_t%u" % i)
+                #layerNameList.append("Y_rescale_t%u"%i) # <- This doesn't have weights
+
+                layerNameList.append("Y_l4_t%u" % i)
+                layerNameList.append("Y_l5_t%u" % i)
+                layerNameList.append("Y_l6_t%u" % i)
+                layerNameList.append("Y_l7_t%u" % i)
+
+                if (i > 0):
+                    layerNameList.append("Y_pre_final_combined_t%u" % i)
+                else:
+                    layerNameList.append("Y_pre_final_t%u" % i)
+
+                #layerNameList.append("res_factor_prev_t%u"%i)
+                layerNameList.append("t%02u" % i)
+
+            for i in range(int(cfg["multihotLayers"])):
+                layerNameList.append(
+                    f"tm{i}"
+                )  #<- may emmit ValueError: Layer tmh1 weight shape (1500, 2048) is not compatible with provided weight shape (2400, 2048).
+            layerNameList.append("tokens_multihot")
+
+            print(bcolors.OKGREEN, "Loading Token Neural Network.. ", bcolors.ENDC)
+            tokenOnlyModel = load_any_model("%s/tokens/model.keras" % MODEL_DIR)
+            print(bcolors.OKGREEN, "Transplanting Token Weights to Main Network.. ", bcolors.ENDC)
+            model = transplantLayersFromSourceToTarget(model, tokenOnlyModel, layerNameList)
+            print(bcolors.OKGREEN, "Removing Token Neural Network from memory.. ", bcolors.ENDC)
+            del tokenOnlyModel
+        #----------------------------------------------------------------------------------------
+
+        # Set up TensorBoard logging
+        #----------------------------------------------------------------------------------------
+        log_dir = MODEL_DIR + "/tensorboard/" + cfg["serial"] + "_" + datetime.datetime.now().strftime(
+            "%Y%m%d-%H%M%S")
+        # histogram_freq=0: per-epoch weight histograms run on the GPU and spike
+        # memory hard on a multi-GB model at the epoch boundary; disabled to avoid
+        # OOM/CUDA kills. Scalar loss/metric curves are still logged.
+        tensorboard_callback = TensorBoard(log_dir=log_dir, histogram_freq=0)
+
+        if (cfg['streamDataset']):
+            mem = 1.0  #When streaming use everything..
+
+        #Validation data is not so big and is loaded first in memory..
+        onlyTrainingData = True
+
+        #(Re)build the C DataLoader shared library so libDataLoader.so always reflects
+        #the current C sources, removing the need to pass forceLibUpdate to each DataLoader.
+        #makeLibrary.sh removes ./libDataLoader.so before recompiling, so a missing .so
+        #afterwards means the build failed — abort rather than run with a stale/missing lib.
+        print(bcolors.OKGREEN, "(Re)building DataLoader library via datasets/DataLoader/makeLibrary.sh ..", bcolors.ENDC)
+        os.system("bash datasets/DataLoader/makeLibrary.sh")
+        if not checkIfFileExists("datasets/DataLoader/libDataLoader.so"):
+            print(bcolors.FAIL, "makeLibrary.sh did not produce libDataLoader.so — aborting.", bcolors.ENDC)
+            sys.exit(1)
+
+        #Prepare Validation Data
+        #----------------------------------------------------------------
+        if cfg['doValidation']:  #(checkIfFileExists(cfg['COCOValidationJSONPath']) and
+            onlyTrainingData = False
+            dbValidation = DataLoader(
+                (cfg['inputHeight'], cfg['inputWidth'], cfg['inputChannels']),
+                (cfg['outputHeight'], cfg['outputWidth'], cfg['outputChannels']),
+                output16BitChannels=cfg['output16BitChannels'],
+                numberOfThreads=cfg['DatasetLoaderThreads'],
+                streamData=int(cfg['streamValidation']),  #0, <- set to 0 to keep it in memory and speed up validation
+                doubleBuffer=int(cfg.get('dataLoaderDoubleBuffer', False)),  #[B1] streaming-only; auto-forced off when fully loaded
+                batchSize=cfg['batchSize'],
+                gradientSize=cfg['heatmapGradientSizeMinimum'],  # <- Use final size! cfg['heatmapGradientSize'],
+                PAFSize=cfg['heatmapPAFSizeMinimum'],  # <- Use final size! cfg['heatmapPAFSizeMinimum'],
+                doAugmentations=0,  # <- Don't do augmentations on test set, keep it clean
+                addPAFs=int(cfg['heatmapAddPAFs']),
+                addBackground=int(cfg['heatmapGenerateSkeletonBkg']),
+                addDepthMap=int(cfg['heatmapAddDepthmap']),
+                addDepthLevelsHeatmaps=int(cfg['heatmapAddDepthLevels']),
+                addNormals=int(cfg['heatmapAddNormals']),
+                addSegmentation=int(cfg['heatmapAddSegmentation']),
+                addInstanceDetection=int(cfg.get('heatmapAddInstanceDetection', False)),
+                addSuperpoint=int(cfg.get('heatmapAddSuperpoint', False)),
+                superpointChannels=int(cfg.get('superpointChannels', 0)),
+                superpointPcaPath=cfg.get('superpointPcaFile', ''),
+                addGeolocation=int(cfg.get('heatmapAddGeolocation', False)),
+                datasets=cfg["ValidationDataset"],
+                vocabularyPath="%s/vocabulary.json" % MODEL_DIR,
+                synonymPath=cfg.get('synonymPath', None),
+                embeddingsPath=cfg.get('embeddingsPath', None),
+                elevatePriority=elevatePriority,
+                libraryPath="datasets/DataLoader/libDataLoader.so")
+            if cfg.get('augmentation'):
+                dbValidation.set_augmentation_params(**cfg['augmentation'])
+            if (cfg['streamValidation']):
+                # Modify the way you call the dataset
+                validation_generator = TrainingDataGenerator(
+                    cfg=cfg, db=dbValidation, batch_size=cfg['batchSize'], validation_data=True,
+                    numberOfTokens=cfg["tokensOut"], numberOfClasses=cfg["tokensClasses"], workers=1,
+                    use_multiprocessing=False, max_queue_size=1)  #multiprocessing happens inside the dataloader
+                validationDatasetLength = dbValidation.numberOfSamples
+                outValLabels = dbValidation.get_labels()
+            else:
+                print(bcolors.WARNING, "Only streaming validation data is supported any more to simplify code..!",
+                      bcolors.ENDC)
+                sys.exit(1)
+        #----------------------------------------------------------------
+
+        #The training set is very large, so depending on the system there are two ways to use it
+        #try streaming it which is very slow due to I/O operations but can work on small VRAM systems
+        #or load it all in memory and use regular TF mechanisms to train on it
+        #----------------------------------------------------------------
+        if profileMode:
+            # ── PROFILE MODE: reuse validation DB as training data ──────────────
+            # dbValidation was loaded above with ~5000 samples and fits in RAM.
+            # We redirect training to it so a 1-epoch run completes in minutes.
+            # No config file is modified; this is entirely local to this run.
+            # WARNING: this is a benchmarking shortcut — loss values are meaningless.
+            print(
+                bcolors.WARNING, "[PROFILE MODE] Redirecting training to dbValidation "
+                "(%d samples) — loss values are irrelevant, this is a timing benchmark only." %
+                dbValidation.numberOfSamples, bcolors.ENDC)
+            dbTrain = dbValidation
+            outLabels = dbTrain.get_labels()
+            dataset_generator = TrainingDataGenerator(cfg=cfg, db=dbTrain, batch_size=cfg['batchSize'],
+                                                      labels=outLabels, numberOfTokens=cfg["tokensOut"],
+                                                      numberOfClasses=cfg["tokensClasses"], log_dir=log_dir, workers=1,
+                                                      use_multiprocessing=False, max_queue_size=queueSize)
+            trainingDatasetLength = dbTrain.numberOfSamples
+            shuffleData = False
+        else:
+            if True:  #(checkIfFileExists(cfg['COCOTrainingJSONPath'])):
+                dbTrain = DataLoader(
+                    (cfg['inputHeight'], cfg['inputWidth'], cfg['inputChannels']),
+                    (cfg['outputHeight'], cfg['outputWidth'], cfg['outputChannels']),
+                    output16BitChannels=cfg['output16BitChannels'],
+                    #numberOfSamples = 10000, <- uncomment to just use a few samples for test
+                    streamData=int(cfg['streamDataset']),
+                    doubleBuffer=int(cfg.get('dataLoaderDoubleBuffer', False)),  #[B1] overlap C batch prep with the GPU step
+                    batchSize=cfg['batchSize'],
+                    numberOfThreads=cfg['DatasetLoaderThreads'],
+                    gradientSize=cfg['heatmapGradientSize'],
+                    PAFSize=cfg['heatmapPAFSize'],
+                    doAugmentations=int(cfg['dataAugmentation']),
+                    addPAFs=int(cfg['heatmapAddPAFs']),
+                    addBackground=int(cfg['heatmapGenerateSkeletonBkg']),
+                    addDepthMap=int(cfg['heatmapAddDepthmap']),
+                    addDepthLevelsHeatmaps=int(cfg['heatmapAddDepthLevels']),
+                    addNormals=int(cfg['heatmapAddNormals']),
+                    addSegmentation=int(cfg['heatmapAddSegmentation']),
+                    addInstanceDetection=int(cfg.get('heatmapAddInstanceDetection', False)),
+                    addSuperpoint=int(cfg.get('heatmapAddSuperpoint', False)),
+                    superpointChannels=int(cfg.get('superpointChannels', 0)),
+                    superpointPcaPath=cfg.get('superpointPcaFile', ''),
+                    addGeolocation=int(cfg.get('heatmapAddGeolocation', False)),
+                    datasets=cfg["TrainingDataset"],
+                    vocabularyPath="%s/vocabulary.json" % MODEL_DIR,
+                    synonymPath=cfg.get('synonymPath', None),
+                    embeddingsPath=cfg.get('embeddingsPath', None),
+                    elevatePriority=elevatePriority,
+                    libraryPath="datasets/DataLoader/libDataLoader.so")
+                if cfg.get('augmentation'):
+                    dbTrain.set_augmentation_params(**cfg['augmentation'])
+
+                print("Joint gradient sizes ", cfg['heatmapGradientSize'], " -> ", cfg['heatmapGradientSizeMinimum'])
+                dbTrain.updateJointDifficulty(cfg['keypoint_difficulty'])
+                if (cfg['streamDataset']):
+                    # Modify the way you call the dataset
+                    outLabels = dbTrain.get_labels()
+                    dataset_generator = TrainingDataGenerator(
+                        cfg=cfg, db=dbTrain, batch_size=cfg['batchSize'], labels=outLabels,
+                        numberOfTokens=cfg["tokensOut"], numberOfClasses=cfg["tokensClasses"], log_dir=log_dir,
+                        workers=1, use_multiprocessing=False,
+                        max_queue_size=queueSize)  #multiprocessing happens inside the dataloader
+                    trainingDatasetLength = dbTrain.numberOfSamples
+                    shuffleData = False  #<- shuffling is done inside the generator
+                else:
+                    shuffleData = True
+                    print(bcolors.WARNING, "Only streaming training data is supported any more to simplify code..!",
+                          bcolors.ENDC)
+                    sys.exit(1)
+        #----------------------------------------------------------------
+
+        steps_per_epoch = trainingDatasetLength // int(cfg['batchSize'])
+
+        if cfg.get('outputDescriptors', False):
+            desc_dim = dbTrain.get_descriptor_number_of_elements()
+            assert desc_dim == 768, (
+                f"outputDescriptors=True but the C DataLoader returned descriptor dim={desc_dim}. "
+                "Rebuild libDataLoader.so with -DUSE_DINOV2_FEATURES and verify .dinov2 files exist alongside each dataset."
+            )
+
+        # Enrich cfg with model metrics before logging
+        trainable_params = int(np.sum([np.prod(v.shape) for v in model.trainable_weights]))
+        non_trainable_params = int(np.sum([np.prod(v.shape) for v in model.non_trainable_weights]))
+        cfg['model_trainable_params'] = trainable_params
+        cfg['model_non_trainable_params'] = non_trainable_params
+        cfg['model_total_params'] = trainable_params + non_trainable_params
+        #cfg['model_trainable_params_M']   = round(trainable_params     / 1e6, 3)
+        #cfg['model_total_params_M']       = round((trainable_params + non_trainable_params) / 1e6, 3)
+        cfg['steps_per_epoch'] = steps_per_epoch
+        cfg['training_samples'] = trainingDatasetLength
+        print(
+            f"Model parameters — trainable: {trainable_params:,}  non-trainable: {non_trainable_params:,}  total: {trainable_params+non_trainable_params:,}"
+        )
+
+        # Print the shapes of inputs and outputs
+        print("Training Configuration :", cfg)
+        logText(cfg, log_dir)
+
+        #Clear Status.txt with configuration until it gets updated
+        os.system("cat configuration.json > status.txt")
+        
+        from ymapnet.reporting.plotTrainingProgressToSVG import writeStatusSVGPlaceholder
+        writeStatusSVGPlaceholder('status.svg')
+
+        # Define Learning Rate Scheduler callback
+        #lr_callback = keras.optimizers.schedules.CosineDecay(initial_learning_rate=cfg['learningRate'], decay_steps=cfg['epochs'] * steps_per_epoch)
+        #lr_callback = tf.keras.callbacks.LearningRateScheduler(custom_lr_scheduler) <- This is not configurable
+        # With multi-GPU the LR is scaled by numberOfGPUs (linear scaling rule).
+        # A 5-epoch warmup ramps the LR from endLoss to startLoss to prevent
+        # divergence from the large initial learning rate on random weights.
+        lr_warmup = 5 if use_strategy else 0
+        lr_callback = tf.keras.callbacks.LearningRateScheduler(lambda epoch: custom_lr_scheduler(
+            epoch, cfg['learningRateStart'], cfg['learningRateEnd'], warmup_epochs=lr_warmup))
+
+        #Early Stopping / Checkpointing
+        whatToMonitor = cfg['earlyStoppingMonitor']
+        howToMonitor = cfg['earlyStoppingHowToMonitor']
+
+        if (onlyTrainingData) and (cfg['earlyStoppingMonitor'] == "val_loss"):
+            print("You forgot to change the monitor to loss, fixing this automatically")
+            cfg['earlyStoppingMonitor'] = "loss"
+
+        # Define EarlyStopping/ModelCheckpoint callbacks
+        #-------------------------------------------------------------------------
+        early_stopping = keras.callbacks.EarlyStopping(
+            monitor=whatToMonitor,
+            mode=howToMonitor,
+            #monitor  = 'loss',           mode = 'min', # Monitor the Training loss metric / Mode should be 'min' because we want to minimize the loss metric
+            #monitor = 'val_loss',        mode = 'min', # Monitor the Validation loss metric / Mode should be 'min' because we want to minimize the loss metric
+            #monitor  = 'hdm',            mode = 'max', # Monitor the Training HDM metric / Mode should be 'max' because we want to maximize the  metric
+            #monitor = 'val_hdm',         mode = 'max', # Monitor the Validation HDM metric / Mode should be 'max' because we want to maximize the  metric
+            # Number of epochs with no improvement after which training will be stopped
+            patience=cfg['earlyStoppingPatience'],  
+            # Minimum change in the monitored quantity to qualify as an improvement
+            min_delta=cfg['earlyStoppingMinDelta'], 
+            verbose=1,  # Set to 1 for more verbose output
+            restore_best_weights=
+            True,  # Restore model weights from the epoch with the best value of the monitored quantity
+            start_from_epoch=cfg['earlyStoppingStart']  #After which epoch to start early stopping!
+        )
+        #-------------------------------------------------------------------------
+        from ymapnet.core.NNLosses import ConditionalModelCheckpoint
+        checkpointer = ConditionalModelCheckpoint(
+            monitor=whatToMonitor,
+            mode=howToMonitor,
+            filepath="best.weights.h5",
+            #filepath="checkpoint_epoch_{epoch:02d}.weights.h5",  # Corrected file extension
+            save_best_only=True,
+            save_weights_only=True,
+            start_from_epoch=cfg['earlyStoppingStart'],
+            verbose=1,
+            total_epochs=cfg['epochs'],
+            # CA1: retain the top-N best-by-monitor checkpoints for post-training
+            # checkpoint averaging (U1). Zero (the default when the flag is off)
+            # keeps the legacy single-best behaviour.
+            swa_num_checkpoints=cfg.get('swaNumCheckpoints', 5) if cfg.get('useCheckpointAveraging', False) else 0,
+            swa_min_epoch_fraction=cfg.get('swaMinEpochFraction', 0.5),
+            serial=cfg.get('serial', None))
+        #-------------------------------------------------------------------------
+        from ymapnet.reporting.plotTrainingProgressToSVG import SVGLogger
+        svg_logger = SVGLogger(
+            output_path="status.svg",
+            monitor=whatToMonitor,
+            mode=howToMonitor,
+            total_epochs=cfg['epochs'],
+        )
+        #-------------------------------------------------------------------------
+        # Create a distributed dataset from the tensorflow datasets
+        #--------------------------------------------------------------------------------------------------------------------------------
+        #----trainingDataset            = trainingDataset.shuffle(100 * cfg['batchSize']).repeat(cfg['epochs']).batch(numberOfGPUs * cfg['batchSize'], drop_remainder=True)
+        #----validationDataset          = validationDataset.repeat(cfg['epochs']).batch(numberOfGPUs * cfg['batchSize'], drop_remainder=True)
+
+        #If strategies are restored this needs to be restored ->
+        #distributedTrainingDataset = strategy.experimental_distribute_dataset(trainingDataset)
+
+        # Create extra Metrics to have a better grasp of what is happening with the model
+        OUTPUT_MAGNITUDE = float(float(cfg['heatmapActive']) - float(cfg['heatmapDeactivated']))
+        #--
+        HDM_THRESHOLD = 0.01  # 1%
+        HDM_THRESHOLD = OUTPUT_MAGNITUDE * HDM_THRESHOLD  # <- translate the percentage to an absolute value, commenting out this line reverts to old counts
+        #--
+        hdm_metric = HeatmapDistanceMetric(threshold=HDM_THRESHOLD)
+        hdm16bit_metric = HeatmapDistanceMetric(name='hdm16', scale=120.0 / 32767.0,
+                                                threshold=HDM_THRESHOLD)  #(32767.0/120.0) * HDM_THRESHOLD
+        #rsq_metric = RSquaredMetric()
+
+        # Initialize the Adam Optimizer using configuration
+        #optimizer = AdamWCautious(learning_rate=float(cfg['learningRate']),clipnorm=None,clipvalue=1.0)
+        #optimizer = tf.keras.optimizers.Adam(learning_rate=cfg['learningRate'])
+        optimizer = getOptimizerFromCFG(cfg, globalClipNorm=1.0 if use_strategy else None)
+
+        #Decide on heatmap loss based on configuration
+        hmloss = None
+        if (cfg['loss'] == "mse"):
+            baseScale8b = cfg['lossBaseHeatmapScale'] / 120.0
+            baseScale16b = cfg['lossBaseHeatmapScale'] / 32767.0
+            hmloss = HeatmapCoreLoss(
+                channel_ranges=dbValidation.channel_ranges,
+                scale=baseScale8b, jointGain=cfg['lossWeightJoints'], PAFGain=cfg['lossWeightPAFs'],
+                DepthGain=cfg['lossWeightDepth'], NormalGain=cfg['lossWeightNormals'], TextGain=cfg['lossWeightText'],
+                SegmentGain=cfg['lossWeightSegmentation'], DistanceLevelGain=cfg['lossWeightDepthLevels'],
+                DenoisingGain=cfg['lossWeightDenoising'], PenaltyGain=cfg['lossPenaltyGain'],
+                leftRightGain=cfg['lossLeftRightGain'],
+                InstanceGain=cfg.get('lossWeightInstance', 1.0),
+                SuperpointGain=cfg.get('lossWeightSuperpoint', 1.0),
+                GeolocationGain=cfg.get('lossWeightGeolocation', 1.0),
+                activeRaw=float(cfg['heatmapActive']),
+                PenaltyForegroundNormalized=cfg.get('lossPenaltyForegroundNormalized', False))
+            hmloss16b = VanillaMSELossSimple(scale=baseScale16b)
+        elif (cfg['loss'] == "combine"):
+            print(bcolors.WARNING, "Using experimental combined loss..", bcolors.ENDC)
+            hmloss = combined_loss
+        elif (cfg['loss'] == "dssim"):
+            print(bcolors.WARNING, "Using experimental dssim loss..", bcolors.ENDC)
+            hmloss = dssim_loss
+        else:
+            print(bcolors.WARNING, "Using generic loss, will probably not work well..", bcolors.ENDC)
+            hmloss = cfg['loss']
+            hmloss16b = cfg['loss']
+
+        #Compile a model with the requested loss
+        if ("outputTokens" in cfg) and (cfg["outputTokens"]):
+            print("Now retrieving token weights!")
+            weight_array = dbTrain.get_token_frequencies()
+            # Optional class-weight conditioning (serial 286+): the raw inverse-frequency
+            # weights (totalSum/count) span many orders of magnitude, so the rare/OOV tail
+            # dominates the multihot loss and the up-weighting of real rare classes (dog,
+            # child) is washed out. Anchor on the MOST-FREQUENT content class (-> 1.0) so the
+            # relative ratios are preserved (person 1.0, dog ~3.5x, woman ~3.3x, horse ~6.8x),
+            # then clip so the tail is bounded. db_count_description_token_weight returns
+            # exactly 1.0 for count==0 / blacklisted tokens, so wa>1.0 isolates real classes;
+            # dead/OOV classes are forced to the floor so they aren't learned. Absent knob =
+            # untouched 285 behaviour.
+            if cfg.get('multihotClassWeightNormalize', False):
+                wa = np.asarray(weight_array, dtype=np.float32)
+                real = wa[wa > 1.0]
+                anchor = float(real.min()) if real.size else 1.0
+                lo, hi = cfg.get('multihotClassWeightClip', [0.05, 8.0])
+                normalized = np.clip(wa / (anchor + 1e-9), float(lo), float(hi))
+                normalized[wa <= 1.0] = float(lo)     # count==0 / blacklisted -> floor (unlearned)
+                weight_array = normalized
+                print("  multihot class weights anchored (most-freq->1) + clipped to [%.3f, %.3f]" % (float(lo), float(hi)))
+            class_weight_dict = {i: float(weight) for i, weight in enumerate(weight_array)}
+
+            #-------------------------------------------------------------------------------------
+            # GloVeHybridLoss replaces GloVeMSELoss.
+            # GloVeMSELoss optimised L2 distance, which biases the network toward
+            # predicting a low-magnitude centroid — good MSE but poor directional
+            # alignment → cosine_sim ≈ 0.22.  GloVeHybridLoss splits the total
+            # per-token weight equally between an MSE term (anchors magnitude) and
+            # a cosine term (anchors direction), plus a small norm-regularization
+            # term (weight=0.01, built into the loss class) that keeps the
+            # predicted embedding norm close to the GT norm so the downstream
+            # tokens_multihot head receives consistently-scaled features.
+            from ymapnet.core.NNLosses import GloVeHybridLoss, MultiHotLoss, WeightedBinaryCrossEntropy, WeightedFocalLoss
+            losses = dict()
+            #for i in reversed(range(cfg["tokensOut"])): #<- Try reversing order(?)
+            for i in range(cfg["tokensOut"]):
+                # Each token receives half the total per-token budget as MSE weight
+                # and half as cosine weight, keeping the total gradient magnitude
+                # identical to the old GloVeMSELoss(weight=lossWeightGloveTokens/tokensOut).
+                per_token_weight = cfg["lossWeightGloveTokens"] / cfg["tokensOut"]
+                losses["t%02u" % i] = GloVeHybridLoss(
+                    mse_weight=per_token_weight * 0.5,
+                    cosine_weight=per_token_weight * 0.5,
+                    # norm_reg_weight defaults to 0.01 inside GloVeHybridLoss
+                )
+            # WeightedFocalLoss with gamma=4.0 and alpha=0.75 (both now default in
+            # the class; stated explicitly here so the intent is visible without
+            # opening NNLosses.py):
+            #   gamma=4.0 — stronger suppression of easy true-negatives.
+            #               The positive/negative class ratio is ≈1:1000 for 17 977
+            #               classes; gamma=2.0 left too much gradient on the trivial
+            #               all-zero prediction, keeping recall at 0.047.
+            #   alpha=0.75 — positive-class gradient is 3× negative-class gradient,
+            #               directly counteracting the imbalance to improve recall.
+            #losses['tokens_multihot']  = WeightedBinaryCrossEntropy(weight_array, weight=cfg["lossWeightMultihotTokens"])  #MultiHotLoss()
+            # alpha=0.5 (neutral): class_weights already encodes inverse-frequency per class,
+            # so adding alpha>0.5 double-counts the imbalance and makes the model predict almost
+            # everything as positive (observed: BinaryAccuracy dropped from 0.9996 to 0.028).
+            # gamma=4.0 is kept — it correctly suppresses easy true-negatives via focal modulation.
+            losses['tokens_multihot'] = WeightedFocalLoss(weight_array, gamma=4.0, alpha=0.5,
+                                                          weight=cfg["lossWeightMultihotTokens"])
+            losses['hm'] = hmloss
+            losses['hm_16b'] = hmloss16b
+            if cfg.get('heatmapAddDepthNormalsUncertainty', False):
+                losses['hm_nll'] = DepthNormalsNLLLoss(
+                    scale=float(cfg.get('heatmapActive', 120)),
+                    weight=cfg.get('lossWeightDepthNormalsUncertainty', 1.0))
+            if cfg.get('outputDescriptors', False):
+                from ymapnet.core.NNLosses import DescriptorLoss
+                losses['descriptors'] = DescriptorLoss(weight=cfg.get('lossWeightDescriptors', 1.0))
+            if cfg.get('useGeolocationHead', False):
+                from ymapnet.core.NNLosses import GeolocationKLLoss
+                losses['geo_grid'] = GeolocationKLLoss(weight=cfg.get('lossWeightGeolocationHead', 1.0),
+                                                       concentration_weighting=cfg.get('geoConcentrationWeighting', False))
+            #-------------------------------------------------------------------------------------
+            #This is no longer used, instead of set to 1.0 we pass a None
+            loss_weights = None
+            #loss_weights = dict()
+            #for i in range(cfg["tokensOut"]):
+            #            loss_weights["t%02u"%i] = 1.0 #cfg["lossWeightGloveTokens"] / cfg["tokensOut"]
+            #loss_weights['tokens_multihot']  = 1.0 #cfg["lossWeightMultihotTokens"]
+            #loss_weights['hm'] = 1.0
+            #-------------------------------------------------------------------------------------
+            from ymapnet.core.NNLosses import HeatmapDistanceMetric, HeatmapDistanceMetricPartial, NonZeroCorrectPixelMetric, CustomTopKCategoricalAccuracy
+            metrics = dict()
+
+            from ymapnet.core.NNLosses import TopKAccuracyMetric, CosineSimilarityMetric, MultiHotF1Metric
+            # Safe under mixed precision: all output heads now emit float32
+            # (dtype='float32' on the output Dense/Rescaling layers) and all
+            # metrics below cast their inputs to float32 internally.
+            for i in range(cfg["tokensOut"]):
+                metrics["t%02u" % i] = CosineSimilarityMetric(name='cossim', dtype=tf.float32, axis=1)
+            if cfg.get('outputDescriptors', False):
+                metrics['descriptors'] = CosineSimilarityMetric(name='desc_cossim', dtype=tf.float32, axis=1)
+            if cfg.get('useGeolocationHead', False):
+                from ymapnet.core.NNLosses import GeolocationKmAccuracy
+                _ggh = int(cfg.get('geoGridHeight', 64)); _ggw = int(cfg.get('geoGridWidth', 128))
+                _geo_loc_thr = float(cfg.get('geoLocalizableThreshold', 0.005))
+                # Exp 281: report accuracy over ALL samples AND over the localizable subset
+                # (GT concentration >= geoLocalizableThreshold) — the only view that shows real
+                # signal under COCO's unlocalizable majority. Logged as geo_acc2500 / geo_acc2500_loc.
+                metrics['geo_grid'] = [
+                    GeolocationKmAccuracy(name='geo_acc2500', threshold_km=2500.0,
+                                          grid_h=_ggh, grid_w=_ggw, native_h=_ggh, native_w=_ggw),
+                    GeolocationKmAccuracy(name='geo_acc2500_loc', threshold_km=2500.0,
+                                          grid_h=_ggh, grid_w=_ggw, native_h=_ggh, native_w=_ggw,
+                                          min_concentration=_geo_loc_thr),
+                ]
+
+            # NOTE: 'accuracy' resolves to BinaryAccuracy for sigmoid outputs.
+            # With alpha=0.75 focal loss the model tends to predict many positives,
+            # making BinaryAccuracy uninformative (driven by FP rate).
+            # MultiHotF1Metric gives an honest per-sample micro-F1 at two operating points:
+            #   f1_thr05   — hard threshold 0.5 (standard, but sensitive to sigmoid calibration)
+            #   f1_top20   — treats top-20 predicted classes as positive (threshold-free,
+            #                more robust early in training when output scale is still shifting)
+            metrics['tokens_multihot'] = [
+                #These metrics take ~20min / epoch (?)
+                #MultiHotF1Metric(name="f1_thr05",  threshold=0.5,  top_k=None, dtype=tf.float32),
+                #MultiHotF1Metric(name="f1_top20",  threshold=None, top_k=20,   dtype=tf.float32),
+                TopKAccuracyMetric(name="top1_accuracy", k=1, dtype=tf.float32),
+                TopKAccuracyMetric(name="top3_accuracy", k=3, dtype=tf.float32),
+                TopKAccuracyMetric(name="top5_accuracy", k=5, dtype=tf.float32)
+            ]
+
+            metrics['hm_16b'] = [
+                HeatmapDistanceMetric(name="hdm_16b_depth", threshold=HDM_THRESHOLD, scale=120.0 / 32767.0)
+            ]
+
+            metrics['hm'] = [
+                hdm_metric,
+                #NonZeroCorrectPixelMetric(name="hdm_not0",         accuracyThreshold=HDM_THRESHOLD,start=0),
+                HeatmapDistanceMetricPartial(name="hdm_joints", threshold=HDM_THRESHOLD, start=0, end=17),
+                NonZeroCorrectPixelMetric(name="hdm_not0_joints", accuracyThreshold=HDM_THRESHOLD, start=0, end=17),
+                HeatmapDistanceMetricPartial(name="hdm_PAFs", threshold=HDM_THRESHOLD, start=17, end=29),
+                HeatmapDistanceMetricPartial(name="hdm_depth", threshold=HDM_THRESHOLD, start=29, end=30),
+                HeatmapDistanceMetricPartial(name="hdm_normal", threshold=HDM_THRESHOLD, start=30, end=33),
+                HeatmapDistanceMetricPartial(name="hdm_depthlvls", threshold=HDM_THRESHOLD, start=33, end=34),
+                HeatmapDistanceMetricPartial(name="hdm_denoise", threshold=HDM_THRESHOLD, start=34, end=37),
+                HeatmapDistanceMetricPartial(name="hdm_leftright", threshold=HDM_THRESHOLD, start=37, end=39),
+                HeatmapDistanceMetricPartial(name="hdm_text", threshold=HDM_THRESHOLD, start=46, end=47),
+                HeatmapDistanceMetricPartial(name="hdm_person", threshold=HDM_THRESHOLD, start=39, end=40),
+                HeatmapDistanceMetricPartial(name="hdm_vehicle", threshold=HDM_THRESHOLD, start=43, end=44),
+                HeatmapDistanceMetricPartial(name="hdm_animal", threshold=HDM_THRESHOLD, start=44, end=45),
+                HeatmapDistanceMetricPartial(name="hdm_floor", threshold=HDM_THRESHOLD, start=57, end=58),
+                HeatmapDistanceMetricPartial(name="hdm_segms", threshold=HDM_THRESHOLD, start=39, end=72)
+            ]
+            # Per-instance center+size head (range read from the C layout, not hardcoded).
+            if 'instance' in dbValidation.channel_ranges:
+                inst_s, inst_e = dbValidation.channel_ranges['instance']
+                metrics['hm'].append(
+                    HeatmapDistanceMetricPartial(name="hdm_instance", threshold=HDM_THRESHOLD, start=inst_s, end=inst_e))
+                # hdm_instance is background-dominated (predict-all-background scores ~1.0
+                # on the 99.9%-MINV channels — exactly how the serial-273 size collapse went
+                # unnoticed). hdm_not0_instance measures accuracy ONLY over GT-foreground
+                # pixels, so the center/ridge peaks must actually be predicted to score.
+                metrics['hm'].append(
+                    NonZeroCorrectPixelMetric(name="hdm_not0_instance", accuracyThreshold=HDM_THRESHOLD,
+                                              start=inst_s, end=inst_e))
+            # Geolocation density head (serial 278+): range from the C layout, not hardcoded.
+            # Like instance, the geo channel is MINV-background dominated, so plain hdm_geolocation
+            # scores ~1.0 by predicting all background — hdm_not0_geolocation (GT-foreground only,
+            # the density peaks) is the metric that actually shows whether the head learns.
+            if 'geolocation' in dbValidation.channel_ranges:
+                geo_s, geo_e = dbValidation.channel_ranges['geolocation']
+                metrics['hm'].append(
+                    HeatmapDistanceMetricPartial(name="hdm_geolocation", threshold=HDM_THRESHOLD, start=geo_s, end=geo_e))
+                metrics['hm'].append(
+                    NonZeroCorrectPixelMetric(name="hdm_not0_geolocation", accuracyThreshold=HDM_THRESHOLD,
+                                              start=geo_s, end=geo_e))
+            # Depth+normals aleatoric uncertainty head: watch its calibration (→ 1.0 ideal).
+            if cfg.get('heatmapAddDepthNormalsUncertainty', False):
+                from ymapnet.core.NNLosses import DepthNormalsUncertaintyCalibration
+                metrics['hm_nll'] = DepthNormalsUncertaintyCalibration(
+                    name="unc_calib", scale=float(cfg.get('heatmapActive', 120)))
+            #-------------------------------------------------------------------------------------
+            model.compile(optimizer=optimizer, loss=losses, loss_weights=loss_weights, metrics=metrics,
+                          jit_compile=useXLA)
+            #-------------------------------------------------------------------------------------
+        else:
+            #model.compile(optimizer=optimizer,
+            #              loss         = {'hm': hmloss,             'heatmaps_output_16bit': hmloss},
+            #              loss_weights = {'hm': 1.0 ,               'heatmaps_output_16bit': 1.0 },
+            #              metrics      = {'hm': hdm_metric,         'heatmaps_output_16bit': hdm16bit_metric})
+            #model.compile(optimizer=optimizer, loss=combined_two_loss, metrics=[hdm_metric])
+            model.compile(optimizer=optimizer, loss=hmloss, metrics=[hdm_metric], jit_compile=useXLA)
+    #--------------------------------------------------------------------------------------------------------------------------------
+
+    #Printout data/size summaries in screen
+    #--------------------------------------------------------------------------------------------------------------------------------
+        bytesPerValue = 1  # np.int8
+        channels = deriveRGBChannelsFromCFG(cfg)
+        heatmapNumber = cfg['outputChannels']
+        estimatedInputByteSize = cfg['inputWidth'] * cfg[
+            'inputHeight'] * channels * trainingDatasetLength * bytesPerValue
+        estimatedOutputByteSize = cfg['outputWidth'] * cfg[
+            'outputHeight'] * heatmapNumber * trainingDatasetLength * bytesPerValue
+        estimatedOutputTokenByteSize = cfg['tokensOut'] * dbTrain.get_embedding_number_of_elements() * 4 * trainingDatasetLength  #float32
+        estimatedOutputMultihotByteSize = cfg['tokensClasses'] * 4 * trainingDatasetLength  #float32
+        estimatedTotalSize = estimatedInputByteSize + estimatedOutputByteSize + estimatedOutputTokenByteSize + estimatedOutputMultihotByteSize
+        #---------------------------------------------------
+        queueInputSize = cfg['inputWidth'] * cfg['inputHeight'] * channels * bytesPerValue * queueSize
+        queueOutputHMSize = cfg['outputWidth'] * cfg['outputHeight'] * heatmapNumber * bytesPerValue * queueSize
+        queueOutputTokenSize = cfg['tokensOut'] * dbTrain.get_embedding_number_of_elements() * 4 * queueSize
+        queueOutputMultihotSize = cfg['tokensClasses'] * 4 * queueSize
+        #---------------------------------------------------
+        print("Dataset/Dataloader Summary")
+        print("--------------------------------------------")
+        print("Training Queue Size (batches) : ", queueSize)
+        print("Training Queue Size : ",
+              convert_bytes(queueInputSize + queueOutputHMSize + queueOutputTokenSize + queueOutputMultihotSize))
+        print("Input Data Size  : ", convert_bytes(estimatedInputByteSize), " | ", channels, " channels")
+        print("Output Data Size : ", convert_bytes(estimatedOutputByteSize), " | ", heatmapNumber, " heatmaps")
+        print("Output Token Size : ", convert_bytes(estimatedOutputTokenByteSize), " | ", cfg['tokensOut'], " tokens")
+        print("Output Multihot Size : ", convert_bytes(estimatedOutputMultihotByteSize), " | ", cfg['tokensClasses'],
+              " multihot classes")
+        print("Total Data Size Transfered per Epoch : ", convert_bytes(estimatedTotalSize))
+        print("Total Data Size Transfered per Epoch per GPU ( ", len(cfg['GPUsUsedForTraining']), "available ) : ",
+              convert_bytes((estimatedTotalSize) / numberOfGPUs))
+        print("--------------------------------------------")
+        print(" ")
+        #--------------------------------------------------------------------------------------------------------------------------------
+
+        # Train the model
+        #--------------------------------------------------------------------------------------------------------------------------------
+        print(bcolors.OKGREEN, "Starting training.. ", bcolors.ENDC)
+        #--------------------------------------------------------------------------------------------------------------------------------
+        distributedValidationDataset = None
+        if profileMode:
+            print(bcolors.WARNING, "[PROFILE MODE] Validation disabled.", bcolors.ENDC)
+        elif (not onlyTrainingData):
+            if (cfg['streamValidation']):
+                print(bcolors.OKGREEN, "Streaming validation dataset from filesystem..", bcolors.ENDC)
+                distributedValidationDataset = validation_generator
+            else:
+                print(bcolors.OKGREEN, "Loading whole validation dataset in memory..", bcolors.ENDC)
+                distributedValidationDataset = validationDataset
+        else:
+            print(bcolors.WARNING, "Not using validation data..", bcolors.ENDC)
+        #--------------------------------------------------------------------------------------------------------------------------------
+        if (cfg['streamDataset']):
+            print(bcolors.OKGREEN, "Streaming training dataset from filesystem..", bcolors.ENDC)
+            distributedTrainingDataset = dataset_generator
+        else:
+            print(bcolors.OKGREEN, "Loading whole training dataset in memory..", bcolors.ENDC)
+            distributedTrainingDataset = trainingDataset
+        #--------------------------------------------------------------------------------------------------------------------------------
+
+        history = None
+        historyFT = None
+        swaSummary = None  # populated by checkpoint averaging (U1) if enabled
+
+        data_augmentation = DataAugmentation(cfg, dbTrain)
+        if (startEpoch != 0):
+            print(bcolors.OKGREEN, "Readjusting everything to start from epoch ", startEpoch, " ..", bcolors.ENDC)
+            data_augmentation.on_epoch_end(startEpoch)
+
+        perf_profiler = PerfProfiler() if profileMode else None
+
+        #If you want to use this also enable LOG_THREADING_INFORMATION=True in NNTraining.py
+        #from NNTraining import BatchLoggerCallback
+        #batch_logger = BatchLoggerCallback(thread_id="train_batches")
+
+        #Epochs can be set to zero to just do post training training
+        #--------------------------------------------------------------------------------------------------------------------------------
+        check_vram_and_suggest_batch_size(cfg)
+        if (cfg['epochs'] > 0):
+          try:
+            history = model.fit(
+                distributedTrainingDataset,
+                batch_size=cfg['batchSize'],
+                epochs=cfg['epochs'],
+                validation_data=distributedValidationDataset,
+                initial_epoch=startEpoch,
+                shuffle=shuffleData,
+                #steps_per_epoch  = steps_per_epoch, #<- Disable if not using Tensorflow Data Generator
+                callbacks=[
+                    cb for cb in [
+                        perf_profiler, tensorboard_callback, early_stopping, checkpointer, lr_callback,
+                        data_augmentation, svg_logger
+                    ] if cb is not None
+                ]  #batch_logger
+            )
+          except Exception as e:
+            errorMessage = "Error occured during training: %s" % str(e)
+            # Surface the real error on stdout (with traceback) — otherwise it is only
+            # written to tensorboard and effectively hidden if that logging also fails.
+            print(bcolors.FAIL, errorMessage, bcolors.ENDC)
+            traceback.print_exc()
+            logText(errorMessage, log_dir, subject="TrainingError")
+        #--------------------------------------------------------------------------------------------------------------------------------
+        if profileMode:
+            print(bcolors.WARNING, "[PROFILE MODE] Benchmark complete — skipping model save, evaluation and packaging.",
+                  bcolors.ENDC)
+            sys.exit(0)
+        checkpointer.write_completion_status()
+
+        # CA5: checkpoint averaging (U1). Do this HERE — after fit, while the real
+        # composite losses are still compiled (the recompile below sets loss="mse",
+        # which cannot evaluate the composite/hm_nll heads) and while the training /
+        # validation datasets are still alive (freed only later). On return `model`
+        # holds the adopted (averaged-or-best) weights, so the existing recompile ->
+        # save -> zip -> scp flow packages exactly that net. Guarded so any failure
+        # falls back to the best-epoch weights already restored by EarlyStopping.
+        swaSummary = None
+        if (cfg['epochs'] > 0) and cfg.get('useCheckpointAveraging', False):
+            try:
+                from ymapnet.core.NNCheckpointAveraging import apply_checkpoint_averaging
+                swaSummary = apply_checkpoint_averaging(
+                    model, checkpointer, cfg, distributedTrainingDataset, distributedValidationDataset)
+            except Exception as e:
+                print(bcolors.FAIL, "Checkpoint averaging failed (keeping best epoch): %s" % str(e), bcolors.ENDC)
+                traceback.print_exc()
+                try:
+                    model.load_weights("best.weights.h5")
+                except Exception:
+                    pass
+                swaSummary = {"adopted": False, "reason": "exception"}
+
+    #Exit the multi GPU strategy scope here!
+
+    # Recompile OUTSIDE the strategy scope so the saved model carries a plain
+    # (non-distributed) optimizer.  If done inside the scope the optimizer is
+    # wrapped in MirroredStrategy's distribution logic, which makes the saved
+    # .keras file depend on the strategy and fail to load on a single-GPU or
+    # CPU-only machine.
+    print(bcolors.WARNING, "Recompiling model to defaults to make it more portable..",bcolors.ENDC)
+    model.compile(optimizer="adam", loss="mse")
+
+    # Perform any model optimizations requested by configuration and then save and package everything
+    #--------------------------------------------------------------------------------------------------------------------------------
+    if (cfg['pruneModel']):
+        from ymapnet.core.NNOptimize import pruneModel
+        model = pruneModel(model, cfg, trainingDataset)
+
+    if (cfg['clusterModel']):
+        from ymapnet.core.NNOptimize import clusterModel
+        model = clusterModel(model, cfg, trainingDataset)
+
+    #Only use keras format to save space! formats=["keras","tf","tflite","onnx"]
+    saveNNModel(MODEL_DIR, model, formats=["keras"])
+
+    #Promote the training configuration (root, git-tracked) into the packaged runtime dir
+    #now that the model has been successfully saved. Runtime/inference reads
+    #<MODEL_DIR>/configuration.json; this is the only point it is updated.
+    print(bcolors.OKGREEN, "Promoting ./configuration.json -> %s/configuration.json" % MODEL_DIR, bcolors.ENDC)
+    os.system("cp configuration.json %s/configuration.json" % MODEL_DIR)
+
+    #Log Per sample training report
+    dbTrain.dump_sample_report("%s/sample_report_training.json" % MODEL_DIR)
+
+    if (history):
+        logTrainingHistory(cfg, MODEL_DIR, "loss_history.txt", history)
+
+    #Log best epoch / loss
+    #--------------------------------------------------------------------------------------------------------------------------------
+    finishDetails = dict()
+    finishDetails["BestEpoch"] = checkpointer.bestEpoch
+    finishDetails["Best%s" % cfg['earlyStoppingMonitor']] = checkpointer.best
+    finishDetails["BestLog"] = checkpointer.bestLog
+    # CA5: record whether the shipped artifact is the checkpoint-averaged net or the
+    # best single epoch, so .keras == logged-metrics == zip == scp'd all agree.
+    if swaSummary is not None:
+        finishDetails["CheckpointAveraging"] = swaSummary
+    print("Checkpointer Accepted Solution :", finishDetails)
+    logText(finishDetails, log_dir, subject="CheckpointerAcceptedSolution")
+    #--------------------------------------------------------------------------------------------------------------------------------
+
+    #Save vocabulary
+    #No longer save vocabulary to not overwrite it by mistake
+    #os.system("cp datasets/descriptions/index_to_word.json 2d_pose_estimation/vocabulary.json")
+
+    #Save model as INT8 TF-Lite (Disabled because it takes too much space and not currently needed)
+    #if (not onlyTrainingData):
+    #   print(bcolors.WARNING,"We have a validation set, so saving TF-Lite INT8 model..",bcolors.ENDC)
+    #   from NNConverter import saveNNTFLiteINT8Model, saveNNTFLiteFP16Model
+    #   saveNNTFLiteINT8Model(model,dbValidation.get_in_array())
+    #   saveNNTFLiteFP16Model(model,dbValidation.get_in_array())
+
+    # Run evaluation before packaging
+    # model and dbValidation are intentionally kept alive — they are still needed
+    # for extract_validation_losses() below.  Free only what is safe to drop
+    # (training DataLoader + generator) to reclaim RAM before the subprocess
+    # loads its own copy of the model and validation DataLoader.
+    #--------------------------------------------------------------------------------------------------------------------------------
+    try:
+        del dataset_generator
+    except Exception:
+        pass
+    if dbTrain is not None:
+        try:
+            del dbTrain
+            dbTrain = None
+        except Exception:
+            pass
+    import gc
+    gc.collect()
+    #--------------------------------------------------------------------------------------------------------------------------------
+    #print(bcolors.OKGREEN, "Running post-training evaluation (evaluateYMAPNet.py)...", bcolors.ENDC)
+    #os.system("python3 evaluateYMAPNet.py --output 2d_pose_estimation/evaluation.json")
+    #--------------------------------------------------------------------------------------------------------------------------------
+
+    #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    # Disabled (2026-06-12): extract_validation_losses runs AFTER the portability
+    # recompile above (blanket loss="mse"), which cannot evaluate the hm_nll head —
+    # its output is [B,H,W,2C] (mean + log_var) against a [B,H,W,C] target; only
+    # DepthNormalsNLLLoss understands that pairing, so evaluate() crashes on a
+    # shape mismatch whenever heatmapAddDepthNormalsUncertainty is enabled.
+    # To re-enable: either move this block BEFORE the portability recompile (so the
+    # real composite losses are still attached), or recompile here with a per-output
+    # loss dict that maps hm_nll to DepthNormalsNLLLoss.
+    #if (not onlyTrainingData):
+    #    weight_val_array = dbValidation.get_token_frequencies()
+    #    extract_validation_losses(model, validation_generator, dbValidation)
+    #    dbValidation.dump_sample_report("2d_pose_estimation/sample_report_validation.json")
+    #    print("Done Dumping Validation Samples ")
+    print("Skipping per-sample validation loss extraction (disabled — see comment; incompatible with hm_nll after the blanket-mse recompile)")
+    #>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+    # Package output
+    #--------------------------------------------------------------------------------------------------------------------------------
+    print(bcolors.OKGREEN, "Training complete..", bcolors.ENDC)
+    os.system("date +\"%%y-%%m-%%d_%%H-%%M-%%S\" > %s/date.txt" % MODEL_DIR)  #Tag date
+    if (packageTrainedModel):
+        print(bcolors.OKGREEN, "Packaging trained model ..", bcolors.ENDC)
+        os.system("python3 packageYMAPNet.py")  #Zip exactly the files configuration.json needs, as ymapnet_model.zip
+    else:
+        print("Not packaging model")
+    #--------------------------------------------------------------------------------------------------------------------------------
+
+    # Accumulate tensorboard logs
+    #--------------------------------------------------------------------------------------------------------------------------------
+    import shutil
+    os.makedirs("logs", exist_ok=True)
+    tensorboard_src = "%s/tensorboard" % MODEL_DIR
+    if os.path.isdir(tensorboard_src):
+        for item in os.listdir(tensorboard_src):
+            src = os.path.join(tensorboard_src, item)
+            dst = os.path.join("logs", item)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst)
+        print(bcolors.OKGREEN, "Tensorboard logs copied to logs/", bcolors.ENDC)
+    #--------------------------------------------------------------------------------------------------------------------------------
+
+    print('Summary:\n tensorboard --logdir=%s/tensorboard --bind_all && firefox http://127.0.0.1:6006' % MODEL_DIR)
+
+    # Upload results
+    #--------------------------------------------------------------------------------------------------------------------------------
+    print('To upload results (if you take too long it will timeout) :')
+    os.system("timeout 5 scripts/uploadResults.sh")
+    #(the scp suggestion for the packaged model is printed by packageYMAPNet.py itself, above)

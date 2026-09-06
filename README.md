@@ -114,7 +114,7 @@ The "left" and "right" windows will contain the detection results graph
 ### Web Interface
 
 ```bash
-python3 gradioServer.py
+python3 -m ymapnet.webui.gradioServer
 # Open http://localhost:7860 in your browser
 ```
 
@@ -165,7 +165,7 @@ To evaluate the model against COCO17 follow the following commands from the root
 ```bash
 wget "https://huggingface.co/AmmarkoV/Y-MAP-Net/resolve/main/ymapnet_coco_validation_dataset.zip?download=true"
 unzip ymapnet_coco_validation_dataset.zip
-python3 evaluateYMAPNet.py
+python3 -m ymapnet.evaluation.evaluateYMAPNet
 
 ```
 
