@@ -1,4 +1,5 @@
 # Core ML / TensorFlow
+#./runYMAPNet.sh --threshold 120 --eco 5 --singlewindow 3840 2400 6 "Overlay" "Joint Heatmap Union" "PAFs Union" "Depth 16-bit" "Combined Normals" "depthmap>128" "Person" "Face" "Hand" "Wall" "Floor" "Ceiling" "Door" "Window" "Vehicle" "Animal" "Appliance" "Furniture" "Light" "Description" 
 # Pinned for local/server parity (avoids the TF 2.20+ protobuf-7 / CUDA-12.9 jump and
 # keeps the proven CUDA-12.5 stack). Bump deliberately, testing tf2onnx/onnx/model-opt.
 tensorflow[and-cuda]==2.18.0
