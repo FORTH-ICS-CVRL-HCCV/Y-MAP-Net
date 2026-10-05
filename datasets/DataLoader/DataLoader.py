@@ -44,6 +44,42 @@ def loadLibrary(filename, relativePath="", forceUpdate=False):
 
     return libDataLoader
 #-------------------------------------------------------------------------------
+class DataAugmentationParams(ctypes.Structure):
+    """Mirrors struct DataAugmentation in DataAugmentation.h (field order must match exactly)."""
+    _fields_ = [
+        ('chanceDestroy',                   ctypes.c_float),
+        ('chancePerturbed',                 ctypes.c_float),
+        ('chancePanAndZoom',                ctypes.c_float),
+        ('chanceBurnedPixels',              ctypes.c_float),
+        ('chanceBrightnessContrast',        ctypes.c_float),
+        ('chanceBrightnessContrastUniform', ctypes.c_float),
+        ('chanceHorizontalFlip',            ctypes.c_float),
+        ('chanceRotate90',                  ctypes.c_float),
+        ('chanceCoarseDropout',             ctypes.c_float),
+        ('chanceGaussianBlur',              ctypes.c_float),
+        ('chanceDefocusBlur',               ctypes.c_float),
+        ('chanceMotionBlur',                ctypes.c_float),
+        ('maxZoomFactor',                   ctypes.c_float),
+        ('perturbationMagnitude',           ctypes.c_int),
+        ('maxBurnedPixels',                 ctypes.c_int),
+        ('minBrightnessChange',             ctypes.c_float),
+        ('maxBrightnessChange',             ctypes.c_float),
+        ('minRelContrastChange',            ctypes.c_float),
+        ('maxRelContrastChange',            ctypes.c_float),
+        ('minUniformBrightnessChange',      ctypes.c_float),
+        ('maxUniformBrightnessChange',      ctypes.c_float),
+        ('coarseDropoutHolesMin',           ctypes.c_int),
+        ('coarseDropoutHolesMax',           ctypes.c_int),
+        ('coarseDropoutMinSize',            ctypes.c_int),
+        ('coarseDropoutMaxSize',            ctypes.c_int),
+        ('gaussianBlurSigmaMin',            ctypes.c_float),
+        ('gaussianBlurSigmaMax',            ctypes.c_float),
+        ('defocusBlurRadiusMin',            ctypes.c_int),
+        ('defocusBlurRadiusMax',            ctypes.c_int),
+        ('motionBlurLengthMin',             ctypes.c_int),
+        ('motionBlurLengthMax',             ctypes.c_int),
+    ]
+#-------------------------------------------------------------------------------
 def _setup_ctypes(lib):
     """Set all argtypes and restypes for libDataLoader once at load time."""
     vp = ctypes.c_void_p
@@ -65,9 +101,10 @@ def _setup_ctypes(lib):
     lib.db_create.argtypes = [
         vp,  # struct DatabaseList* dbSources
         ul,  # unsigned long numberOfSamples
+        i,  # streamData
+        i,  # doubleBuffer [B1] (effective only with streamData)
         i,
-        i,
-        i,  # streamData, batchSize, workerThreads
+        i,  # batchSize, workerThreads
         i,
         i,  # gradientSize, PAFSize
         i,
@@ -77,6 +114,10 @@ def _setup_ctypes(lib):
         i,
         i,
         i,  # addDepthMap, addDepthLevelsHeatmaps, addNormals, addSegmentation
+        i,  # addInstanceDetection
+        i,  # addSuperpoint
+        i,  # superpointChannels
+        cp,  # superpointPcaPath (char*)
         i,  # bytesPerDepthValue
         ui,
         ui,
@@ -87,6 +128,29 @@ def _setup_ctypes(lib):
         ui
     ]  # widthOut, heightOut, channelsOut8Bit, output16BitChannels
     lib.db_create.restype = vp
+
+    # Geolocation is a module-global toggle read at db_create time (keeps db_create's
+    # signature unchanged). Call db_set_geolocation_config(enable) BEFORE db_create.
+    lib.db_set_geolocation_config.argtypes = [i]
+    lib.db_set_geolocation_config.restype = None
+
+    # Channel layout of the combined depth + segmentation ("all") files, a module global read at db_create
+    # time like geolocation: db_set_combined_layout(label, depth high byte, depth low byte), returns 0 if invalid.
+    lib.db_set_combined_layout.argtypes = [ui, ui, ui]
+    lib.db_set_combined_layout.restype = i
+
+    # Embeddings source is a module-global path read at db_create time (same reason as
+    # geolocation above). Call db_set_embeddings_path(path) BEFORE db_create to point at
+    # e.g. 2d_pose_estimation/conceptnet-numberbatch/GloVe_D300.embeddings instead of GloVe.
+    lib.db_set_embeddings_path.argtypes = [cp]
+    lib.db_set_embeddings_path.restype = None
+
+    # .pzpd archive prefetcher (PZPDLoader.c), module globals read at db_create time:
+    # mode (-1 off, 0 auto, 1 map, 2 pagecache, 3 buffers), I/O threads, budget MB, window (0 = defaults)
+    lib.db_set_prefetch_config.argtypes = [i, i, i, i]
+    lib.db_set_prefetch_config.restype = None
+    lib.db_get_sample_description.argtypes = [vp, ul, cp, ui]
+    lib.db_get_sample_description.restype = i
 
     lib.db_destroy.argtypes = [vp]
     lib.db_destroy.restype = i
@@ -108,7 +172,7 @@ def _setup_ctypes(lib):
     lib.db_get_sample_train_passes.restype = ul
 
     lib.db_get_filename_of_sample.argtypes = [vp, ul, cp, sz]
-    lib.db_get_filename_of_sample.restype = ul
+    lib.db_get_filename_of_sample.restype = i  # C returns int (DATALOADER.md C6)
 
     lib.db_disable_heatmap_output.argtypes = [vp]
 
@@ -127,8 +191,21 @@ def _setup_ctypes(lib):
     lib.db_get_in.restype = P(ub)
     lib.db_get_out.argtypes = [vp, ul]
     lib.db_get_out.restype = P(b)
-    lib.db_get_out16bit.argtypes = [vp, ul, ul]
+    lib.db_get_out16bit.argtypes = [vp, ul]  # endSample param removed C-side (DATALOADER.md A6f)
     lib.db_get_out16bit.restype = P(sh)
+
+    # [B1] Double-buffer pipeline primitives (consumer getters fall back to the fill side
+    # when doubleBuffer is off, so the Python read path is uniform in both modes).
+    lib.db_pipeline_drain.argtypes = [vp]
+    lib.db_pipeline_drain.restype = i
+    lib.db_swap_buffers.argtypes = [vp]
+    lib.db_swap_buffers.restype = i
+    lib.db_get_consumer_in.argtypes = [vp, ul]
+    lib.db_get_consumer_in.restype = P(ub)
+    lib.db_get_consumer_out.argtypes = [vp, ul]
+    lib.db_get_consumer_out.restype = P(b)
+    lib.db_get_consumer_out16bit.argtypes = [vp, ul]
+    lib.db_get_consumer_out16bit.restype = P(sh)
 
     lib.db_save_image.argtypes = [vp, cp, ul]
     lib.db_save_heatmap8bit_as_jpg.argtypes = [vp, cp, ul, us]
@@ -149,6 +226,34 @@ def _setup_ctypes(lib):
     lib.db_get_valid_segmentations.restype = i
     lib.db_get_total_segmentation_classes.argtypes = [vp]
     lib.db_get_total_segmentation_classes.restype = i
+
+    # 8-bit heatmap channel layout (single source of truth, resolved C-side in
+    # HeatmapLayout.h). Name lookup + index enumeration so Python never re-hardcodes
+    # channel ranges.
+    lib.db_get_channel_range.argtypes = [vp, cp, P(ui), P(ui)]
+    lib.db_get_channel_range.restype = i
+    lib.db_get_number_of_channel_groups.argtypes = [vp]
+    lib.db_get_number_of_channel_groups.restype = i
+    lib.db_get_channel_group_name.argtypes = [vp, i]
+    lib.db_get_channel_group_name.restype = cp
+    lib.db_get_channel_group_start.argtypes = [vp, i]
+    lib.db_get_channel_group_start.restype = i
+    lib.db_get_channel_group_count.argtypes = [vp, i]
+    lib.db_get_channel_group_count.restype = i
+    lib.db_get_channel_group_enabled.argtypes = [vp, i]
+    lib.db_get_channel_group_enabled.restype = i
+
+    # Joint names straight from the loaded .db (DATALOADER.md C5)
+    lib.db_get_number_of_joints.argtypes = [vp]
+    lib.db_get_number_of_joints.restype = i
+    lib.db_get_joint_name.argtypes = [vp, i]
+    lib.db_get_joint_name.restype = cp
+
+    # Runtime augmentation parameters (struct DataAugmentation in DataAugmentation.h).
+    lib.db_get_augmentation_params.argtypes = [vp, ctypes.POINTER(DataAugmentationParams)]
+    lib.db_get_augmentation_params.restype = None
+    lib.db_set_augmentation_params.argtypes = [vp, ctypes.POINTER(DataAugmentationParams)]
+    lib.db_set_augmentation_params.restype = None
 
     lib.db_get_MAX_sample_description_token_value.argtypes = [vp]
     lib.db_get_MAX_sample_description_token_value.restype = i
@@ -171,12 +276,17 @@ def _setup_ctypes(lib):
     lib.db_compile_token_synonym_map.argtypes = [vp]
     lib.db_compile_token_synonym_map.restype = i
 
+    lib.db_expand_multiword_tokens.argtypes = [vp, cp]
+    lib.db_expand_multiword_tokens.restype = i
+
     lib.db_count_description_tokens.argtypes = [vp, i]
     lib.db_count_description_tokens.restype = P(ul)
     lib.db_free_description_token_count.argtypes = [vp]
     lib.db_free_description_token_count.restype = i
     lib.db_count_description_token_weight.argtypes = [vp, i]
     lib.db_count_description_token_weight.restype = P(f)
+    lib.db_set_sample_description_tokens.argtypes = [vp, ul, P(us), i]
+    lib.db_set_sample_description_tokens.restype = i
 
     lib.db_get_sample_descriptors.argtypes = [vp, ul]
     lib.db_get_sample_descriptors.restype = P(f)
@@ -188,8 +298,18 @@ def _setup_ctypes(lib):
     lib.db_get_sample_description_tokens_number.restype = i
     lib.db_get_sample_description_embeddings.argtypes = [vp, ul, i]
     lib.db_get_sample_description_embeddings.restype = P(f)
-
-
+    lib.db_get_batch_tokens.argtypes = [vp, ul, ul, P(us)]
+    lib.db_get_batch_tokens.restype = None
+    lib.db_get_batch_embeddings.argtypes = [vp, ul, ul, ul, P(f)]
+    lib.db_get_batch_embeddings.restype = None
+    lib.db_get_description_embeddings_number.argtypes = [vp, ul]
+    lib.db_get_description_embeddings_number.restype = i
+    lib.db_get_embeddings_offset.argtypes = [vp]
+    lib.db_get_embeddings_offset.restype = f
+    lib.db_get_embeddings_scaling.argtypes = [vp]
+    lib.db_get_embeddings_scaling.restype = f
+    lib.db_set_embeddings_offset_scaling.argtypes = [vp, f, f]
+    lib.db_set_embeddings_offset_scaling.restype = i
 #-------------------------------------------------------------------------------
 def checkIfAnyValuesOutsideOfRange(arr, minV, maxV):
     for sample in range(arr.shape[0]):
@@ -202,8 +322,6 @@ def checkIfAnyValuesOutsideOfRange(arr, minV, maxV):
                         print("Val : ", val)
                         return 1
     return 0
-
-
 #---------------------------------------------------------------------------------------------
 def get_blacklisted_keys(vocabulary, tokenblacklist):
     # Initialize an empty list to store the keys
@@ -216,8 +334,6 @@ def get_blacklisted_keys(vocabulary, tokenblacklist):
             blacklisted_keys.append(key)
 
     return blacklisted_keys
-
-
 #---------------------------------------------------------------------------------------------
 """
 def remove_blacklisted_tokens(vocabulary, tokenblacklist):
@@ -232,23 +348,18 @@ def remove_blacklisted_tokens(vocabulary, tokenblacklist):
     
     return filtered_vocabulary
 """
-
-
 #---------------------------------------------------------------------------------------------
 def loadJSON(filename):
     vocabulary = list()
     with open(filename, 'r') as json_file:
         vocabulary = json.load(json_file)
     return vocabulary
-
-
 #---------------------------------------------------------------------------------------------
 def is_verb_simple(word):
     # List of typical verb suffixes (this is a simplification)
     verb_suffixes = ["ing", "ed", "en", "es", "s", "ize"]
     return any(word.endswith(suffix) for suffix in verb_suffixes)
-
-
+#---------------------------------------------------------------------------------------------
 # Function to filter only verbs using spaCy
 #python3 -m pip install spacy
 #python3 -m spacy download en_core_web_sm
@@ -257,8 +368,6 @@ def is_verb(nlp, word):
     doc = nlp(word)
     print("Selecting verbs ")
     return any(token.pos_ == "VERB" for token in doc)
-
-
 #---------------------------------------------------------------------------------------------
 def tokens_to_one_hot(tokens, max_token_value, blacklist, active=1, inactive=0):
     """
@@ -277,17 +386,14 @@ def tokens_to_one_hot(tokens, max_token_value, blacklist, active=1, inactive=0):
     # Initialize a matrix of zeros with shape (16, max_token_value + 1)
     one_hot_encoded = np.full((numberOfSamples, numberOfTokens, max_token_value + 1), inactive, dtype=np.int8)
 
-    # Set the corresponding index for each token to 1
-    for sampleID in range(numberOfSamples):
-        for tokenNumber, tokenValue in enumerate(tokens[sampleID]):
-            #if not (str(token) in blacklist): #Blacklist now enforced in C code
-            one_hot_encoded[sampleID, tokenNumber, tokenValue] = active
-        #Always force 0 as false
-        one_hot_encoded[sampleID, :, 0] = inactive  #forced
+    # Set the corresponding index for each token to 1 (vectorized, DATALOADER.md B3)
+    sampleIdx = np.arange(numberOfSamples)[:, None]
+    tokenIdx = np.arange(numberOfTokens)[None, :]
+    one_hot_encoded[sampleIdx, tokenIdx, tokens] = active
+    #Always force 0 as false
+    one_hot_encoded[:, :, 0] = inactive  #forced
 
     return one_hot_encoded
-
-
 #---------------------------------------------------------------------------------------------
 def tokens_to_classes(tokens, max_token_value, blacklist, active=1, inactive=0):
     """
@@ -305,19 +411,14 @@ def tokens_to_classes(tokens, max_token_value, blacklist, active=1, inactive=0):
     classes_encoded = np.full((numberOfSamples, max_token_value + 1), inactive,
                               dtype=np.int8)  # inactive , dtype=np.int8
 
-    # Set the corresponding index for each token to 1
-    for sampleID in range(numberOfSamples):
-        for i, token in enumerate(tokens[sampleID]):
-            #if not (str(token) in blacklist):  #Blacklist now enforced in C code
-            classes_encoded[sampleID, token] = active  #active
-        #Always force 0 as false
-        classes_encoded[sampleID, 0] = inactive  #forced
+    # Set the corresponding index for each token to 1 (vectorized, DATALOADER.md B3)
+    sampleIdx = np.arange(numberOfSamples)[:, None]
+    classes_encoded[sampleIdx, tokens] = active  #active
+    #Always force 0 as false
+    classes_encoded[:, 0] = inactive  #forced
     return classes_encoded
-
-
 #---------------------------------------------------------------------------------------------
 class DataLoader:
-
     def __init__(
             self,
             inDims,
@@ -326,6 +427,8 @@ class DataLoader:
             numberOfSamples: int = 0,  #0 means automatically use whole dataset
             numberOfThreads: int = 4,  #Most CPUs nowadays have 4 cores/threads
             streamData: int = 0,  #By default dont stream data load it all at once
+            doubleBuffer: int = 0,  #[B1] pipeline batch prep with GPU compute (config dataLoaderDoubleBuffer); streaming-only, forced off otherwise
+            # (a `zeroCopy` kwarg used to sit here — removed; see the note in __init__ below)
             batchSize: int = 32,  #This is only important when streaming data
             gradientSize: int = 12,
             PAFSize: int = 5,
@@ -336,6 +439,16 @@ class DataLoader:
             addDepthLevelsHeatmaps: int = 0,
             addNormals: int = 1,
             addSegmentation: int = 1,
+            addInstanceDetection: int = 0,
+            addSuperpoint: int = 0,
+            superpointChannels: int = 0,
+            superpointPcaPath: str = "",
+            addGeolocation: int = 0,  #Global lat/lon density channel (GEOLOCATION.md). Off by default.
+            combinedChannels=(0, 1, 2),  #Combined "all" files: channels of (segmentation label, depth high byte, depth low byte)
+            prefetchMode: str = "auto",  #.pzpd sources: "auto", "map", "pagecache", "buffers" or "off" (mmap views on demand)
+            prefetchIOThreads: int = 0,  #.pzpd prefetcher I/O threads, budget (MB, buffers mode) and window (records); 0 = defaults
+            prefetchBudgetMB: int = 0,
+            prefetchWindow: int = 0,
             bytesPerDepthValue: int = 2,
             ignoreNoSkeletonSamples: int = 0,  #0 means we want all samples
             datasets=[[
@@ -344,105 +457,74 @@ class DataLoader:
             ]],
             vocabularyPath="2d_pose_estimation/vocabulary.json",
             synonymPath=None,
+            embeddingsPath=None,  # e.g. "2d_pose_estimation/conceptnet-numberbatch/GloVe_D300.embeddings";
+                                   # None keeps the C-side default (GloVe) unchanged.
             elevatePriority=False,
             libraryPath: str = "./libDataLoader.so",
             forceLibUpdate=False):
         #Tokens
         #---------------------------------------
         self.vocabulary = loadJSON(vocabularyPath)
+        self.vocabularyPath = vocabularyPath   # the C side re-reads it for expand_multiword_tokens()
         self.synonymPairs = []
         if synonymPath is not None:
-            rawPairs = loadJSON(synonymPath)
+            # synonymPath is either a single path (str) or a list of paths. Multiple
+            # concept-grouping maps (plural/synonym folding, gender neutralisation,
+            # concept simplification) are merged in order; a later file overrides an
+            # earlier remap for the same source word. Chains are then resolved
+            # transitively (e.g. men->man plus man->person collapses to men->person),
+            # so the result is independent of whether the C map applies transitively.
+            synonymPaths = [synonymPath] if isinstance(synonymPath, str) else list(synonymPath)
             vocabByWord = {v: int(k) for k, v in self.vocabulary.items()}
-            for fromWord, toWord in rawPairs:
-                fromID = vocabByWord.get(fromWord)
-                toID = vocabByWord.get(toWord)
-                if fromID is not None and toID is not None:
-                    self.synonymPairs.append((fromID, toID))
-                else:
-                    print("[synonym] skipping '%s'->'%s': not found in vocabulary" % (fromWord, toWord))
-            print("[synonym] loaded %u remapping pairs" % len(self.synonymPairs))
-        self.tokenblacklist = ["(", ")", ",", ".", "a", "an", 's', 'hu', 'hy', 'w']
+            remap = {}
+            for path in synonymPaths:
+                loaded = 0
+                for fromWord, toWord in loadJSON(path):
+                    fromID = vocabByWord.get(fromWord)
+                    toID = vocabByWord.get(toWord)
+                    if fromID is not None and toID is not None:
+                        remap[fromID] = toID
+                        loaded += 1
+                    else:
+                        print("[synonym] skipping '%s'->'%s': not found in vocabulary" % (fromWord, toWord))
+                print("[synonym] %s: %u pairs" % (path, loaded))
 
-        stopwords = [
-            "of", "on", "and", "I", "in", "the", "is", "it", "at", "to", "with", "for", "from", "near", "while"
-        ]
-        self.tokenblacklist.extend(stopwords)
+            def resolveTarget(fromID):
+                seen = set()
+                cur = fromID
+                while cur in remap and cur not in seen:
+                    seen.add(cur)
+                    cur = remap[cur]
+                return cur
 
-        overrepresented = [
-            'top', 'next', 'two', 'are', 'it', 'its', 'up', 'down', 'left', 'right', 'in', 'out', 'front', 'to', 'has',
-            'by'
-        ]
-        self.tokenblacklist.extend(overrepresented)
+            self.synonymPairs = [(fromID, target) for fromID in remap
+                                 for target in (resolveTarget(fromID),) if target != fromID]
+            print("[synonym] loaded %u remapping pairs from %u file(s)"
+                  % (len(self.synonymPairs), len(synonymPaths)))
+        # Token blacklist lives in token_blacklist.json next to the vocabulary (moved out of
+        # this constructor — DATALOADER.md C4). The JSON's "blacklist" key is the ACTIVE list
+        # (punctuation + stopwords + overrepresented + difficult); its "verbs" key preserves
+        # the historical verb list which was never applied (the extend was commented out).
+        blacklistPath = os.path.join(os.path.dirname(vocabularyPath) or ".", "token_blacklist.json")
+        if exists(blacklistPath):
+            self.tokenblacklist = list(loadJSON(blacklistPath).get("blacklist", []))
+            print("Loaded", len(self.tokenblacklist), "token blacklist entries from", blacklistPath)
+        else:
+            # Fallback for older packaged model dirs that predate token_blacklist.json —
+            # the same active list that used to be hardcoded here.
+            print(bcolors.WARNING, "No", blacklistPath, "found — using the built-in default token blacklist", bcolors.ENDC)
+            self.tokenblacklist = [
+                "(", ")", ",", ".", "a", "an", 's', 'hu', 'hy', 'w',
+                #stopwords
+                "of", "on", "and", "I", "in", "the", "is", "it", "at", "to", "with", "for", "from", "near", "while",
+                #overrepresented
+                'top', 'next', 'two', 'are', 'it', 'its', 'up', 'down', 'left', 'right', 'in', 'out', 'front', 'to', 'has', 'by',
+                #difficult
+                'nintendo', 'wii', 'umpire'
+            ]
 
-        difficult = ['nintendo', 'wii', 'umpire']
-        self.tokenblacklist.extend(difficult)
-
-        # Load the spaCy English model
-        #import spacy
-        #print("Loading spaCy")
-        #nlp = spacy.load("en_core_web_sm")
-        #verbs = [word for word in self.vocabulary.values() if is_verb(nlp,word)]
-
-        verbs = [
-            'abandoned', 'adjusting', 'advertising', 'alcoholic', 'allowed', 'arm', 'arranged', 'arrive', 'assorted',
-            'attached', 'bags', 'baked', 'bakery', 'baking', 'barn', 'bathing', 'batter', 'batting', 'beach', 'beak',
-            'bear', 'believing', 'benches', 'bending', 'bicycles', 'billowing', 'biplane', 'biscuit', 'biting',
-            'blanket', 'blender', 'block', 'blooming', 'blow', 'blowing', 'bookcase', 'bookstore', 'booze', 'bottle',
-            'boulders', 'bow', 'broken', 'brushing', 'bubbles', 'buffalo', 'building', 'bun', 'bundt', 'burning',
-            'camping', 'capped', 'carpeted', 'carriage', 'carrying', 'catch', 'catching', 'cauliflower', 'cave',
-            'celebrating', 'cellar', 'chained', 'chasing', 'checkered', 'checking', 'chewing', 'choir', 'chopped',
-            'clad', 'claim', 'cleaning', 'climbing', 'close', 'closed', 'colored', 'combing', 'coming', 'competing',
-            'connected', 'consisting', 'containing', 'controls', 'conveyor', 'cooked', 'cooking', 'cooling', 'counter',
-            'cover', 'covered', 'cross', 'crossed', 'crossing', 'crowd', 'crowded', 'curtains', 'cut', 'cute',
-            'cutting', 'dance', 'dancing', 'decorated', 'decorating', 'decorative', 'depicting', 'desserts', 'digging',
-            'dining', 'dipping', 'directing', 'displayed', 'do', 'dock', 'docked', 'doing', 'dolphin', 'double',
-            'doubles', 'drawing', 'drawn', 'dressed', 'dressing', 'dribbling', 'dried', 'drink', 'drinking', 'driven',
-            'driving', 'drum', 'drying', 'duckling', 'dump', 'eagle', 'eat', 'eaten', 'eating', 'exhibit', 'expired',
-            'face', 'fallen', 'falling', 'fashioned', 'fast', 'feeding', 'feeds', 'fenced', 'fighting', 'filled',
-            'fishing', 'fix', 'fixing', 'flavored', 'floating', 'flooded', 'flooring', 'flowing', 'flown', 'fly',
-            'flying', 'forested', 'fried', 'frosted', 'frosting', 'fry', 'frying', 'galloping', 'gathered', 'gathering',
-            'gear', 'get', 'getting', 'glassware', 'glazed', 'glove', 'glowing', 'go', 'going', 'goose', 'grab',
-            'grasses', 'grazing', 'grinding', 'growing', 'hand', 'handle', 'handwritten', 'hanging', 'has', 'hate',
-            'having', 'headphones', 'held', 'helmet', 'helping', 'herded', 'herding', 'hiking', 'hit', 'hitting',
-            'hold', 'holding', 'holds', 'hooded', 'hooked', 'horned', 'horseback', 'hugging', 'icing', 'includes',
-            'including', 'jeep', 'jump', 'jumping', 'kick', 'kicking', 'kind', 'kissing', 'kiteboarding', 'kites',
-            'kitten', 'kneeling', 'knick', 'laid', 'landing', 'laying', 'leading', 'leads', 'leaf', 'leafless',
-            'leaning', 'leash', 'leaves', 'left', 'lettering', 'lettuce', 'lift', 'lighting', 'lined', 'link', 'lit',
-            'living', 'loaded', 'loading', 'lobby', 'lodge', 'log', 'look', 'looking', 'looks', 'lounging', 'lush',
-            'lying', 'made', 'make', 'making', 'marching', 'match', 'measuring', 'merry', 'microwave', 'microwaves',
-            'mid', 'milking', 'miss', 'mixed', 'mixing', 'monitor', 'moped', 'motes', 'motorized', 'mound', 'mounted',
-            'mouse', 'nightstands', 'note', 'nurses', 'objects', 'open', 'opening', 'ornate', 'outfit', 'outfits',
-            'outstretched', 'oven', 'overlooking', 'pack', 'packed', 'paddling', 'paintbrush', 'painted', 'painting',
-            'pair', 'pairs', 'pan', 'paneling', 'parachute', 'parasail', 'parasailing', 'parked', 'passes', 'passing',
-            'patch', 'patterned', 'pay', 'pears', 'peeled', 'pepperoni', 'perched', 'perform', 'performing', 'petting',
-            'photograph', 'pick', 'piled', 'pillows', 'pitching', 'play', 'played', 'playground', 'playing', 'plays',
-            'podium', 'pointing', 'pose', 'poses', 'posing', 'poured', 'pouring', 'practicing', 'prepared', 'preparing',
-            'produce', 'propped', 'pull', 'pulled', 'pulling', 'pump', 'pushing', 'putting', 'racing', 'rack',
-            'racquet', 'radishes', 'railing', 'rainbow', 'ram', 'reading', 'reads', 'rear', 'reflected', 'reflecting',
-            'relish', 'remote', 'remove', 'ridden', 'ride', 'rides', 'riding', 'rink', 'ripe', 'roast', 'rocking',
-            'roll', 'roofed', 'rose', 'row', 'rowing', 'rug', 'run', 'running', 'saddle', 'sail', 'sailing', 'salad',
-            'salads', 'sand', 'sandbags', 'sauce', 'says', 'seagulls', 'seen', 'selling', 'served', 'set', 'setting',
-            'sewing', 'shaking', 'shaped', 'sheared', 'shining', 'shorts', 'shot', 'shoveling', 'show', 'shower',
-            'showing', 'shown', 'sign', 'singing', 'sink', 'sit', 'sits', 'sitting', 'skate', 'skateboarding',
-            'skating', 'ski', 'skiing', 'skirt', 'sled', 'sleeping', 'slice', 'sliced', 'sliding', 'smile', 'smiling',
-            'smoke', 'smoking', 'smoothie', 'sniffing', 'snowboarding', 'snowmobile', 'soaked', 'soda', 'sold',
-            'spanning', 'speaking', 'spewing', 'split', 'spoon', 'spooning', 'spraying', 'sprinkles', 'squatting',
-            'stacked', 'stadium', 'stained', 'staircase', 'stand', 'standing', 'stands', 'staring', 'steam', 'steering',
-            'stem', 'stew', 'stick', 'sticking', 'stir', 'stirred', 'stirring', 'stop', 'stopped', 'store', 'stove',
-            'strawberry', 'stream', 'stripe', 'striped', 'stuffed', 'surfer', 'surfing', 'surrounded', 'swim',
-            'swimming', 'swims', 'swimsuit', 'swimsuits', 'swinging', 'syrup', 'tag', 'take', 'taken', 'taking', 'talk',
-            'talking', 'tasting', 'teaching', 'tending', 'throw', 'throwing', 'tie', 'tied', 'tiled', 'toaster',
-            'tomatoes', 'tongs', 'tooth', 'toothbrush', 'topped', 'tops', 'tossing', 'touch', 'touching', 'tour', 'tow',
-            'towel', 'towering', 'track', 'train', 'traveling', 'trekking', 'trick', 'trying', 'tying', 'typing',
-            'uniformed', 'unmade', 'use', 'used', 'using', 'vandalized', 'vending', 'waiting', 'wake', 'walk',
-            'walking', 'walled', 'washing', 'watch', 'watched', 'watches', 'watching', 'watering', 'wearing', 'wetsuit',
-            'wheelbarrow', 'wheeled', 'whipped', 'windsurfing', 'wooded', 'worked', 'working', 'worn', 'writing', 'yard'
-        ]
-        #self.tokenblacklist.extend(verbs)
-
-        #print("TEST: DISABLE BLACKLIST")
-        #self.tokenblacklist = list()
+        # (The historical spaCy verb-extraction experiment and its 500+ word list moved
+        # to token_blacklist.json under the "verbs" key — never applied to the blacklist.)
 
         self.tokenblacklistkeys = get_blacklisted_keys(self.vocabulary, self.tokenblacklist)
         print("Token Black list : ", self.tokenblacklist)
@@ -460,6 +542,21 @@ class DataLoader:
         self.PAFSize = PAFSize
         self.streamData = streamData
         self.batchSize = batchSize
+        # [B1] Effective double-buffer switch: streaming-only (C enforces the same guard
+        # and prints when it forces the flag off). _prefetchRange tracks the batch range a
+        # StartUpdate is currently filling, None = pipeline cold.
+        self.doubleBuffer = int(bool(streamData) and bool(doubleBuffer))
+        self._prefetchRange = None
+        # NOTE: a [B2] "zero-copy" feature used to live here (a `zeroCopy` kwarg + read-only
+        # numpy views of the consume-side buffer, replacing the per-batch .copy() below). It was
+        # REMOVED because it is unfixable in this architecture: the training generator prefetches
+        # up to `max_queue_size` (queueSize=32) batches ahead, so up to ~32 batches are alive at
+        # once — but a view aliases one of only 2 double-buffer slots, so every queued view but
+        # the newest is overwritten by a later fetch before the GPU reads it (corrupts the
+        # continuous heads: depth/normals/denoise/depthlvls). Making it safe would need a ring as
+        # deep as the queue (~34 buffers, ~7 GB host RAM) — and it would still buy nothing, since
+        # the .copy() runs on the prefetch thread concurrently with the GPU step and is already
+        # hidden behind it. doubleBuffer + copy is the correct, safe design.
         #---------------------------------------
         self.inWidth = inDims[0]
         self.inHeight = inDims[1]
@@ -475,10 +572,15 @@ class DataLoader:
         self.bytesPerDepthValue = bytesPerDepthValue
         self.cpuTimeSeconds = 0
 
-        #TODO: Maybe make this dynamically update-able
-        self.D = 300  #<- Expected dimensions of each GloVE Vector
+        # Dimensionality of each GloVe/token vector. Discovered from the embeddings file
+        # the C side actually loaded (see get_embedding_number_of_elements) as soon as the
+        # db exists, so swapping in a wider embeddings file needs no edit here.
+        self.D = 0
 
         self.db = None
+        self.channel_ranges = {}   # modality name -> (start, end), filled after db_create
+        self.channel_layout = []   # full ordered catalogue [(name, start, count, enabled)]
+        self.augmentation_params = {}  # field name -> value, filled after db_create
         self.libDataLoader = loadLibrary(libraryPath, forceUpdate=forceLibUpdate)
         _setup_ctypes(self.libDataLoader)
 
@@ -501,6 +603,12 @@ class DataLoader:
             elif len(sourceEntry) == 4:
                 #Regular old style entry :)
                 datasetsEnabled.append(sourceEntry)
+            elif len(sourceEntry) == 2:
+                #.pzpd archive entry: [use/dontuse, archive] (the directories are inside the archive)
+                confStr = sourceEntry[0].lower()
+                if (confStr == "use" or confStr == "enable" or confStr == "enabled" or confStr == "1"
+                        or confStr == "true"):
+                    datasetsEnabled.append([sourceEntry[1], "", "", "", ""])
             else:
                 print("Incorrectly formatted dataset entry with ", len(sourceEntry), " elements :")
                 print(sourceEntry)
@@ -516,21 +624,58 @@ class DataLoader:
             sourceID = sourceID + 1
         #-----------------------------------------------------------------------------
 
+        superpointPcaPathBytes = superpointPcaPath.encode("utf-8") if superpointPcaPath else None
+        # Toggle the geolocation channel (module global) BEFORE db_create reads it.
+        self.libDataLoader.db_set_geolocation_config(int(addGeolocation))
+        # How the combined "all" files store segmentation + 16-bit depth (BEFORE db_create reads it). (0,1,2) is
+        # what append16bitToSAM3.py / compressSegmentDepth.py write; libraries before 2026-09-23 read (0,2,1).
+        if len(combinedChannels) != 3 or not self.libDataLoader.db_set_combined_layout(*[int(c) for c in combinedChannels]):
+            raise ValueError("combinedChannels must be (label, depth high, depth low) channels 0..3, depth bytes different: %r" % (combinedChannels,))
+        prefetchModes = {"off": -1, "auto": 0, "map": 1, "pagecache": 2, "buffers": 3}
+        if prefetchMode not in prefetchModes:
+            raise ValueError("prefetchMode must be one of %s" % list(prefetchModes))
+        self.libDataLoader.db_set_prefetch_config(prefetchModes[prefetchMode], int(prefetchIOThreads),
+                                                  int(prefetchBudgetMB), int(prefetchWindow))
+        # Point the embeddings loader at a non-GloVe trio (module global) BEFORE
+        # db_create reads it. Left alone (C-side default) when embeddingsPath is None.
+        if embeddingsPath is not None:
+            self.libDataLoader.db_set_embeddings_path(embeddingsPath.encode('utf-8'))
         self.db = self.libDataLoader.db_create(
-            self.dbListPtr, numberOfSamples, streamData, batchSize, self.numberOfThreads, self.gradientSize,
-            self.PAFSize, doAugmentations, addPAFs, addBackground, addDepthMap, addDepthLevelsHeatmaps, addNormals,
-            addSegmentation, bytesPerDepthValue, self.inWidth, self.inHeight, self.inChannels, self.outWidth,
+            self.dbListPtr, numberOfSamples, streamData, self.doubleBuffer, batchSize, self.numberOfThreads,
+            self.gradientSize, self.PAFSize, doAugmentations, addPAFs, addBackground, addDepthMap,
+            addDepthLevelsHeatmaps, addNormals, addSegmentation, addInstanceDetection, addSuperpoint,
+            superpointChannels, superpointPcaPathBytes,
+            bytesPerDepthValue, self.inWidth, self.inHeight, self.inChannels, self.outWidth,
             self.outHeight, self.out8BitChannels, self.output16BitChannels)  # Create database
         if not self.db:
             print(bcolors.FAIL, "Failed to create database", bcolors.ENDC)
             raise ValueError("Failed to create database")
             return
 
+        # Read back the resolved 8-bit heatmap channel layout from C (single source of
+        # truth). self.channel_ranges maps modality name -> (start, end) half-open range
+        # for every ENABLED modality; loss slices / metrics / decode read from here
+        # instead of hardcoding indices. See HeatmapLayout.h / db_build_heatmap_layout.
+        self._build_channel_ranges()
+        self._build_augmentation_params()
+
         numberOfTokensFromDictionary = len(list(self.vocabulary.keys()))
         print("Number of tokens from dictionary : ", numberOfTokensFromDictionary)
         self.set_max_token_value(
             numberOfTokensFromDictionary
         )  #This is important to enforce a standard number of tokens and not be based on auto-detection
+
+        # .pzpd sources carry caption text but no pre-tokenized description line (see
+        # tokenize_missing_description_tokens docstring) -- tokenize those BEFORE
+        # expand_multiword_tokens() so their multi-word vocabulary entries get split too, same
+        # as a .db source's.
+        self.tokenize_missing_description_tokens()
+
+        # Split whole-caption vocabulary entries ("A large number of seagulls gathered on the
+        # beach") into their component word tokens. Runs FIRST, so the words it produces are then
+        # sorted by their real frequency, deduplicated, and — crucially — stripped of stopwords by
+        # the blacklist below. Doing it after the blacklist would leave 'the'/'of'/'on' in place.
+        self.expand_multiword_tokens()
 
         #self.sortTokens()                #<- sort tokens
         # Sort tokens in DESCENDING frequency order (ascendingOrder=0), i.e. the most
@@ -570,6 +715,12 @@ class DataLoader:
 
         if self.synonymPairs:
             self.apply_synonym_map(self.synonymPairs)
+            # Remapping merges distinct words onto one ID, so a description that read
+            # "man person boat" now reads "person person boat" and would waste one of the
+            # 8 caption slots. Dedupe again: removeDuplicateTokens() keeps the first
+            # occurrence and compacts the array (numberOfTokens shrinks), which pulls the
+            # next real token forward into the freed slot.
+            self.removeDuplicateTokens()
 
         self.numberOfSamples = self.libDataLoader.db_get_number_of_samples(self.db)
         print(bcolors.OKGREEN, "Created a database with ", self.numberOfSamples, " samples ", bcolors.ENDC)
@@ -580,13 +731,28 @@ class DataLoader:
         return res
 
     def get_labels(self):
-        #TODO: integrate this in coco.db / C code
-        jointNames = [
+        """Joint names as stored in the loaded .db (single source of truth — DATALOADER.md C5).
+
+        Falls back to the historical hardcoded COCO-17 list only if the db exposes no
+        names (older .db / uninitialized database)."""
+        names = []
+        numberOfJoints = self.libDataLoader.db_get_number_of_joints(self.db)
+        for jID in range(numberOfJoints):
+            raw = self.libDataLoader.db_get_joint_name(self.db, jID)
+            name = raw.decode('utf-8') if isinstance(raw, (bytes, bytearray)) else str(raw)
+            if name == "":
+                names = []
+                break
+            names.append(name)
+        if names:
+            return names
+
+        #Fallback: pre-C5 hardcoded COCO-17 list
+        return [
             "nose", "left_eye", "right_eye", "left_ear", "right_ear", "left_shoulder", "right_shoulder", "left_elbow",
             "right_elbow", "left_wrist", "right_wrist", "left_hip", "right_hip", "left_knee", "right_knee",
             "left_ankle", "right_ankle"
         ]
-        return jointNames
 
     def disableHeatmapOutput(self):
         self.libDataLoader.db_disable_heatmap_output(self.db)
@@ -627,6 +793,15 @@ class DataLoader:
             return buffer.value.decode('utf-8')
         return ""
 
+    def get_sample_description(self, sample):
+        """Caption text of the sample at a position (.pzpd sources; "" for .db sources, which carry token IDs only)."""
+        buffer_size = 8192
+        buffer = ctypes.create_string_buffer(buffer_size)
+        n = self.libDataLoader.db_get_sample_description(self.db, sample, buffer, buffer_size)
+        if n > 0:
+            return buffer.value.decode('utf-8', 'replace')
+        return ""
+
     def dump_sample_report(self, path="sample_report.json"):
         try:
           print("Writing ", path)
@@ -652,20 +827,20 @@ class DataLoader:
 
     def update(self, startSample, endSample):
         self.lastStartSample = startSample
-        self.lastEndSample = endSample
+        self.lastEndSample   = endSample
         #print("update(",startSample," , ",endSample,")")
         return self.libDataLoader.db_update(self.db, startSample, endSample, self.numberOfThreads, self.gradientSize,
                                             self.PAFSize)
 
     def startUpdate(self, startSample, endSample):
         self.lastStartSample = startSample
-        self.lastEndSample = endSample
+        self.lastEndSample   = endSample
         return self.libDataLoader.db_StartUpdate(self.db, startSample, endSample, self.numberOfThreads,
                                                  self.gradientSize, self.PAFSize)
 
     def collectUpdate(self, startSample, endSample):
         self.lastStartSample = startSample
-        self.lastEndSample = endSample
+        self.lastEndSample   = endSample
         return self.libDataLoader.db_CollectUpdate(self.db, startSample, endSample, self.numberOfThreads,
                                                    self.gradientSize, self.PAFSize)
 
@@ -681,20 +856,56 @@ class DataLoader:
 
         startTime = time.time()
 
-        #print("get_partial_update_IO_array(",startSample," , ",endSample,")")
-        #if True: #<- Uncomment to test what happens assuming perfect zero time for getting a new
-        if (self.update(startSample, endSample)):  #<- regular one stage update..!
-            #if ( self.collectUpdate(startSample,endSample) ): #<- multi stage update / needs .copy() / needs startUpdate in outside scope works worse :(
-            pixelsIn = self.libDataLoader.db_get_in(self.db, 0)  #We always want to start at the first element
+        if self.doubleBuffer:
+            # [B1.1] Pipelined path (DATALOADER.md B1): overlap C batch preparation with
+            # the GPU step. Collect the batch a previous call prefetched, swap it to the
+            # consume side, immediately start filling the NEXT batch, and read the consume
+            # side. The .copy() below is retained in B1.1 (removal is B1.2/zero-copy).
+            requested = (startSample, endSample)
+            if self._prefetchRange != requested:
+                # Cold start / seek / post-shuffle: discard any stale in-flight prefetch
+                # (drain is a no-op when nothing is running).
+                self.libDataLoader.db_pipeline_drain(self.db)
+                self.startUpdate(startSample, endSample)
+            updateOk = self.collectUpdate(startSample, endSample)
+            if updateOk:
+                self.libDataLoader.db_swap_buffers(self.db)
+                # Prefetch the next sequential batch — but never across the epoch
+                # boundary, so the on_epoch_end shuffle stays race-free by construction.
+                batch = endSample - startSample
+                if (batch > 0) and (endSample + batch <= self.numberOfSamples):
+                    self.startUpdate(endSample, endSample + batch)
+                    self._prefetchRange = (endSample, endSample + batch)
+                else:
+                    self._prefetchRange = None
+                # Loss attribution (updateEpochResults reads lastStart/EndSample) must
+                # reference the CONSUMED batch, not the prefetched one the helpers set.
+                self.lastStartSample = startSample
+                self.lastEndSample = endSample
+            getIn   = self.libDataLoader.db_get_consumer_in
+            getOut  = self.libDataLoader.db_get_consumer_out
+            getOut16 = self.libDataLoader.db_get_consumer_out16bit
+        else:
+            # Classic synchronous path — bit-identical to the pre-B1 behaviour.
+            updateOk = self.update(startSample, endSample)  #<- regular one stage update..!
+            getIn   = self.libDataLoader.db_get_in
+            getOut  = self.libDataLoader.db_get_out
+            getOut16 = self.libDataLoader.db_get_out16bit
+
+        if updateOk:
+            pixelsIn = getIn(self.db, 0)  #We always want to start at the first element
             npArrayIn = np.ctypeslib.as_array(
                 pixelsIn,
-                shape=(endSample - startSample, self.inHeight, self.inWidth,
-                       self.inChannels)).copy()  #<- Copy should copy ~1MB not worth the thread safe risk to not copy
+                shape=(endSample - startSample, self.inHeight, self.inWidth, self.inChannels))
 
-            pixelsOut = self.libDataLoader.db_get_out(self.db, 0)  #We always want to start at the first element
+            pixelsOut = getOut(self.db, 0)  #We always want to start at the first element
             npArrayOut = np.ctypeslib.as_array(
-                pixelsOut, shape=(endSample - startSample, self.outHeight, self.outWidth, self.out8BitChannels
-                                  )).copy()  #<- Copy should copy ~3MB not worth the thread safe risk to not copy
+                pixelsOut, shape=(endSample - startSample, self.outHeight, self.outWidth, self.out8BitChannels))
+
+            # Copies detach from the C buffer the next update overwrites. (A zero-copy view path
+            # used to be selectable here — removed; see the note in __init__ for why.)
+            npArrayIn = npArrayIn.copy()    #<- batch x H x W x 3 uint8 (~8 MB at batch 40)
+            npArrayOut = npArrayOut.copy()  #<- batch x H x W x 76 int8 (~200 MB at batch 40 — NOT small!)
 
             #Uncommenting the following printf statements should return :
             #Heatmaps I/O Types  <class 'numpy.ndarray'> / <class 'numpy.ndarray'>
@@ -708,12 +919,13 @@ class DataLoader:
             if (produce16BitData):
                 if (self.output16BitChannels > 0):
                     numberOfImages = self.get_number_of_images(self.db)
-                    pixels16BitOut = self.libDataLoader.db_get_out16bit(self.db, 0, self.batchSize)
+                    pixels16BitOut = getOut16(self.db, 0)
 
                     npArray16BitOut = np.ctypeslib.as_array(
                         pixels16BitOut,
-                        shape=(numberOfImages, self.outHeight, self.outWidth, self.output16BitChannels)).astype(
-                            np.int16)  #Just The Raw 16-bit value [-32767 .. 32767]
+                        shape=(numberOfImages, self.outHeight, self.outWidth,
+                               self.output16BitChannels))  #Just The Raw 16-bit value [-32767 .. 32767]
+                    npArray16BitOut = npArray16BitOut.astype(np.int16)  #astype copies -> detaches from the C buffer (zero-copy view path removed; see __init__)
                     #npArray16BitOut =  npArray16BitOut.copy().astype(np.float32) * (120.0 / 32767.0) #Convert them to a float with the same range as [ -120.0 ... 120.0 ]
                     #npArray16BitOut =  np.round(npArray16BitOut, decimals=1) #try rounding to see if more quantized values are easier
 
@@ -765,6 +977,90 @@ class DataLoader:
     def get_total_segmentation_classes(self):
         return self.libDataLoader.db_get_total_segmentation_classes(self.db)
 
+    #---------------------------------------------------------------------
+    # 8-bit heatmap channel layout (resolved C-side, single source of truth)
+    #---------------------------------------------------------------------
+    def _build_channel_ranges(self):
+        """Read the resolved channel layout from C into self.channel_ranges.
+
+        self.channel_ranges: dict modality_name -> (start, end) half-open range, in
+        channel order, for every ENABLED modality. self.channel_layout keeps the full
+        ordered catalogue (including disabled modalities) for inspection/printing.
+        """
+        self.channel_ranges = {}
+        self.channel_layout = []  # list of (name, start, count, enabled) in order
+        nGroups = self.libDataLoader.db_get_number_of_channel_groups(self.db)
+        for idx in range(nGroups):
+            raw = self.libDataLoader.db_get_channel_group_name(self.db, idx)
+            name = raw.decode('utf-8') if isinstance(raw, (bytes, bytearray)) else str(raw)
+            start = self.libDataLoader.db_get_channel_group_start(self.db, idx)
+            count = self.libDataLoader.db_get_channel_group_count(self.db, idx)
+            enabled = bool(self.libDataLoader.db_get_channel_group_enabled(self.db, idx))
+            self.channel_layout.append((name, start, count, enabled))
+            if enabled and count > 0:
+                self.channel_ranges[name] = (start, start + count)
+        return self.channel_ranges
+
+    def get_channel_ranges(self):
+        """dict modality_name -> (start, end) half-open, for enabled modalities."""
+        return self.channel_ranges
+
+    def get_channel_range(self, name):
+        """(start, end) half-open range for one modality, or None if absent/disabled.
+
+        Reads directly from C so it is always consistent with the resolved layout."""
+        start = ctypes.c_uint(0)
+        count = ctypes.c_uint(0)
+        ok = self.libDataLoader.db_get_channel_range(
+            self.db, name.encode('utf-8'), ctypes.byref(start), ctypes.byref(count))
+        if not ok:
+            return None
+        return (start.value, start.value + count.value)
+
+    def print_channel_layout(self):
+        """Print the full ordered channel catalogue (enabled + disabled)."""
+        print(bcolors.OKGREEN, "8-bit heatmap channel layout:", bcolors.ENDC)
+        for (name, start, count, enabled) in self.channel_layout:
+            if enabled:
+                print("   [%2d..%2d] %-16s (%d ch)" % (start, start + count - 1, name, count))
+            else:
+                print("   [  off  ] %-16s" % name)
+
+    # ------------------------------------------------------------------
+    # Augmentation parameter access
+    # ------------------------------------------------------------------
+    def _build_augmentation_params(self):
+        """Read struct DataAugmentation from C into self.augmentation_params dict."""
+        s = DataAugmentationParams()
+        self.libDataLoader.db_get_augmentation_params(self.db, ctypes.byref(s))
+        self.augmentation_params = {f: getattr(s, f) for f, _ in DataAugmentationParams._fields_}
+        return self.augmentation_params
+
+    def get_augmentation_params(self):
+        """Return current augmentation params as a plain dict (snapshot)."""
+        return dict(self.augmentation_params)
+
+    def set_augmentation_params(self, **kwargs):
+        """Override one or more augmentation params and push to C.
+
+        Example:
+            db.set_augmentation_params(chanceHorizontalFlip=50.0, chanceRotate90=0.0)
+        """
+        s = DataAugmentationParams()
+        self.libDataLoader.db_get_augmentation_params(self.db, ctypes.byref(s))
+        for key, val in kwargs.items():
+            if not hasattr(s, key):
+                raise ValueError("Unknown augmentation param: %s" % key)
+            setattr(s, key, val)
+        self.libDataLoader.db_set_augmentation_params(self.db, ctypes.byref(s))
+        self._build_augmentation_params()
+
+    def print_augmentation_params(self):
+        """Pretty-print the current augmentation parameter set."""
+        print(bcolors.OKGREEN, "Augmentation parameters:", bcolors.ENDC)
+        for key, val in self.augmentation_params.items():
+            print("   %-38s %s" % (key, val))
+
     def get_max_token_value(self):
         return self.libDataLoader.db_get_MAX_sample_description_token_value(self.db)
 
@@ -773,6 +1069,39 @@ class DataLoader:
 
     def get_descriptor_number_of_elements(self):
         return self.libDataLoader.db_get_descriptor_elements_number(self.db)
+
+    def get_embedding_number_of_elements(self):
+        # D of the embeddings file the C side loaded (GloVe_D*.embeddings header).
+        if self.D <= 0:
+            self.D = int(self.libDataLoader.db_get_description_embeddings_number(self.db, 0))
+        return self.D
+
+    def get_embedding_offset_scaling(self):
+        """(offset, scaling) the loaded token embeddings are currently expressed in.
+
+        The C loader stores vectors as (raw + offset) * scaling — this is the pair the tanh
+        token head is trained against, so anything inverting a prediction back to a raw GloVe
+        vector must use exactly these two numbers.
+        """
+        return (float(self.libDataLoader.db_get_embeddings_offset(self.db)),
+                float(self.libDataLoader.db_get_embeddings_scaling(self.db)))
+
+    def set_embedding_offset_scaling(self, offset, scaling):
+        """Re-express the loaded token embeddings under a new (offset, scaling) pair.
+
+        Rescales the in-memory vectors in place, so the token targets can be moved (e.g. to
+        use more of the tanh range) without regenerating GloVe_D*.embeddings. Affects only
+        this process; the file on disk is untouched. Call before streaming starts — batches
+        already prefetched under the old pair are stale, so the pipeline is reset here.
+        Returns True on success, False if the current scaling is 0 and cannot be inverted.
+        """
+        if scaling == 0:
+            raise ValueError("scaling must be non-zero (it is inverted on the next change)")
+        ok = int(self.libDataLoader.db_set_embeddings_offset_scaling(self.db, float(offset),
+                                                                     float(scaling)))
+        if ok:
+            self._pipeline_reset()
+        return bool(ok)
 
     def update_token_blacklist(self, blacklisttokenIDs, lowThreshold=0):
 
@@ -799,6 +1128,48 @@ class DataLoader:
             self.libDataLoader.db_add_token_synonym_pair(self.db, fromID, toID)
         return self.libDataLoader.db_compile_token_synonym_map(self.db)
 
+    def tokenize_missing_description_tokens(self):
+        """.pzpd sources ship caption text only (PZPDLoader.c leaves numberOfTokens=0 -- see
+        convertToPZPD.py); .db sources already carry pre-tokenized description lines and
+        get_sample_description() always returns "" for them. So: tokenize every sample whose
+        caption text is non-empty, with the exact word-splitting + vocabulary lookup
+        datasets/useVocabulary.py uses to build .db token lines, and push the ids into C with
+        db_set_sample_description_tokens() -- everything downstream (expand_multiword_tokens,
+        token counting/weights, get_partial_token_array, ...) then sees the same descriptionTokens
+        array it would for a .db source."""
+        import re
+        word_to_id = {word: int(k) for k, word in self.vocabulary.items()}
+        tokenized = 0
+        for sID in range(self.get_number_of_samples(self.db)):
+            desc = self.get_sample_description(sID)
+            if not desc:
+                continue
+            words = re.findall(r'\w+|[.,()]', desc.lower())
+            # id 0 is reserved as the C side's "empty slot" sentinel everywhere (counting,
+            # blacklist indexing, ...) even though vocabulary.json legitimately assigns it to a
+            # real symbol ("(") -- so it can never appear as an actual token, same as .db sources.
+            ids = [word_to_id[w] for w in words if word_to_id.get(w, 0) != 0]
+            if not ids:
+                continue
+            arr = (ctypes.c_ushort * len(ids))(*ids)
+            if self.libDataLoader.db_set_sample_description_tokens(self.db, sID, arr, len(ids)):
+                tokenized += 1
+        if tokenized:
+            print(bcolors.OKGREEN, "Tokenized %u .pzpd caption(s) against the vocabulary (%u words)"
+                  % (tokenized, len(word_to_id)), bcolors.ENDC)
+        return tokenized
+
+    def expand_multiword_tokens(self):
+        """Split whole-caption vocabulary entries into their component word tokens.
+
+        A handful of vocabulary entries are entire captions stored as one token
+        ("A large number of seagulls gathered on the beach"); their mean-pooled GloVe
+        vector is meaningless and they are far too rare to learn. The C side scans the
+        vocabulary for entries containing a space and rewrites every occurrence into the
+        token IDs of the words it is made of."""
+        return self.libDataLoader.db_expand_multiword_tokens(
+            self.db, self.vocabularyPath.encode('utf-8'))
+
     def get_low_count_tokens(self, threshold=10):
         MAX_TOKEN_VALUE = self.get_max_token_value()
         print("MAX_TOKEN_VALUE ", MAX_TOKEN_VALUE)
@@ -822,6 +1193,17 @@ class DataLoader:
 
         return tokenCountNP
 
+    def get_description_token_counts(self):
+        """Per-vocabulary-id occurrence count across every sample currently loaded (any source
+        type -- .db or .pzpd -- since it reads the already-tokenized captions the C loader
+        built at db_create/db_expand_multiword_tokens time). Index i is how many samples'
+        captions contain vocabulary id i; index 0 is unused (0 is not a real token id)."""
+        MAX_TOKEN_VALUE = self.get_max_token_value()
+        tokenCount = self.libDataLoader.db_count_description_tokens(self.db, MAX_TOKEN_VALUE)
+        counts = np.array([int(tokenCount[i]) for i in range(MAX_TOKEN_VALUE + 1)], dtype=np.int64)
+        self.libDataLoader.db_free_description_token_count(tokenCount)
+        return counts
+
     def get_token_frequencies(self):
         MAX_TOKEN_VALUE = self.get_max_token_value()
         print("MAX_TOKEN_VALUE ", MAX_TOKEN_VALUE)
@@ -843,8 +1225,15 @@ class DataLoader:
         tokenFrequencyNP = np.full((MAX_TOKEN_VALUE + 1), 0.0, dtype=np.float32)
         #tokenFrequencyNP = []
         #tokenFrequencyNP.append(0.0) #<- The first zero
+        # NOTE (2026-09-08, serial 287): the "+1" here was a leftover from an intended 1-based
+        # class axis. It put vocabulary id i's weight on CLASS i+1, while tokens_to_classes()
+        # puts class i at index i and the blacklist knock-down below indexes UNSHIFTED -- so the
+        # two halves of this function disagreed and 33.0% of classes trained with their
+        # NEIGHBOUR's inverse frequency (measured on cocoTrain: `person`, the intended 1.0
+        # anchor of the class-weight conditioning, trained at the 8.0 clip ceiling while `dog`
+        # and `car` sat at the 0.05 floor). Verify with ymapnet/tokens/verifyClassWeights.py.
         for tokenID in range(MAX_TOKEN_VALUE):
-            tokenFrequencyNP[tokenID + 1] = (float(tokenFrequency[tokenID]))
+            tokenFrequencyNP[tokenID] = (float(tokenFrequency[tokenID]))
 
         print("Freeing memory in C side.. ")
         self.libDataLoader.db_free_description_token_count(tokenFrequency)
@@ -896,13 +1285,11 @@ class DataLoader:
         #print(" MAX_TOKEN_NUMBER ", MAX_TOKEN_NUMBER, "    " )
         tokens = np.zeros((numberOfSamples, MAX_TOKEN_NUMBER),
                           dtype=np.uint16)  #Tokens are 0..2048 so are encoded as ushort 16bit
-        self.libDataLoader.db_get_sample_description_tokens.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-        self.libDataLoader.db_get_sample_description_tokens.restype = POINTER(ctypes.c_ushort)
-
-        for sID in range(numberOfSamples):
-            thisTokenList = self.libDataLoader.db_get_sample_description_tokens(self.db, startSample + sID)
-            for tokenID in range(MAX_TOKEN_NUMBER):
-                tokens[sID, tokenID] = thisTokenList[tokenID]
+        #argtypes/restype set centrally in _setup_ctypes (DATALOADER.md C1)
+        #One C call fills the whole batch instead of a ctypes call per sample (DATALOADER.md B3)
+        if numberOfSamples > 0:
+            ptr = tokens.ctypes.data_as(POINTER(ctypes.c_uint16))
+            self.libDataLoader.db_get_batch_tokens(self.db, startSample, endSample, ptr)
 
         if (encodeAsSingleMultiLabelToken):
             #Encode everything as one
@@ -914,33 +1301,18 @@ class DataLoader:
         return tokenOutput
 
     def get_partial_embedding_array(self, startSample=0, endSample=0):
-        numberOfSamples = endSample - startSample
-        MAX_TOKEN_VALUE = self.get_max_token_value()
+        numberOfSamples  = endSample - startSample
         MAX_TOKEN_NUMBER = self.get_token_number()
-        D = 300  #TODO: grab this from db_get_description_embeddings_number
+        D = self.get_embedding_number_of_elements()
 
         embeddings = np.zeros((numberOfSamples, MAX_TOKEN_NUMBER, D),
-                              dtype=np.float32)  #Typically 16 Tokens with 300 dimensions
+                              dtype=np.float32)  #Typically 16 Tokens with D dimensions
 
-        #Prepare functions
-        self.libDataLoader.db_get_sample_description_tokens_number.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-        self.libDataLoader.db_get_sample_description_tokens_number.restype = ctypes.c_int
-
-        #Prepare to take embeddings
-        self.libDataLoader.db_get_sample_description_embeddings.argtypes = [
-            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int
-        ]
-        self.libDataLoader.db_get_sample_description_embeddings.restype = POINTER(ctypes.c_float)
-
-        #For each of the samples in batch size
-        for sID in range(numberOfSamples):
-            numberOfTokensInThisSample = self.libDataLoader.db_get_sample_description_tokens_number(
-                self.db, startSample + sID)
-            for tokenID in range(numberOfTokensInThisSample):
-                embeddingList = self.libDataLoader.db_get_sample_description_embeddings(
-                    self.db, startSample + sID, int(tokenID))
-                for embeddingID in range(D):
-                    embeddings[sID, tokenID, embeddingID] = float(embeddingList[embeddingID])
+        #argtypes/restype set centrally in _setup_ctypes (DATALOADER.md C1)
+        #One C call fills the whole batch instead of per-sample/per-token/per-dim loops (DATALOADER.md B3)
+        if numberOfSamples > 0:
+            ptr = embeddings.ctypes.data_as(POINTER(ctypes.c_float))
+            self.libDataLoader.db_get_batch_embeddings(self.db, startSample, endSample, D, ptr)
 
         #Check data
         """
@@ -956,19 +1328,29 @@ class DataLoader:
 
         return embeddings
 
+    def _pipeline_reset(self):
+        # [B1] Drain any in-flight prefetch and mark the pipeline cold. The C side also
+        # drains inside the shuffles / set_augmentation_params (belt-and-braces), but the
+        # Python-side _prefetchRange must be invalidated too: a batch prefetched under the
+        # OLD index ordering is stale after a shuffle and must be recomputed.
+        if getattr(self, 'doubleBuffer', 0):
+            self.libDataLoader.db_pipeline_drain(self.db)
+        self._prefetchRange = None
+
     def shuffle(self):
         #Regular shuffling
-        self.libDataLoader.db_shuffle_indices.argtypes = [ctypes.c_void_p]
+        # [B1] invariant: in-flight workers read db->indices — never permute them with an
+        # uncollected StartUpdate (DATALOADER.md B1); reset also discards stale prefetches.
+        self._pipeline_reset()
         self.libDataLoader.db_shuffle_indices(self.db)
 
     def shuffle_based_on_loss(self):
         #Attempt at smarter shuffling by taking into account the loss
-        self.libDataLoader.db_shuffle_indices_via_loss.argtypes = [ctypes.c_void_p]
+        # [B1] drain/reset-before-shuffle invariant applies here too — see shuffle().
+        self._pipeline_reset()
         self.libDataLoader.db_shuffle_indices_via_loss(self.db)
 
     def updateJointDifficulty(self, listOfDifficulties):
-        #print("shuffle()") unsigned short jID,signed char newDifficulty
-        self.libDataLoader.db_change_joint_difficulty.argtypes = [ctypes.c_void_p, ctypes.c_ushort, ctypes.c_byte]
         for jID in range(len(listOfDifficulties)):
             self.libDataLoader.db_change_joint_difficulty(self.db, jID, listOfDifficulties[jID])
 
@@ -997,9 +1379,7 @@ class DataLoader:
         startSample = 0
         numberOfImages = self.get_number_of_images(self.db)
 
-        self.libDataLoader.db_get_in.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-        self.libDataLoader.db_get_in.restype = POINTER(ctypes.c_ubyte)
-        pixels = self.libDataLoader.db_get_in(self.db, startSample)
+        pixels = self.libDataLoader.db_get_in(self.db, startSample)  # argtypes set centrally in _setup_ctypes
         return np.ctypeslib.as_array(pixels, shape=(numberOfImages, self.inHeight, self.inWidth, self.inChannels))
 
     def get_out_array(self):
@@ -1009,9 +1389,7 @@ class DataLoader:
         startSample = 0
         numberOfImages = self.get_number_of_images(self.db)
 
-        self.libDataLoader.db_get_out.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-        self.libDataLoader.db_get_out.restype = POINTER(ctypes.c_byte)  #c_byte ctypes.c_void_p
-        pixels = self.libDataLoader.db_get_out(self.db, startSample)
+        pixels = self.libDataLoader.db_get_out(self.db, startSample)  # argtypes set centrally in _setup_ctypes
         return np.ctypeslib.as_array(pixels,
                                      shape=(numberOfImages, self.outHeight, self.outWidth, self.out8BitChannels))
 
@@ -1027,9 +1405,7 @@ class DataLoader:
         startItem = 0
         endItem = numberOfImages
 
-        self.libDataLoader.db_get_out16bit.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong]
-        self.libDataLoader.db_get_out16bit.restype = POINTER(ctypes.c_short)
-        pixels = self.libDataLoader.db_get_out16bit(self.db, startItem, endItem)
+        pixels = self.libDataLoader.db_get_out16bit(self.db, startItem)  # argtypes set centrally in _setup_ctypes
 
         #IMPORTANT :
         #Don't forget that whatever changes you do here should also be done in get_partial_update_IO_array
@@ -1056,23 +1432,36 @@ class DataLoader:
 
     #---------------------------------------
     def save_image(self, filename, sampleNumber):
-        self.libDataLoader.db_save_image.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_ulong]
         path = filename.encode('utf-8')
         self.libDataLoader.db_save_image(self.db, path, sampleNumber)
 
     def save_heatmap(self, filename, sampleNumber, heatmapNumber):
-        self.libDataLoader.db_save_heatmap8bit_as_jpg.argtypes = [
-            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_ushort
-        ]
         path = filename.encode('utf-8')
         self.libDataLoader.db_save_heatmap8bit_as_jpg(self.db, path, sampleNumber, heatmapNumber)
 
     #---------------------------------------
-    def __del__(self):
-        if self.db:
-            self.libDataLoader.db_destroy.argtypes = [ctypes.c_void_p]
-            self.libDataLoader.db_destroy.restype = ctypes.c_int
+    # Lifecycle (DATALOADER.md C3): close() is the explicit teardown path; the context
+    # manager makes `with DataLoader(...) as db:` work; __del__ stays best-effort only
+    # because during interpreter shutdown the shared library may already be torn down.
+    #---------------------------------------
+    def close(self):
+        """Explicitly destroy the C-side database. Idempotent — safe to call twice."""
+        if getattr(self, 'db', None):
             self.libDataLoader.db_destroy(self.db)
+            self.db = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+        return False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass  # interpreter shutdown — the .so may already be unloaded
 
 
 def convertTokensToText(vocabulary, tokens):
@@ -1102,8 +1491,15 @@ def convertTokensToTextMult(vocabulary, tokens):
 
     return text
 
-
-# Test
+#------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------
+#                                            Test
+#------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------
 if __name__ == "__main__":
     import cv2
     import random

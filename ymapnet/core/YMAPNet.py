@@ -79,7 +79,8 @@ try:
     #import tensorflow as tf
     from ymapnet.utils.createJSONConfiguration import loadJSONConfiguration
     from ymapnet.utils.imageProcessing import castNormalizedCoordinatesToOriginalImage, castNormalizedBBoxCoordinatesToOriginalImage, resize_image_no_borders, resize_image_with_borders
-    from ymapnet.utils.resolveJointHierarchy import resolveJointHierarchyNew, drawSkeletons
+    from ymapnet.utils.resolveJointHierarchy import drawSkeletons
+    from ymapnet.skeletons import resolveSkeletons
 
     from ymapnet.utils.calculateNormalsFromDepthmap import compute_normals, rgb_to_grayscale, apply_bilateral_filter, improve_depthmap, integrate_normals
 except Exception as e:
@@ -1763,6 +1764,7 @@ class YMAPNet:
         # otherwise auto-resolved (handles callers still passing the old hardcoded
         # '2d_pose_estimation' default on a machine renamed to ymapnet_model/).
         self.model_path = modelPath if os.path.isdir(modelPath) else resolveModelDir()
+        print("Resolved YMAPNet path is :",self.model_path)
         self.cfg = loadJSONConfiguration("%s/configuration.json" % self.model_path)
         self.serial = self.cfg["serial"]
         #serials can carry a suffix ( e.g. "282b" ) so only keep the leading digits for numeric comparisons
@@ -2263,24 +2265,31 @@ class YMAPNet:
             #Disabled for performance
             """
         if self.resolve_skeleton and ("keypoint_children" in self.cfg):
-            # Convert uint8 heatmaps back to float [-120..120] to match resolveJointHierarchyNew expectations
+            # Convert uint8 heatmaps back to float [-120..120] to match resolveSkeletons expectations
             _kp_hm = np.stack(self.heatmapsOut[:17], axis=2).astype(np.float32) - 120.0
             _paf_hm = [
                 self.heatmapsOut[17 + j].astype(np.float32) - 120.0 for j in range(min(12,
                                                                                        len(self.heatmapsOut) - 17))
             ]
-            _debug_once = (self.frameNumber <= 1)  # print debug only on first frame
-            self.skeletons = resolveJointHierarchyNew(
+            _bridgeCh = retrieveHeatmapIndex(self.cfg['heatmaps'], 'person_lr_bridge')
+            _bridge_hm = self.heatmapsOut[_bridgeCh].astype(np.float32) - 120.0 if _bridgeCh >= 0 else None
+            _rightCh = retrieveHeatmapIndex(self.cfg['heatmaps'], 'rightjoints')
+            _leftCh = retrieveHeatmapIndex(self.cfg['heatmaps'], 'leftjoints')
+            _side_hm = None
+            if _rightCh >= 0 and _leftCh >= 0:
+                _side_hm = (self.heatmapsOut[_rightCh].astype(np.float32) - 120.0,
+                            self.heatmapsOut[_leftCh].astype(np.float32) - 120.0)
+            self.skeletons = resolveSkeletons(
                 _kp_hm,
                 _paf_hm,
-                self.depthmap,
+                None,
                 self.cfg["keypoint_names"],
                 self.cfg["keypoint_parents"],
                 self.cfg["keypoint_children"],
                 self.cfg["paf_parents"],
-                person_label_map=None,  # labeled_map coords don't align with joint heatmaps
                 threshold=self.keypoint_threshold,
-                debug=_debug_once)
+                bridge_heatmap=_bridge_hm,
+                side_heatmaps=_side_hm)
 
         self.keypoint_in_nn_coordinate_image = keypoint_results
         self.keypoint_results = castNormalizedCoordinatesToOriginalImage(

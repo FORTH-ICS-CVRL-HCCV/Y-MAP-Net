@@ -46,6 +46,10 @@ PACKAGE_FILES=(
     reporting/illustrate.py
     reporting/plotTrainingProgressToSVG.py
     reporting/statusServer.py
+    skeletons/__init__.py
+    skeletons/limbs.py
+    skeletons/peaks.py
+    skeletons/resolve.py
     streams/datasetStream.py
     streams/espStream.py
     streams/folderStream.py
@@ -67,7 +71,7 @@ PACKAGE_FILES=(
 
 mkdir -p ymapnet
 touch ymapnet/__init__.py
-for sub in apps core utils tokens streams webui reporting training conversion evaluation; do
+for sub in apps core utils tokens streams webui reporting skeletons training conversion evaluation; do
     mkdir -p "ymapnet/$sub"
     touch "ymapnet/$sub/__init__.py"
 done

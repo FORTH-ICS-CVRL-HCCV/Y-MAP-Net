@@ -58,26 +58,6 @@ from ymapnet.utils.tools import bcolors, read_json_file, checkIfPathExists, chec
 
 
 #-------------------------------------------------------------------------------
-def resolveModelDir():
-    """The model directory used to be 2d_pose_estimation/ everywhere; some machines have
-    since been renamed to ymapnet_model/ (the new convention -- 2d_pose_estimation/ is
-    legacy, see PLAN.md). Detect which one actually exists on THIS machine rather than
-    hardcoding either name, so the same configuration.json/code works whether or not a
-    given checkout has been renamed yet."""
-    if os.path.isdir('ymapnet_model'):
-        return 'ymapnet_model'
-    return '2d_pose_estimation'
-
-
-def rebaseModelPath(path, modelDir):
-    """cfg values like embeddingsPath/synonymPath store a literal '2d_pose_estimation/...'
-    (or 'ymapnet_model/...') prefix baked in when the config was written. Rewrite that
-    prefix to whichever directory actually exists on this machine, so the same
-    configuration.json works whether this checkout has been renamed or not."""
-    for oldPrefix in ('2d_pose_estimation/', 'ymapnet_model/'):
-        if path.startswith(oldPrefix):
-            return modelDir + '/' + path[len(oldPrefix):]
-    return path
 
 
 #-------------------------------------------------------------------------------
@@ -176,7 +156,8 @@ def createSelectedModel(cfg, testModel=True):
                            geoHeadHidden=cfg.get('geoHeadHidden', 512),
                            geoGridHeight=cfg.get('geoGridHeight', 64),
                            geoGridWidth=cfg.get('geoGridWidth', 128),
-                           useDepthwiseSeparable=cfg.get('useDepthwiseSeparable', False)
+                           useDepthwiseSeparable=cfg.get('useDepthwiseSeparable', False),
+                           multihotInputSkip=cfg.get('multihotInputSkip', '')
                            )
         
         # "deconCheckerboardSmoothing": "" (default/omitted) → Conv2DTranspose,
@@ -197,7 +178,7 @@ def createSelectedModel(cfg, testModel=True):
 #============================================================================================
 #============================================================================================
 #============================================================================================
-from ymapnet.core.NNTraining import logTrainingHistory, logText, logSomeInputsAndOutputs, printTFVersion, TrainingDataGenerator, PerfProfiler, getOptimizerFromCFG, custom_lr_scheduler, custom_lr_schedulerWarmup, DataAugmentation, weighted_token_loss, extract_validation_losses, check_vram_and_suggest_batch_size
+from ymapnet.core.NNTraining import logTrainingHistory, logText, logSomeInputsAndOutputs, printTFVersion, TrainingDataGenerator, PerfProfiler, getOptimizerFromCFG, custom_lr_scheduler, custom_lr_schedulerWarmup, DataAugmentation, weighted_token_loss, extract_validation_losses, check_vram_and_suggest_batch_size, assertDescriptorsArePopulated, resolveModelDir, rebaseModelPath
 
 
 #============================================================================================
@@ -534,12 +515,17 @@ if __name__ == '__main__':
                         "keras"
                     ])  #Only use keras format to save space! formats=["keras","tf","tflite","onnx"]
                     #Promote the training config into the packaged runtime dir alongside the saved model.
-                    print(bcolors.OKGREEN, "Promoting ./configuration.json -> %s/configuration.json" % MODEL_DIR, bcolors.ENDC)
-                    os.system("cp configuration.json %s/configuration.json" % MODEL_DIR)
+                    #Write out the in-memory cfg actually used for this run (CLI overrides, rebased
+                    #paths and all) instead of `cp`-ing the root file -- the root file can already have
+                    #been edited (e.g. serial bumped) in preparation for the next run by the time this
+                    #promotion happens, which would silently mislabel the model just trained/saved.
+                    print(bcolors.OKGREEN, "Promoting in-memory config -> %s/configuration.json" % MODEL_DIR, bcolors.ENDC)
+                    from ymapnet.utils.createJSONConfiguration import saveJSONConfiguration
+                    saveJSONConfiguration(cfg, "%s/configuration.json" % MODEL_DIR)
                     if (packageTrainedModel):
                         print(bcolors.OKGREEN, "Packaging model without doing any training and exiting ..",
                               bcolors.ENDC)
-                        os.system("python3 packageYMAPNet.py")  #Zip exactly the files configuration.json needs, as ymapnet_model.zip
+                        os.system("python3 -m ymapnet.conversion.packageYMAPNet")  #Zip exactly the files configuration.json needs, as ymapnet_model.zip
                     sys.exit(0)
         #----------------------------------------------------------------------------------------
 
@@ -761,6 +747,11 @@ if __name__ == '__main__':
                 f"outputDescriptors=True but the C DataLoader returned descriptor dim={desc_dim}. "
                 "Rebuild libDataLoader.so with -DUSE_DINOV2_FEATURES and verify .dinov2 files exist alongside each dataset."
             )
+            # A correct dim still says nothing about CONTENT: a source whose .dinov3 sidecar is
+            # missing silently yields all-zero vectors. Probe before a single step is taken.
+            assertDescriptorsArePopulated(dbTrain, "training set", cfg)
+            if dbValidation is not None and dbValidation is not dbTrain:
+                assertDescriptorsArePopulated(dbValidation, "validation set", cfg)
 
         # Enrich cfg with model metrics before logging
         trainable_params = int(np.sum([np.prod(v.shape) for v in model.trainable_weights]))
@@ -939,16 +930,40 @@ if __name__ == '__main__':
             from ymapnet.core.NNLosses import GloVeHybridLoss, MultiHotLoss, WeightedBinaryCrossEntropy, WeightedFocalLoss
             losses = dict()
             #for i in reversed(range(cfg["tokensOut"])): #<- Try reversing order(?)
+            # tokenRegressionLoss "contrastive" (TOKENS.md 10.9): softmax over cosine to the candidate
+            # vocabulary instead of MSE+cosine to the target vector, so under uncertainty the slot
+            # commits to a word rather than regressing to the slot centroid. Candidates are built by
+            # the same helper probeTokenRegression.py measured with, over every enabled training DB.
+            regression_loss = cfg.get('tokenRegressionLoss', 'hybrid')
+            if regression_loss == 'contrastive':
+                from ymapnet.core.NNLosses import GloVeContrastiveLoss
+                from ymapnet.tokens.probeTokenRegression import regression_candidates
+                # dbTrain already has every enabled source loaded (.db and .pzpd alike) --
+                # count via its own tokenized captions instead of text-parsing train_dbs
+                # (parse_db_samples only understands legacy .db files; .pzpd archives don't
+                # store token lines, see convertToPZPD.py).
+                E, cand = regression_candidates(cfg['embeddingsPath'], "%s/vocabulary.json" % MODEL_DIR, None,
+                                                cfg.get('tokenRegressionMinCount', 5), loader=dbTrain)
+                candidate_table = E[cand]
+                print("  token regression: contrastive over %u candidates, temperature %.3f"
+                      % (len(candidate_table), cfg.get('tokenRegressionTemperature', 0.05)))
+            elif regression_loss != 'hybrid':
+                raise ValueError('tokenRegressionLoss must be "hybrid" or "contrastive", got %r' % regression_loss)
             for i in range(cfg["tokensOut"]):
                 # Each token receives half the total per-token budget as MSE weight
                 # and half as cosine weight, keeping the total gradient magnitude
                 # identical to the old GloVeMSELoss(weight=lossWeightGloveTokens/tokensOut).
                 per_token_weight = cfg["lossWeightGloveTokens"] / cfg["tokensOut"]
-                losses["t%02u" % i] = GloVeHybridLoss(
-                    mse_weight=per_token_weight * 0.5,
-                    cosine_weight=per_token_weight * 0.5,
-                    # norm_reg_weight defaults to 0.01 inside GloVeHybridLoss
-                )
+                if regression_loss == 'contrastive':
+                    losses["t%02u" % i] = GloVeContrastiveLoss(candidate_table,
+                                                               temperature=cfg.get('tokenRegressionTemperature', 0.05),
+                                                               weight=per_token_weight)
+                else:
+                    losses["t%02u" % i] = GloVeHybridLoss(
+                        mse_weight=per_token_weight * 0.5,
+                        cosine_weight=per_token_weight * 0.5,
+                        # norm_reg_weight defaults to 0.01 inside GloVeHybridLoss
+                    )
             # WeightedFocalLoss with gamma=4.0 and alpha=0.75 (both now default in
             # the class; stated explicitly here so the intent is visible without
             # opening NNLosses.py):
@@ -1246,11 +1261,16 @@ if __name__ == '__main__':
     #Only use keras format to save space! formats=["keras","tf","tflite","onnx"]
     saveNNModel(MODEL_DIR, model, formats=["keras"])
 
-    #Promote the training configuration (root, git-tracked) into the packaged runtime dir
-    #now that the model has been successfully saved. Runtime/inference reads
-    #<MODEL_DIR>/configuration.json; this is the only point it is updated.
-    print(bcolors.OKGREEN, "Promoting ./configuration.json -> %s/configuration.json" % MODEL_DIR, bcolors.ENDC)
-    os.system("cp configuration.json %s/configuration.json" % MODEL_DIR)
+    #Promote the training configuration into the packaged runtime dir now that the model has
+    #been successfully saved. Runtime/inference reads <MODEL_DIR>/configuration.json; this is
+    #the only point it is updated.
+    #Write out the in-memory cfg actually used for this run (CLI overrides, rebased paths and
+    #all) instead of `cp`-ing the root file -- for a long training run, the root file can
+    #already have been edited (e.g. serial bumped in preparation for the next run) by the time
+    #this promotion happens, which would silently mislabel the model just trained/saved.
+    print(bcolors.OKGREEN, "Promoting in-memory config -> %s/configuration.json" % MODEL_DIR, bcolors.ENDC)
+    from ymapnet.utils.createJSONConfiguration import saveJSONConfiguration
+    saveJSONConfiguration(cfg, "%s/configuration.json" % MODEL_DIR)
 
     #Log Per sample training report
     dbTrain.dump_sample_report("%s/sample_report_training.json" % MODEL_DIR)
@@ -1329,7 +1349,7 @@ if __name__ == '__main__':
     os.system("date +\"%%y-%%m-%%d_%%H-%%M-%%S\" > %s/date.txt" % MODEL_DIR)  #Tag date
     if (packageTrainedModel):
         print(bcolors.OKGREEN, "Packaging trained model ..", bcolors.ENDC)
-        os.system("python3 packageYMAPNet.py")  #Zip exactly the files configuration.json needs, as ymapnet_model.zip
+        os.system("python3 -m ymapnet.conversion.packageYMAPNet")  #Zip exactly the files configuration.json needs, as ymapnet_model.zip
     else:
         print("Not packaging model")
     #--------------------------------------------------------------------------------------------------------------------------------

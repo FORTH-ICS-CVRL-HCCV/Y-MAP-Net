@@ -1217,3 +1217,89 @@ if __name__ == '__main__':
                                         max_joints_gradient=23, min_joints_gradient=8, max_paf_gradient=6,
                                         min_paf_gradient=2)
         print("Epoch ", epoch, " Joints:", jG, " PAF:", pG)
+
+
+#-------------------------------------------------------------------------------
+def assertDescriptorsArePopulated(db, label, cfg):
+    """Refuse to train when outputDescriptors is on but the loader hands back zeros.
+
+    A source with no descriptor sidecar is not an error in the C loader: it prints
+    "Could not find a DinoV3 Descriptor file" and every sample of that source then
+    yields an all-zero vector. With outputDescriptors=True those zeros become
+    regression targets, so the descriptor head is trained to predict 0 for part of
+    the corpus while val (which may have its sidecar) scores against real vectors.
+    That reads as a mysterious quality loss rather than missing data, so fail fast.
+
+    Sweeps EVERY sample, not a sample of them: descriptors are already resident in
+    RAM, so a full pass costs ~0.4s for 242k samples (measured) while a windowed
+    probe can miss a small source entirely (openposeFactory2 is 0.11% of the corpus).
+
+    Note the sidecar name the loader probes is "<db>.dinov3"; older dumps named
+    "<db>.dinov2" are NOT picked up and present exactly as this all-zero case.
+    Tolerance is configurable via descriptorZeroTolerance (default 0.0 = strict).
+    """
+    dim = db.get_descriptor_number_of_elements()
+    if dim <= 0:
+        print(bcolors.FAIL, "outputDescriptors=True but %s exposes descriptor dim=%d." % (label, dim),
+              "\nRebuild libDataLoader.so with -DUSE_DINOV2_FEATURES and provide <db>.dinov3 sidecars.",
+              bcolors.ENDC)
+        sys.exit(1)
+
+    total = int(db.numberOfSamples)
+    if total <= 0:
+        return
+
+    started = time.time()
+    chunk = int(cfg.get('descriptorScanChunk', 4096))
+    zero = 0
+    perSource = dict()
+    for start in range(0, total, chunk):
+        end = min(start + chunk, total)
+        magnitude = np.abs(db.get_partial_descriptor_array(start, end)).sum(axis=1)
+        for j in np.nonzero(magnitude == 0.0)[0]:
+            zero += 1
+            try:
+                where = str(db.get_filename_of_sample(start + int(j)))
+                where = where[:where.rfind("/")] if "/" in where else where
+            except Exception:
+                where = "(unknown source)"
+            perSource[where] = perSource.get(where, 0) + 1
+
+    fraction = zero / float(total)
+    tolerance = float(cfg.get('descriptorZeroTolerance', 0.0))
+    print("Descriptor check on %s: %d/%d samples all-zero (%.3f%%), dim=%d, swept in %.1fs" %
+          (label, zero, total, 100.0 * fraction, dim, time.time() - started))
+    if fraction > tolerance:
+        print(bcolors.FAIL,
+              "\nREFUSING TO TRAIN: outputDescriptors=True but %d of %d %s samples (%.3f%%)" % (zero, total, label, 100.0 * fraction),
+              "\ncarry all-zero DINO vectors (tolerance descriptorZeroTolerance=%g)." % tolerance,
+              "\nThose samples would train the descriptor head to regress zero.", bcolors.ENDC)
+        for src in sorted(perSource, key=perSource.get, reverse=True):
+            print(bcolors.FAIL, "   %7d samples  %s" % (perSource[src], src), bcolors.ENDC)
+        print(bcolors.FAIL,
+              "\nFix: generate <db>.dinov3 for those sources (older .dinov2 dumps are NOT read),",
+              "\ndisable them in the dataset list, set outputDescriptors=false,",
+              "\nor raise descriptorZeroTolerance deliberately.", bcolors.ENDC)
+        sys.exit(1)
+
+
+def resolveModelDir():
+    """The model directory used to be 2d_pose_estimation/ everywhere; some machines have
+    since been renamed to ymapnet_model/ (the new convention -- 2d_pose_estimation/ is
+    legacy, see PLAN.md). Detect which one actually exists on THIS machine rather than
+    hardcoding either name, so the same configuration.json/code works whether or not a
+    given checkout has been renamed yet."""
+    if os.path.isdir('ymapnet_model'):
+        return 'ymapnet_model'
+    return '2d_pose_estimation'
+
+
+def rebaseModelPath(path, modelDir):
+    """cfg values like embeddingsPath/synonymPath store a literal '2d_pose_estimation/...'
+    (or 'ymapnet_model/...') prefix baked in when the config was written. Rewrite that
+    prefix to whichever directory actually exists on this machine, so the same
+    configuration.json works whether this checkout has been renamed or not."""
+    for oldPrefix in ('2d_pose_estimation/', 'ymapnet_model/'):
+        if path.startswith(oldPrefix):
+            return modelDir + '/' + path[len(oldPrefix):]
+    return path

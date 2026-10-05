@@ -23,7 +23,7 @@ Computes, for tokens:
 
 Results are printed to screen and written to a JSON file.
 
-Computes, for skeleton resolution (resolveJointHierarchyNew):
+Computes, for skeleton resolution (ymapnet.skeletons.resolveSkeletons):
   PCK@0.05/0.1/0.2 overall + per joint
   OKS (COCO Object Keypoint Similarity)
   Skeleton detection rate
@@ -84,7 +84,7 @@ try:
     from ymapnet.utils.tools import bcolors, checkIfFileExists
     from ymapnet.utils.createJSONConfiguration import loadJSONConfiguration
     from ymapnet.core.YMAPNet import YMAPNet
-    from ymapnet.utils.resolveJointHierarchy import resolveJointHierarchyNew
+    from ymapnet.skeletons import resolveSkeletons
 except Exception as e:
     print("An exception occurred:", str(e))
     print("Run:  source venv/bin/activate  before this script")
@@ -991,16 +991,14 @@ def evaluate():
                         for j in range(paf_end - PAF_FIRST_CH)
                     ]
 
-                    pred_skels = resolveJointHierarchyNew(
+                    pred_skels = resolveSkeletons(
                         pred_kp_hm,
                         pred_paf,
-                        estimator.depthmap,
+                        None,
                         cfg['keypoint_names'],
                         cfg['keypoint_parents'],
                         cfg['keypoint_children'],
                         cfg['paf_parents'],
-                        sanity_check=True,
-                        person_label_map=None,
                         threshold=estimator.keypoint_threshold,
                     )
                 except Exception:

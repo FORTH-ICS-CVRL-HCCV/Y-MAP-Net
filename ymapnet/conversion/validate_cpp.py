@@ -19,7 +19,6 @@ Pass / Fail thresholds (on the [-120, 120] scale):
 
 import argparse
 import os
-import struct
 import subprocess
 import sys
 import tempfile
@@ -37,7 +36,7 @@ def center_crop(image):
 
 
 def keras_heatmap(model_path: str, image_path: str, target_size: int = 256) -> np.ndarray:
-    """Run the Keras model and return the raw heatmap [H, W, C] float32."""
+    """Run the Keras model and return the raw 8-bit and 16-bit heatmaps [H, W, C] float32."""
     os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -58,11 +57,13 @@ def keras_heatmap(model_path: str, image_path: str, target_size: int = 256) -> n
     # Multi-output model: pred is a list where pred[0] is the heatmap [1, H, W, C]
     # Single-output model: pred is [1, H, W, C] directly
     hm = pred[0] if isinstance(pred, (list, tuple)) else pred
-    return hm[0]  # [H, W, C]
+    # 16-bit head ("hm_16b") is the second output when present
+    hm16 = pred[1][0] if isinstance(pred, (list, tuple)) and len(pred) > 1 and pred[1].ndim == 4 else None
+    return hm[0], hm16  # [H, W, C], [H, W, C16] or None
 
 
 def cpp_heatmap(cpp_bin: str, gguf_path: str, image_path: str, target_size: int = 256) -> np.ndarray:
-    """Run the C++ binary with --dump, return raw heatmap [H, W, C] float32."""
+    """Run the C++ binary with --dump, return raw 8-bit and 16-bit heatmaps [H, W, C] float32."""
     with tempfile.NamedTemporaryFile(suffix='.bin', delete=False) as tmp:
         tmp_path = tmp.name
     try:
@@ -81,33 +82,35 @@ def cpp_heatmap(cpp_bin: str, gguf_path: str, image_path: str, target_size: int 
             print(result.stderr)
             raise RuntimeError(f'C++ binary failed (exit {result.returncode})')
 
-        n_floats = target_size * target_size * 73
-        with open(tmp_path, 'rb') as f:
-            data = f.read()
-        floats = struct.unpack(f'{n_floats}f', data)
-        # C++ writes [W, H, C] = C-order [C, H, W] → rearrange to [H, W, C]
-        arr = np.array(floats, dtype=np.float32).reshape(73, target_size, target_size)
-        return arr.transpose(1, 2, 0)  # → [H, W, C]
+        def load(path):
+            # C++ writes ggml [W, H, C] = C-order [C, H, W] → rearrange to [H, W, C]
+            arr = np.fromfile(path, dtype=np.float32)
+            return arr.reshape(-1, target_size, target_size).transpose(1, 2, 0)
+
+        hm = load(tmp_path)
+        hm16 = load(tmp_path + '.16bit') if os.path.exists(tmp_path + '.16bit') else None
+        return hm, hm16
     finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        for p in (tmp_path, tmp_path + '.16bit'):
+            if os.path.exists(p):
+                os.remove(p)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--image', default='1730235538988943.jpg')
-    ap.add_argument('--model', default='2d_pose_estimation/model.keras')
+    ap.add_argument('--model', default='ymapnet_model/model.keras')
     ap.add_argument('--cpp-bin', default='ymapnet_cpp/build/ymapnet')
-    ap.add_argument('--gguf', default='2d_pose_estimation/model_f32.gguf')
+    ap.add_argument('--gguf', default='ymapnet_model/model_f32.gguf')
     ap.add_argument('--dtype', default='f32', choices=['f32', 'f16'])
     args = ap.parse_args()
 
     print(f'[validate] Keras inference on {args.image} ...')
-    py_hm = keras_heatmap(args.model, args.image)
+    py_hm, py_hm16 = keras_heatmap(args.model, args.image)
     print(f'[validate] Keras heatmap: shape={py_hm.shape}  min={py_hm.min():.3f}  max={py_hm.max():.3f}')
 
     print(f'[validate] C++ inference on {args.image} ...')
-    cpp_hm = cpp_heatmap(args.cpp_bin, args.gguf, args.image)
+    cpp_hm, cpp_hm16 = cpp_heatmap(args.cpp_bin, args.gguf, args.image)
     print(f'[validate] C++ heatmap:   shape={cpp_hm.shape}  min={cpp_hm.min():.3f}  max={cpp_hm.max():.3f}')
 
     diff = np.abs(py_hm - cpp_hm)
@@ -133,23 +136,20 @@ def main():
     for ch in top5:
         print(f'    ch {ch:3d}  max|diff|={per_ch_max[ch]:.4f}')
 
-    # Per-branch stats
-    branches = [('pre  [0-28]', 0, 29), ('depth[29-32]', 29, 33), ('post [33-72]', 33, 73)]
-    print('\n  Per-branch max|diff|:')
-    for name, lo, hi in branches:
-        bd = diff[:, :, lo:hi].max()
-        py_range = f'[{py_hm[:,:,lo:hi].min():.1f}, {py_hm[:,:,lo:hi].max():.1f}]'
-        cpp_range = f'[{cpp_hm[:,:,lo:hi].min():.1f}, {cpp_hm[:,:,lo:hi].max():.1f}]'
-        print(f'    {name}  max|diff|={bd:.4f}  py={py_range}  cpp={cpp_range}')
+    # 16-bit head (depth, [-32767, 32767] scale) — report relative to the 8-bit scale
+    if py_hm16 is not None and cpp_hm16 is not None:
+        d16 = np.abs(py_hm16 - cpp_hm16)
+        print(f'\n  16-bit head: max|diff|={d16.max():.1f}  mean|diff|={d16.mean():.1f}  '
+              f'(= {d16.max() * 120.0 / 32767.0:.3f} / {d16.mean() * 120.0 / 32767.0:.4f} on the 120 scale)')
 
     # Find the Python-active pixel (max of pre branch) and compare
-    peak_h, peak_w = np.unravel_index(py_hm[:, :, :29].max(axis=2).argmax(), (256, 256))
-    peak_ch = int(py_hm[:, :, :29].max(axis=(0, 1)).argmax())
+    peak_h, peak_w = np.unravel_index(py_hm[:, :, :17].max(axis=2).argmax(), py_hm.shape[:2])
+    peak_ch = int(py_hm[:, :, :17].max(axis=(0, 1)).argmax())
     print(f'\n  Python peak pixel [{peak_h},{peak_w}] ch={peak_ch}:')
     print(f'    py  = {py_hm[peak_h,peak_w,peak_ch]:.3f}')
     print(f'    cpp = {cpp_hm[peak_h,peak_w,peak_ch]:.3f}')
     print(f'\n  All channels at peak pixel [{peak_h},{peak_w}]:')
-    for ch in range(min(10, 73)):
+    for ch in range(min(10, py_hm.shape[2])):
         print(f'    ch{ch:2d}  py={py_hm[peak_h,peak_w,ch]:8.3f}  cpp={cpp_hm[peak_h,peak_w,ch]:8.3f}')
 
     return 0 if passed else 1

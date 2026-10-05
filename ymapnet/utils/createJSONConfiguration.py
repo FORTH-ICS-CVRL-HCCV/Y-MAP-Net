@@ -364,31 +364,47 @@ def saveJSONConfiguration(cfg, json_file_path):
 
 
 #============================================================================================
-#Attempt to change paths to ramfs if this is detected, otherwise on normal systems do nothing
+# Where the .pzpd archives (convertToPZPD.py) live on this box -- prepareRAMDatasets.sh mirrors
+# every archive directory referenced by configuration.json from here into <ramfs>/YMAPNet/<name>/.
+#============================================================================================
+PZPD_SOURCE_ROOT = "/storage/ammarkov/YMAPNet"
+
+
+#============================================================================================
+#Attempt to change .pzpd archive paths to their RAMFS copy if one is detected and populated,
+#otherwise on normal systems (or for non-.pzpd sources, which are read directly from wherever
+#they are -- no RAMFS staging for the legacy datasets/*.db + directory sources any more) do
+#nothing.
 #============================================================================================
 def redirect_to_ramfs(cfg, ramfs="../ram/"):
     FAIL = '\033[91m'
     ENDC = '\033[0m'
-    # Iterate through each dataset entry
+    ramfs_pzpd_root = os.path.join(ramfs, "YMAPNet")
+
     if os.path.exists(ramfs):
         print("RAMFS detected, checking if it is populated")
-        if not os.path.exists("%s/datasets/" % ramfs):
-            print("Did not find datasets, running script to copy them (?)")
+        if not os.path.exists(ramfs_pzpd_root):
+            print("Did not find .pzpd archives in RAMFS, running script to copy them (?)")
             os.system("scripts/prepareRAMDatasets.sh")
 
-        for entryID, entry in enumerate(cfg['TrainingDataset']):
-            for i in range(len(entry)):
-                if ((entry[i] != "enabled") and (entry[i] != "disabled")):  #<- hack filter new enable/disabled tag
-                    # Create new path by prepending base_path
-                    new_path = os.path.join(ramfs, entry[i])
+        for key in ('TrainingDataset', 'ValidationDataset'):
+            for entryID, entry in enumerate(cfg.get(key, [])):
+                for i in range(len(entry)):
+                    path = entry[i]
+                    # Only .pzpd archive paths under PZPD_SOURCE_ROOT are RAMFS-backed; every
+                    # other entry element (the enabled/disabled flag, a legacy .db/directory
+                    # entry, or a .pzpd archive that lives somewhere else) is left untouched.
+                    if not (isinstance(path, str) and path.endswith(".pzpd")
+                            and path.startswith(PZPD_SOURCE_ROOT + "/")):
+                        continue
+                    rel_path = os.path.relpath(path, PZPD_SOURCE_ROOT)
+                    new_path = os.path.join(ramfs_pzpd_root, rel_path)
 
-                    # Check if the new path exists
                     if os.path.exists(new_path):
-                        # If exists, replace the original path with the new path
-                        print("Redirecting ", cfg['TrainingDataset'][entryID][i], " to ", new_path)
-                        cfg['TrainingDataset'][entryID][i] = new_path
+                        print("Redirecting ", cfg[key][entryID][i], " to ", new_path)
+                        cfg[key][entryID][i] = new_path
                     else:
-                        print(FAIL, "Cannot redirect ", cfg['TrainingDataset'][entryID][i], " to ", new_path, ENDC)
+                        print(FAIL, "Cannot redirect ", cfg[key][entryID][i], " to ", new_path, ENDC)
     else:
         print("Did not find a RAMFS, continuing using regular filesystem for datasets")
     return cfg

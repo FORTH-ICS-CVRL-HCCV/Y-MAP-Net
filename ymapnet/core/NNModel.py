@@ -546,7 +546,7 @@ def add_token_output(bridge_output, input_layer, numTokens, activation='leaky_re
 #-------------------------------------------------------------------------------
 def append_final_multihot_layer(glove_outputs, bridge_output=None, D=300, TokensOut=8, Classes=2037, layer_width=2048,
                                 multihot_layer_width=0, depth=2, activation='leaky_relu', dropoutRate=0.2,
-                                use_attention=False):
+                                use_attention=False, skip_inputs=None):
     _out_dtype = 'float32' if keras.mixed_precision.global_policy().compute_dtype != 'float32' else None
     # multihot_layer_width=0 means fall back to layer_width (bridge-derived dim_product).
     # Set to a positive value (e.g. 1024) to decouple the classification head width
@@ -566,6 +566,21 @@ def append_final_multihot_layer(glove_outputs, bridge_output=None, D=300, Tokens
         concatenated_output = layers.Reshape((D * TokensOut, ))(concatenated_output)
 
     concatenated_output = layers.Flatten()(concatenated_output)
+
+    # skip_inputs (config multihotInputSkip): extra views of the image CONCATENATED next to the
+    # cascade, so the classifier is no longer a pure function of the 8 regressed embeddings
+    # (TOKENS.md 4.3 / 10.6). Unlike the Add-merge bridge_output path below, nothing is forced
+    # into a shared subspace. StopGradient keeps the multihot loss off the bridge (no new
+    # Obs 7 token-vs-heatmap pressure); the per-block LayerNorm puts PReLU bridge activations
+    # and near-unit-norm descriptors on the same scale as the tanh cascade before the first Dense.
+    if skip_inputs:
+        parts = [concatenated_output]
+        for j, skip in enumerate(skip_inputs):
+            skip = layers.Flatten(name="tmh_skip_flat%u" % j)(skip)
+            skip = StopGradient(name="tmh_skip_sg%u" % j)(skip)
+            skip = layers.LayerNormalization(dtype="float32", name="tmh_skip_ln%u" % j)(skip)
+            parts.append(skip)
+        concatenated_output = layers.Concatenate(name="tmh_skip_concat")(parts)
 
     #This actually works worse..
     if (bridge_output is None):
@@ -706,7 +721,18 @@ def build_resnethybrid_cnn(
     inputs = layers.Input(shape=input_shape)
 
     # Apply the ResNet base model
-    b = base_model(inputs)
+    # training=False pins BatchNormalization layers to their pretrained (ImageNet)
+    # running statistics permanently, independent of base_model.trainable. Without
+    # this, trainTokensOnly.py's later `model.get_layer('resnet50').trainable = True`
+    # (unfreeze step) flips every BN layer from inference mode (frozen moving stats)
+    # to training mode (live per-batch stats + running-average updates) -- a backbone
+    # that has never seen gradient-based training since ImageNet pretraining suddenly
+    # gets noisy per-batch normalization on top of newly-trainable conv weights, which
+    # reliably exploded the loss a few epochs into the unfreeze phase (K4 focal/ASL
+    # runs, TOKENS.md). Conv kernels and BN gamma/beta still get gradients once
+    # trainable=True; only the normalization statistics stay frozen. See the Keras
+    # transfer-learning guide's fine-tuning caveat.
+    b = base_model(inputs, training=False)
 
     # Reshape only if the input is not already flattened
     #if len(b.shape) > 2:  # Check if the output needs reshaping
@@ -779,6 +805,15 @@ class CoordConv2D(tf.keras.layers.Layer):
 
     def get_config(self):
         return super().get_config()
+
+
+#-------------------------------------------------------------------------------
+@tf.keras.utils.register_keras_serializable(package='NNModel')
+class StopGradient(tf.keras.layers.Layer):
+    """Identity forward, zero gradient backward (used by multihotInputSkip)."""
+
+    def call(self, x):
+        return tf.stop_gradient(x)
 
 
 #-------------------------------------------------------------------------------
@@ -1111,7 +1146,7 @@ def build_unet(inputHeight, inputWidth, inputChannels, outputWidth, outputHeight
                deconCheckerboardSmoothing='', useDepthNormalsUncertainty=False, maxDecoderChannels=0,
                tanhHeadroom8bit=1.0, tanhHeadroom16bit=1.0, useGeolocationHead=False, geoHeadHidden=512,
                geoGridHeight=64, geoGridWidth=128, useDepthwiseSeparable=False,
-               tokenEmbeddingD=300):
+               tokenEmbeddingD=300, multihotInputSkip=""):
 
     #Uncomment to go "single
     ###if (num16BitHeatmaps>0):
@@ -1357,10 +1392,22 @@ def build_unet(inputHeight, inputWidth, inputChannels, outputWidth, outputHeight
                                          token_layer_width=int(tokenLayerWidth))
         number_of_glove_output_tokens = len(glove_outputs)  #This should be the same as numTokens but make sure
         # bridge_output=None: bridge skip disabled — see comment at the equivalent call
-        # site in build_resnethybrid_cnn for the full rationale.
+        # site in build_resnethybrid_cnn for the full rationale. That rationale is about the
+        # Add-merge path and a 37632-wide ResNet bridge; multihotInputSkip is a concat instead.
+        multihot_skip = []
+        if multihotInputSkip in ("bridge", "bridge+descriptors"):
+            multihot_skip.append(b)
+        if multihotInputSkip == "bridge+descriptors":
+            if not useDescriptors:
+                raise ValueError('multihotInputSkip "bridge+descriptors" requires outputDescriptors')
+            multihot_skip.append(descriptor_outputs)
+        elif multihotInputSkip not in ("", "bridge"):
+            raise ValueError('multihotInputSkip must be "", "bridge" or "bridge+descriptors", got %r' %
+                             multihotInputSkip)
         token_output = append_final_multihot_layer(
             glove_outputs, bridge_output=None, D=tokenEmbeddingD, TokensOut=number_of_glove_output_tokens, Classes=numClasses,
-            layer_width=int(dim_product), multihot_layer_width=multihotLayerWidth, depth=multihotLayers)
+            layer_width=int(dim_product), multihot_layer_width=multihotLayerWidth, depth=multihotLayers,
+            skip_inputs=multihot_skip)
 
         if (heatmaps_16bit_declared):
             modelOutputs.append(heatmap_output)

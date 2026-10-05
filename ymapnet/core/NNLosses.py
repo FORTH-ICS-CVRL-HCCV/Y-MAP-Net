@@ -187,7 +187,7 @@ class ConditionalModelCheckpoint(tf.keras.callbacks.Callback):
 
     def __init__(self, monitor, mode, filepath, save_best_only, save_weights_only, start_from_epoch, verbose=1,
                  total_epochs=None, swa_num_checkpoints=0, swa_min_epoch_fraction=0.5,
-                 swa_filepath="swa.slot{slot}.weights.h5", serial=None):
+                 swa_filepath="swa.slot{slot}.weights.h5", serial=None, status_path="status.txt"):
         super().__init__()
         #----------------------------------------
         self.OKGREEN = '\033[92m'
@@ -201,6 +201,9 @@ class ConditionalModelCheckpoint(tf.keras.callbacks.Callback):
         self.save_weights_only = save_weights_only
         self.start_from_epoch = start_from_epoch
         self.verbose = verbose
+        # Defaults to the historical CWD-relative "status.txt" so existing callers
+        # (trainYMAPNet.py) are unaffected; a concurrent job should pass its own path.
+        self.status_path = status_path
         #----------------------------------------
         self.best = None
         self.bestEpoch = None
@@ -422,7 +425,7 @@ class ConditionalModelCheckpoint(tf.keras.callbacks.Callback):
         except Exception:
             pass
         try:
-            with open("status.txt", "w") as f:
+            with open(self.status_path, "w") as f:
                 f.write("\n".join(lines) + "\n")
         except Exception:
             pass
@@ -1568,6 +1571,48 @@ class GloVeHybridLoss(keras.losses.Loss):
 
 
 #-------------------------------------------------------------------------------
+class GloVeContrastiveLoss(keras.losses.Loss):
+    """Decode-aligned loss for the t00..t07 embedding regression (TOKENS.md 10.9).
+
+    GloVeHybridLoss rewards being CLOSE to the target vector, so under uncertainty the optimum is
+    the centroid of the plausible words -- measured on serial 287, predictions sit at cos 0.86-0.91
+    to their slot's mean target while real targets sit at 0.45-0.53, and nearest-neighbour decoding
+    then snaps to hub words. Decoding is argmax cosine over the vocabulary, so this loss trains that
+    decision directly: softmax over cosine(prediction, every candidate row) / temperature,
+    cross-entropy against the ground-truth row. Wrong-but-nearby hubs are explicit negatives.
+
+    candidate_table: (V, D) targets in the SAME scaled space the C loader emits (the
+        GloVe_D300.embeddings.bin rows). The ground-truth row is recovered in-graph as the candidate
+        with cosine ~1 to y_true, so the generator is unchanged.
+    Masked to zero loss: empty slots (all-zero target), OOV rows (constant vector after the loader's
+        affine transform) and targets that are not in candidate_table.
+    norm_reg_weight: same |‖ŷ‖-‖y‖|² term as GloVeHybridLoss -- the softmax is scale-free, and the
+        multihot head consumes these vectors as features.
+    """
+
+    def __init__(self, candidate_table, temperature=0.05, weight=1.0, norm_reg_weight=0.01, **kwargs):
+        super(GloVeContrastiveLoss, self).__init__(**kwargs)
+        import numpy as np
+        table = np.asarray(candidate_table, dtype=np.float32)
+        self.table_n = tf.constant(table / np.maximum(np.linalg.norm(table, axis=1, keepdims=True), 1e-8))
+        self.temperature = float(temperature)
+        self.weight = float(weight)
+        self.norm_reg_weight = float(norm_reg_weight)
+
+    def call(self, y_true, y_pred):
+        y_true = tf.cast(y_true, tf.float32)
+        y_pred = tf.cast(y_pred, tf.float32)
+        t_sim = tf.matmul(tf.nn.l2_normalize(y_true, axis=-1), self.table_n, transpose_b=True)   # (B, V)
+        gt = tf.argmax(t_sim, axis=-1)
+        valid = tf.logical_and(tf.reduce_max(t_sim, axis=-1) > 0.9999,
+                               tf.math.reduce_std(y_true, axis=-1) > 1e-6)                      # not empty / OOV
+        logits = tf.matmul(tf.nn.l2_normalize(y_pred, axis=-1), self.table_n, transpose_b=True) / self.temperature
+        ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=gt, logits=logits)
+        norm_reg = tf.square(tf.norm(y_pred, axis=-1) - tf.norm(y_true, axis=-1))
+        return tf.where(valid, self.weight * ce + self.norm_reg_weight * norm_reg, 0.0)
+
+
+#-------------------------------------------------------------------------------
 class DescriptorLoss(keras.losses.Loss):
     """MSE + cosine loss for supervising the bridge descriptor head
     against pre-computed DINOv2 embeddings (768-dim, L2-normalised).
@@ -1776,6 +1821,87 @@ class WeightedFocalLoss(keras.losses.Loss):
 
         # Mean loss per sample (average over classes)
         return self.weight * tf.reduce_mean(weighted_focal_loss, axis=-1)
+
+
+#-------------------------------------------------------------------------------
+class AsymmetricLoss(keras.losses.Loss):
+    """Asymmetric Loss for multi-label classification (Ridnik et al. 2021,
+    arXiv:2009.14119), TOKENS.md Experiment K4 -- a candidate replacement for
+    `WeightedFocalLoss` on the 17977-way `tokens_multihot` head.
+
+    Same symptom as WeightedFocalLoss exists to fix (Obs 26: with ~5-20 positives
+    out of 17977 classes, easy true-negatives flood the gradient), but ASL treats
+    positives and negatives asymmetrically instead of sharing one gamma:
+
+    gamma_neg (focusing on negatives, default 4.0):
+        Same role as WeightedFocalLoss's single gamma -- suppresses easy
+        true-negatives. Kept high because the imbalance is extreme.
+
+    gamma_pos (focusing on positives, default 1.0):
+        Deliberately much lower than gamma_neg. Positive labels in this task are
+        already rare and often noisy/ambiguous (a caption may omit a visible
+        concept), so down-weighting *hard* positives as aggressively as hard
+        negatives would suppress exactly the gradient recall depends on.
+
+    clip (probability shifting, default 0.05):
+        Negatives with predicted probability below `clip` are treated as exact
+        (loss driven to ~0) before the focal term is applied, discarding the
+        long tail of already-confident true negatives entirely rather than
+        merely down-weighting them -- ASL's core mechanism beyond ordinary focal
+        loss, and the paper's stated source of its recall gain over focal loss.
+
+    Per-class inverse-frequency weighting is kept identical to
+    `WeightedFocalLoss` (multiplicative, after the asymmetric focal term) so the
+    two losses are swappable via config without touching the class-weight
+    conditioning (§5.3) this project already relies on.
+    """
+
+    def __init__(self, class_weights, gamma_neg=4.0, gamma_pos=1.0, clip=0.05, weight=1.0,
+                 name="asymmetric_loss"):
+        super(AsymmetricLoss, self).__init__(name=name)
+        self.class_weights = tf.constant(class_weights, dtype=tf.float32)
+        self.gamma_neg = gamma_neg
+        self.gamma_pos = gamma_pos
+        self.clip = clip
+        self.weight = weight
+
+    def call(self, y_true, y_pred):
+        float_type = tf.float32  # Always accumulate losses/metrics in float32 for numerical stability under mixed precision
+        y_true = tf.cast(y_true, float_type)
+        y_pred = tf.cast(y_pred, float_type)
+        eps = 1e-7
+
+        xs_pos = y_pred
+        xs_neg = 1.0 - y_pred
+        # Probability shifting: gives easy negatives (xs_neg already small, i.e.
+        # y_pred already close to 1... wait, xs_neg small means y_pred close to
+        # 1 which is a FALSE positive, not an easy negative) a hard floor at 0 --
+        # re-read: xs_neg is P(negative) = 1-y_pred, so an "easy" true negative
+        # has y_pred near 0, xs_neg near 1; shifting xs_neg UP by `clip` (capped
+        # at 1) only changes anything for xs_neg close to 1 already, pushing the
+        # loss for confidently-correct negatives to exactly log(1)=0 once
+        # xs_neg+clip saturates at 1.0.
+        if self.clip is not None and self.clip > 0:
+            xs_neg = tf.clip_by_value(xs_neg + self.clip, 0.0, 1.0)
+
+        log_pos = y_true * tf.math.log(tf.clip_by_value(xs_pos, eps, 1.0))
+        log_neg = (1.0 - y_true) * tf.math.log(tf.clip_by_value(xs_neg, eps, 1.0))
+        loss = log_pos + log_neg
+
+        # Asymmetric focusing: one_sided_gamma picks gamma_pos on true positives,
+        # gamma_neg on true negatives, per-element (not per-class/per-sample).
+        pt = xs_pos * y_true + xs_neg * (1.0 - y_true)
+        one_sided_gamma = self.gamma_pos * y_true + self.gamma_neg * (1.0 - y_true)
+        # Stable (1-pt)^gamma via exp(gamma*log(...)), matching WeightedFocalLoss's
+        # convention rather than tf.pow (avoids issues right at pt=1).
+        one_sided_w = tf.exp(one_sided_gamma * tf.math.log(1.0 - pt + eps))
+        loss = loss * one_sided_w
+
+        class_weights = tf.reshape(self.class_weights, [1, -1])  # (1, num_classes)
+        weighted_loss = -loss * class_weights
+
+        # Mean loss per sample (average over classes), matching WeightedFocalLoss.
+        return self.weight * tf.reduce_mean(weighted_loss, axis=-1)
 
 
 #-------------------------------------------------------------------------------
