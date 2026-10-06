@@ -110,7 +110,8 @@ _token_frame_counter = 0
 _token_caption_cache = ""
 
 # Initialize the model
-model_path = '2d_pose_estimation'
+#model_path = '2d_pose_estimation' # The old model path!
+model_path = 'ymapnet_model'
 
 threshold = 20
 keypoint_threshold = 40.0
@@ -121,8 +122,8 @@ estimator = TokenEstimator2D(modelPath=model_path)
 if (GREEK_MENU):
     from ymapnet.core.YMAPNet import read_json_files
     print("Forcing greek vocabulary")
-    estimator_pose.vocabulary = read_json_files("2d_pose_estimation/vocabulary_el.json")
-    estimator.vocabulary = read_json_files("2d_pose_estimation/vocabulary_el.json")
+    estimator_pose.vocabulary = read_json_files("%s/vocabulary_el.json" % model_path)
+    estimator.vocabulary = read_json_files("%s/vocabulary_el.json" % model_path)
 
 # Visual theme
 visual_theme = gr.themes.Default()  # Default, Soft or Monochrome
