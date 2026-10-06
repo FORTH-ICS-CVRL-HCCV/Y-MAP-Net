@@ -1114,6 +1114,7 @@ class DataAugmentation(keras.callbacks.Callback):
         self.db = db
         self.epoch = 1
         self.time = time.time()
+        self.runningLoss = 0.0  # logs['loss'] of the previous batch of this epoch
 
     def clear_gpu_memory(self, tensors):
         # Clear GPU memory for a list of tensors
@@ -1122,18 +1123,30 @@ class DataAugmentation(keras.callbacks.Callback):
 
     #https://keras.io/guides/writing_your_own_callbacks/
     def on_train_batch_end(self, batch, logs=None):
-        if (self.db):
-            keys = list(logs.keys())
+        if (self.db) and logs and ("loss" in logs):
             #self.db.printReadSpeed()
-            if ("loss" in keys):
-                self.db.updateEpochResults(logs['loss'], self.db.lastStartSample, self.db.lastEndSample, self.epoch)
+            # Keras 3 logs['loss'] is the RUNNING MEAN of the epoch so far, not this batch's loss.
+            # Batches are all full (len = samples // batchSize), so the mean is unweighted and this
+            # batch's own loss is (b+1)*R_b - b*R_(b-1).
+            running = float(logs['loss'])
+            if batch == 0:
+                self.runningLoss = 0.0
+            batchLoss = (batch + 1) * running - batch * self.runningLoss
+            self.runningLoss = running
+            # The batch's samples from its index: the generator reads [index*B, index*B+B) in order,
+            # while db.lastStart/EndSample follow whatever the prefetch queue fetched last.
+            start = batch * self.cfg['batchSize']
+            end = min(start + self.cfg['batchSize'], self.db.numberOfSamples)
+            self.db.updateEpochResults(batchLoss, start, end, self.epoch)
 
     def on_epoch_start(self, epoch, logs=None):
         self.time = time.time()  #Is this not executed ?
 
     def on_epoch_end(self, epoch, logs=None):
         self.epoch = epoch
-        keys = list(logs.keys())
+        # trainYMAPNet.py's --start N handling calls this manually (no logs) to pre-seed
+        # augmentation state when resuming mid-run; Keras's own calls always pass real logs.
+        keys = list(logs.keys()) if logs else []
         #print("End epoch ",epoch+1," of training")
         #print("Got log keys:", keys))
 

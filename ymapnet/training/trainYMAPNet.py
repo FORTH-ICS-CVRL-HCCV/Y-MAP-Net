@@ -650,6 +650,8 @@ if __name__ == '__main__':
                 libraryPath="datasets/DataLoader/libDataLoader.so")
             if cfg.get('augmentation'):
                 dbValidation.set_augmentation_params(**cfg['augmentation'])
+            # same per-joint cone radii as dbTrain, or val_loss scores different targets than training
+            dbValidation.updateJointDifficulty(cfg['keypoint_difficulty'])
             if (cfg['streamValidation']):
                 # Modify the way you call the dataset
                 validation_generator = TrainingDataGenerator(
@@ -788,12 +790,12 @@ if __name__ == '__main__':
             epoch, cfg['learningRateStart'], cfg['learningRateEnd'], warmup_epochs=lr_warmup))
 
         #Early Stopping / Checkpointing
-        whatToMonitor = cfg['earlyStoppingMonitor']
-        howToMonitor = cfg['earlyStoppingHowToMonitor']
-
         if (onlyTrainingData) and (cfg['earlyStoppingMonitor'] == "val_loss"):
             print("You forgot to change the monitor to loss, fixing this automatically")
             cfg['earlyStoppingMonitor'] = "loss"
+
+        whatToMonitor = cfg['earlyStoppingMonitor']
+        howToMonitor = cfg['earlyStoppingHowToMonitor']
 
         # Define EarlyStopping/ModelCheckpoint callbacks
         #-------------------------------------------------------------------------

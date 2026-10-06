@@ -122,6 +122,10 @@ def makeJSONConfiguration():
         True,  #Add a ruler in first row/column of heatmaps
         'heatmapAddPAFs':
         True,  #Add PAFs 
+        'heatmapPAFEncoding':
+        'child_lit',  #PAF ramp, must match DataLoader configuration.h PAF_ENCODING_CHILD_LIT (0 = 'signed')
+        'heatmapBridgeEncoding':
+        'child_lit',  #person_lr_bridge ramp, must match DataLoader configuration.h BRIDGE_ENCODING_LIT (0 = 'signed')
         'heatmapAddDepthmap':
         True,  #Add a depth map 
         'heatmapAddNormals':
@@ -309,7 +313,7 @@ def makeJSONConfiguration():
             4,  #"left_ankle",
             4,  #"right_ankle"
         ],
-        'keypoint_parents': {  #THIS NEEDS WORK NOSE SHOULD BE CONNECTED TO HIP
+        'keypoint_parents': {  #hips -> same-side shoulder: DataLoader configuration.h PAF_HIPS_TO_SHOULDERS 1
             "nose": "nose",
             "left_eye": "nose",
             "right_eye": "nose",
@@ -321,21 +325,21 @@ def makeJSONConfiguration():
             "right_elbow": "right_shoulder",
             "left_wrist": "left_elbow",
             "right_wrist": "right_elbow",
-            "left_hip": "nose",
-            "right_hip": "nose",
+            "left_hip": "left_shoulder",
+            "right_hip": "right_shoulder",
             "left_knee": "left_hip",
             "right_knee": "right_hip",
             "left_ankle": "left_knee",
             "right_ankle": "right_knee"
         },
         'keypoint_children': {
-            "nose": ["left_eye", "right_eye", "left_shoulder", "right_shoulder", "left_hip", "right_hip"],
+            "nose": ["left_eye", "right_eye", "left_shoulder", "right_shoulder"],
             "left_eye": ["left_ear"],
             "right_eye": ["right_ear"],
             "left_ear": [],
             "right_ear": [],
-            "left_shoulder": ["left_elbow"],
-            "right_shoulder": ["right_elbow"],
+            "left_shoulder": ["left_elbow", "left_hip"],
+            "right_shoulder": ["right_elbow", "right_hip"],
             "left_elbow": ["left_wrist"],
             "right_elbow": ["right_wrist"],
             "left_wrist": [],
@@ -368,6 +372,34 @@ def saveJSONConfiguration(cfg, json_file_path):
 # every archive directory referenced by configuration.json from here into <ramfs>/YMAPNet/<name>/.
 #============================================================================================
 PZPD_SOURCE_ROOT = "/storage/ammarkov/YMAPNet"
+# Every root whose archives are RAMFS-backed (YMAPNet_dptext: the archives rebuilt with DPText-DETR text labels).
+# In RAMFS an archive lives at <ramfs>/YMAPNet/<archive directory name>/, so names must be unique across roots.
+PZPD_SOURCE_ROOTS = [PZPD_SOURCE_ROOT, "/storage/ammarkov/YMAPNet_dptext"]
+
+
+def pzpd_ramfs_copy_is_current(src_dir, ram_dir):
+    """True if ram_dir holds exactly the files of src_dir (names, sizes, mtimes: rsync -a preserves them)."""
+    if not os.path.isdir(ram_dir):
+        return False
+    def listing(d):
+        out = {}
+        for f in os.listdir(d):
+            st = os.stat(os.path.join(d, f))
+            out[f] = (st.st_size, int(st.st_mtime))
+        return out
+    return listing(src_dir) == listing(ram_dir)
+
+
+def pzpd_ramfs_target(path, ramfs_pzpd_root):
+    """(source archive dir, its RAMFS copy dir, RAMFS path of the file) for a RAMFS-backed .pzpd path, else None."""
+    if not (isinstance(path, str) and path.endswith(".pzpd")):
+        return None
+    for root in PZPD_SOURCE_ROOTS:
+        if path.startswith(root + "/"):
+            src_dir = os.path.dirname(path)
+            ram_dir = os.path.join(ramfs_pzpd_root, os.path.basename(src_dir))
+            return src_dir, ram_dir, os.path.join(ram_dir, os.path.basename(path))
+    return None
 
 
 #============================================================================================
@@ -383,28 +415,29 @@ def redirect_to_ramfs(cfg, ramfs="../ram/"):
 
     if os.path.exists(ramfs):
         print("RAMFS detected, checking if it is populated")
-        if not os.path.exists(ramfs_pzpd_root):
-            print("Did not find .pzpd archives in RAMFS, running script to copy them (?)")
-            os.system("scripts/prepareRAMDatasets.sh")
-
+        # Every .pzpd entry under PZPD_SOURCE_ROOTS: (key, entryID, i) -> (source dir, RAMFS dir, RAMFS path)
+        targets = {}
         for key in ('TrainingDataset', 'ValidationDataset'):
             for entryID, entry in enumerate(cfg.get(key, [])):
                 for i in range(len(entry)):
-                    path = entry[i]
-                    # Only .pzpd archive paths under PZPD_SOURCE_ROOT are RAMFS-backed; every
-                    # other entry element (the enabled/disabled flag, a legacy .db/directory
-                    # entry, or a .pzpd archive that lives somewhere else) is left untouched.
-                    if not (isinstance(path, str) and path.endswith(".pzpd")
-                            and path.startswith(PZPD_SOURCE_ROOT + "/")):
-                        continue
-                    rel_path = os.path.relpath(path, PZPD_SOURCE_ROOT)
-                    new_path = os.path.join(ramfs_pzpd_root, rel_path)
+                    t = pzpd_ramfs_target(entry[i], ramfs_pzpd_root)
+                    if t is not None:
+                        targets[(key, entryID, i)] = t
+        # A RAMFS copy is only used when it is identical to its source: a copy left from an earlier experiment
+        # (same archive name, older contents, e.g. before the DPText-DETR rebuild) must never be read silently.
+        stale = sorted({t[0] for t in targets.values() if not pzpd_ramfs_copy_is_current(t[0], t[1])})
+        if stale:
+            print("RAMFS copies missing or out of date for: ", ", ".join(stale))
+            print("Running scripts/prepareRAMDatasets.sh to (re)sync them")
+            os.system("scripts/prepareRAMDatasets.sh")
 
-                    if os.path.exists(new_path):
-                        print("Redirecting ", cfg[key][entryID][i], " to ", new_path)
-                        cfg[key][entryID][i] = new_path
-                    else:
-                        print(FAIL, "Cannot redirect ", cfg[key][entryID][i], " to ", new_path, ENDC)
+        for (key, entryID, i), (src_dir, ram_dir, new_path) in targets.items():
+            if pzpd_ramfs_copy_is_current(src_dir, ram_dir):
+                print("Redirecting ", cfg[key][entryID][i], " to ", new_path)
+                cfg[key][entryID][i] = new_path
+            else:
+                print(FAIL, "RAMFS copy ", ram_dir, " does not match ", src_dir, ": reading ", cfg[key][entryID][i],
+                      " from the regular filesystem", ENDC)
     else:
         print("Did not find a RAMFS, continuing using regular filesystem for datasets")
     return cfg

@@ -23,16 +23,19 @@ Computes, for tokens:
 
 Results are printed to screen and written to a JSON file.
 
-Computes, for skeleton resolution (ymapnet.skeletons.resolveSkeletons):
-  PCK@0.05/0.1/0.2 overall + per joint
-  OKS (COCO Object Keypoint Similarity)
+Computes, for skeleton resolution (the live resolver, YMAPNet.process -> estimator.skeletons):
+  COCO keypoint AP / AP50 / AP75 / APm / APl / AR against the COCO person keypoint json
+  (--annotations; ymapnet/evaluation/cocoKeypointAP.py, no pycocotools needed). Skipped with a
+  warning when the json is missing or the validation file names carry no COCO image id.
   Skeleton detection rate
 
 Usage:
   python3 evaluateYMAPNet.py [--cpu] [--output results.json] [--model 2d_pose_estimation] [--no-skeleton] [--samples N] [--visualinspection]
+                             [--annotations datasets/coco/cache/annotations/person_keypoints_val2017.json]
 """
 
 import os
+import re
 import sys
 import time
 import json
@@ -84,7 +87,8 @@ try:
     from ymapnet.utils.tools import bcolors, checkIfFileExists
     from ymapnet.utils.createJSONConfiguration import loadJSONConfiguration
     from ymapnet.core.YMAPNet import YMAPNet
-    from ymapnet.skeletons import resolveSkeletons
+    from ymapnet.skeletons.benchmarkSkeletons import detections as skeletonDetections
+    from ymapnet.evaluation.cocoKeypointAP import CocoKeypointGT, cocoKeypointStats, printStats
 except Exception as e:
     print("An exception occurred:", str(e))
     print("Run:  source venv/bin/activate  before this script")
@@ -226,31 +230,6 @@ def make_json_serializable(obj):
 # ---------------------------------------------------------------------------
 # Skeleton evaluation constants
 # ---------------------------------------------------------------------------
-PCK_THRESHOLDS = [0.05, 0.10, 0.20]
-
-# COCO per-keypoint sigmas (17 joints, same order as keypoint_names in config)
-COCO_KP_SIGMAS = np.array(
-    [
-        0.026,
-        0.025,
-        0.025,
-        0.035,
-        0.035,  # nose, l/r eye, l/r ear
-        0.079,
-        0.079,  # l/r shoulder
-        0.072,
-        0.072,  # l/r elbow
-        0.062,
-        0.062,  # l/r wrist
-        0.107,
-        0.107,  # l/r hip
-        0.087,
-        0.087,  # l/r knee
-        0.089,
-        0.089,  # l/r ankle
-    ],
-    dtype=np.float32)
-
 # First PAF channel index and count in the heatmap output
 PAF_FIRST_CH = 17
 PAF_NUM_CH = 12
@@ -316,53 +295,6 @@ def match_skeleton_to_gt(pred_skeletons, gt_kps, n_joints):
         if d < best_dist:
             best_dist, best_skel = d, skel
     return best_skel
-
-
-def compute_pck_hits(pred_skel, gt_kps, thr, n_joints):
-    """
-    Returns (hits[n_joints], visible[n_joints]) for PCK at normalized threshold thr.
-    A joint counts as a hit if it is predicted, visible in GT, and within thr of GT.
-    """
-    hits = np.zeros(n_joints, dtype=np.float64)
-    visible = np.zeros(n_joints, dtype=np.float64)
-    for j in range(n_joints):
-        gx, gy, gv = gt_kps[j]
-        if gv <= 0:
-            continue
-        visible[j] = 1.0
-        pv = pred_skel[j * 3 + 2]
-        if pv <= 0:
-            continue
-        if ((pred_skel[j * 3] - gx)**2 + (pred_skel[j * 3 + 1] - gy)**2)**0.5 <= thr:
-            hits[j] = 1.0
-    return hits, visible
-
-
-def compute_oks_score(pred_skel, gt_kps, n_joints, kp_sigmas):
-    """
-    Object Keypoint Similarity (COCO formula).
-    s  = sqrt(bounding-box area of GT visible joints)
-    Returns OKS in [0..1], or -1.0 if no visible GT joints.
-    """
-    vis_pts = [(gx, gy) for (gx, gy, gv) in gt_kps if gv > 0]
-    if not vis_pts:
-        return -1.0
-    xs, ys = [p[0] for p in vis_pts], [p[1] for p in vis_pts]
-    area = max(1e-8, (max(xs) - min(xs)) * (max(ys) - min(ys)))
-    s = area**0.5
-    num, denom = 0.0, 0.0
-    for j in range(n_joints):
-        gx, gy, gv = gt_kps[j]
-        if gv <= 0:
-            continue
-        denom += 1.0
-        pv = pred_skel[j * 3 + 2]
-        if pv <= 0:
-            continue
-        d2 = (pred_skel[j * 3] - gx)**2 + (pred_skel[j * 3 + 1] - gy)**2
-        k = float(kp_sigmas[j]) if j < len(kp_sigmas) else 0.072
-        num += float(np.exp(-d2 / (2.0 * s**2 * k**2 + 1e-10)))
-    return float(num / denom) if denom > 0 else -1.0
 
 
 # ---------------------------------------------------------------------------
@@ -741,6 +673,7 @@ def evaluate():
     do_skeleton_eval = True
     do_visual_inspect = False
     max_samples = None
+    annotations_path = 'datasets/coco/cache/annotations/person_keypoints_val2017.json'
     argv = sys.argv[1:]
     i = 0
     while i < len(argv):
@@ -759,6 +692,9 @@ def evaluate():
         elif argv[i] == '--visualinspection':
             do_visual_inspect = True
             i += 1
+        elif argv[i] == '--annotations' and i + 1 < len(argv):
+            annotations_path = argv[i + 1]
+            i += 2
         else:
             i += 1
 
@@ -836,6 +772,8 @@ def evaluate():
                     synonymPath=cfg.get('synonymPath', None),
                     embeddingsPath=cfg.get('embeddingsPath', None),
                     datasets=cfg['ValidationDataset'], libraryPath="datasets/DataLoader/libDataLoader.so")
+    if 'keypoint_difficulty' in cfg:  # the per-joint cone radii training uses, so the targets match it
+        db.updateJointDifficulty(cfg['keypoint_difficulty'])
 
     n_samples = db.numberOfSamples
     if max_samples is not None:
@@ -920,9 +858,14 @@ def evaluate():
     has_skel_cfg = (n_joints > 0 and 'keypoint_parents' in cfg and 'keypoint_children' in cfg and 'paf_parents' in cfg)
     do_skeleton_eval = do_skeleton_eval and has_skel_cfg
 
-    pck_hits = {t: np.zeros(n_joints, dtype=np.float64) for t in PCK_THRESHOLDS}
-    pck_visible = {t: np.zeros(n_joints, dtype=np.float64) for t in PCK_THRESHOLDS}
-    oks_values = []
+    coco_gt = None  # per-person ground truth: the heatmaps cannot separate people in a crowd
+    if do_skeleton_eval:
+        if checkIfFileExists(annotations_path):
+            coco_gt = CocoKeypointGT(annotations_path)
+        else:
+            print(bcolors.WARNING, f"COCO keypoint annotations not found ({annotations_path}): skeleton AP skipped,"
+                  " pass --annotations PATH", bcolors.ENDC)
+    coco_dets, coco_images = [], []
     skel_detected = 0
     skel_total = 0
 
@@ -969,7 +912,8 @@ def evaluate():
             gt_heatmaps = npArrayOut[i]  # (H, W, outputChannels)
 
             try:
-                estimator.process(rgb_input)
+                # the DataLoader input is RGB, process() expects a BGR camera/cv2 frame (it converts BGR->RGB)
+                estimator.process(cv2.cvtColor(rgb_input, cv2.COLOR_RGB2BGR))
             except Exception as e:
                 print(f"\nInference failed on sample {batch_start+i}: {e}")
                 continue
@@ -981,40 +925,16 @@ def evaluate():
             # Skeleton resolution metrics
             # ----------------------------------------------------------------
             if do_skeleton_eval:
-                try:
-                    pred_kp_hm = np.stack(estimator.heatmapsOut[:n_joints], axis=2).astype(
-                        np.float32) - 120.0  # uint8→[-120..120]
-
-                    paf_end = min(PAF_FIRST_CH + PAF_NUM_CH, n_pred_hm)
-                    pred_paf = [
-                        estimator.heatmapsOut[PAF_FIRST_CH + j].astype(np.float32) - 120.0
-                        for j in range(paf_end - PAF_FIRST_CH)
-                    ]
-
-                    pred_skels = resolveSkeletons(
-                        pred_kp_hm,
-                        pred_paf,
-                        None,
-                        cfg['keypoint_names'],
-                        cfg['keypoint_parents'],
-                        cfg['keypoint_children'],
-                        cfg['paf_parents'],
-                        threshold=estimator.keypoint_threshold,
-                    )
-                except Exception:
-                    pred_skels = []
-
-                gt_kps = extract_gt_keypoints(gt_heatmaps, n_joints)
-                best_pred = match_skeleton_to_gt(pred_skels, gt_kps, n_joints)
-
-                for thr in PCK_THRESHOLDS:
-                    h, v = compute_pck_hits(best_pred, gt_kps, thr, n_joints)
-                    pck_hits[thr] += h
-                    pck_visible[thr] += v
-
-                oks = compute_oks_score(best_pred, gt_kps, n_joints, COCO_KP_SIGMAS)
-                if oks >= 0:
-                    oks_values.append(oks)
+                # the live resolver's output (YMAPNet.process: bridge, side, depth and part channels included)
+                pred_skels = estimator.skeletons or []
+                if coco_gt is not None:
+                    digits = re.findall(r'\d{6,12}', str(db.get_filename_of_sample(batch_start + i)))
+                    image_id = int(digits[-1]) if digits else -1
+                    if image_id in coco_gt.imageSize:
+                        w, h = coco_gt.imageSize[image_id]
+                        hmH, hmW = estimator.heatmapsOut[0].shape[:2]
+                        coco_dets += skeletonDetections(image_id, pred_skels, hmW, hmH, w, h)
+                        coco_images.append(image_id)
 
                 skel_total += 1
                 if pred_skels:
@@ -1022,6 +942,7 @@ def evaluate():
 
                 # ---- Visual inspection dump --------------------------------
                 if do_visual_inspect:
+                    gt_kps = extract_gt_keypoints(gt_heatmaps, n_joints)  # display only (mixes people in crowds)
                     dump_visual_inspection(
                         sample_idx=batch_start + i,
                         rgb_input=rgb_input,
@@ -1325,23 +1246,14 @@ def evaluate():
             'total': skel_total,
         }
 
-        for thr in PCK_THRESHOLDS:
-            total_h = float(pck_hits[thr].sum())
-            total_v = float(pck_visible[thr].sum())
-            overall = total_h / max(total_v, 1.0)
-            per_joint = {}
-            parts = []
-            for j in range(n_joints):
-                pck_j = float(pck_hits[thr][j]) / max(float(pck_visible[thr][j]), 1.0)
-                per_joint[kp_names[j]] = round(pck_j, 4)
-                parts.append(f"{kp_names[j][:8]}={pck_j:.3f}")
-            print(f"  PCK@{thr:.2f}: {overall:.4f}   " + "  ".join(parts))
-            skel_results[f'PCK@{thr}'] = {'overall': round(overall, 6), 'per_joint': per_joint}
-
-        if oks_values:
-            mean_oks = float(np.mean(oks_values))
-            print(f"  OKS:          {mean_oks:.4f}  (n={len(oks_values)})")
-            skel_results['OKS'] = round(mean_oks, 6)
+        if coco_gt is not None and coco_images:
+            stats = cocoKeypointStats(coco_gt, coco_images, coco_dets)
+            print(f"  COCO keypoint AP over {len(set(coco_images))} images ({len(coco_dets)} skeletons):")
+            printStats(stats)
+            skel_results.update({k: round(v, 6) for k, v in
+                                 zip(('AP', 'AP50', 'AP75', 'APm', 'APl', 'AR', 'AR50', 'AR75', 'ARm', 'ARl'), stats)})
+        elif coco_gt is not None:
+            print(bcolors.WARNING, "  No validation file name matched a COCO image id: skeleton AP skipped", bcolors.ENDC)
 
         results['skeleton_metrics'] = skel_results
 

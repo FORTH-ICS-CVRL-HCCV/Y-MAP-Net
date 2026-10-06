@@ -855,6 +855,11 @@ def convertIO(cfg, frame, heatmaps, heatmap_threshold=0.0, smoothDepth=False):
     bgr_uint8_image = cv2.cvtColor(rgb_uint8_image, cv2.COLOR_BGR2RGB)
 
     heatmap_outputs = []
+    # the depth channel by name ('depthmap', 29 in the current layout); the last channel only for
+    # configs without one (it is person_head in the current layout, not depth)
+    depthChannel = retrieveHeatmapIndex(cfg.get('heatmaps', []), 'depthmap')
+    if depthChannel < 0:
+        depthChannel = heatmaps.shape[2] - 1
     #print("convertIO received : dtype=",heatmaps.dtype, " shape=",heatmaps.shape)
     #print("Iterating over dimension ",heatmaps.shape[2] )
     #print("heatmaps = ",heatmaps)
@@ -881,7 +886,7 @@ def convertIO(cfg, frame, heatmaps, heatmap_threshold=0.0, smoothDepth=False):
         #Cast back to uint8
         resized_heatmap = np.array(resized_heatmapF, dtype=np.uint8)
 
-        if (i == heatmaps.shape[2] - 1):
+        if (i == depthChannel):
             #print("Depthmap is ",i)
             if (smoothDepth):
                 resized_heatmap = apply_bilateral_filter(apply_bilateral_filter(resized_heatmap))
@@ -2253,7 +2258,10 @@ class YMAPNet:
                 keypoint_results, self.depthmap
             )  #<- Important for this to happen before normalization (castNormalizedCoordinatesToOriginalImage)!
 
-        _person_hm = self.heatmapsOut[33:36]
+        # union of the body-part segmentation channels, by name (the old [33:36] slice is
+        # depthmap>128 + Denoising R/G in every layout since at least serial 270)
+        _person_hm = [self.heatmapsOut[c] for c in (retrieveHeatmapIndex(self.cfg['heatmaps'], m)
+                                                    for m in ('Person', 'Face', 'Hand', 'Foot')) if c >= 0]
         if len(_person_hm) > 0:
             self.person_union = np.max(_person_hm, axis=0)
         else:
@@ -2279,6 +2287,11 @@ class YMAPNet:
             if _rightCh >= 0 and _leftCh >= 0:
                 _side_hm = (self.heatmapsOut[_rightCh].astype(np.float32) - 120.0,
                             self.heatmapsOut[_leftCh].astype(np.float32) - 120.0)
+            _depthCh = retrieveHeatmapIndex(self.cfg['heatmaps'], 'depthmap')
+            _depth_hm = self.heatmapsOut[_depthCh].astype(np.float32) - 120.0 if _depthCh >= 0 else None
+            _parts_hm = {m: self.heatmapsOut[c].astype(np.float32) - 120.0
+                         for m, c in ((m, retrieveHeatmapIndex(self.cfg['heatmaps'], m)) for m in ('Hand', 'Foot', 'Face'))
+                         if c >= 0}
             self.skeletons = resolveSkeletons(
                 _kp_hm,
                 _paf_hm,
@@ -2289,7 +2302,11 @@ class YMAPNet:
                 self.cfg["paf_parents"],
                 threshold=self.keypoint_threshold,
                 bridge_heatmap=_bridge_hm,
-                side_heatmaps=_side_hm)
+                side_heatmaps=_side_hm,
+                depth_heatmap=_depth_hm,
+                part_heatmaps=_parts_hm,
+                paf_encoding=self.cfg.get('heatmapPAFEncoding', 'signed'),
+                bridge_encoding=self.cfg.get('heatmapBridgeEncoding', 'signed'))
 
         self.keypoint_in_nn_coordinate_image = keypoint_results
         self.keypoint_results = castNormalizedCoordinatesToOriginalImage(

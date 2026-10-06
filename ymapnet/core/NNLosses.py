@@ -1283,6 +1283,9 @@ class HeatmapCoreLoss(keras.losses.Loss):
         #----------------------------------------------------------------------------
 
         # Calculate MSE for DepthMap
+        # Target = the DataLoader's 8-bit depth channel: per-image normalised, -120 farthest .. +120 nearest
+        # (datasets/DataLoader/PrepareBatch.c, DEPTH PIPELINE steps 3-8; the 16-bit head gets the same depth
+        # stretched to [-32767, 32767]). Normals / depth levels below are derived from this same channel.
         #----------------------------------------------------------------------------
         y_true_depthmap = y_true_cast[..., self.d_s:self.d_e]
         y_pred_depthmap = y_pred_cast[..., self.d_s:self.d_e]
@@ -1341,9 +1344,10 @@ class HeatmapCoreLoss(keras.losses.Loss):
             mse_instance = self.instance_gain * tf.reduce_mean(tf.square(y_true_inst - y_pred_inst))
             # False-negative penalty on ALL 3 instance channels — foreground-masked MSE toward
             # the GT value. blob/head are joint-like positive peaks that would collapse to
-            # background under dense MSE alone without this term (PLAN.md Obs 14); lr_bridge is
-            # signed, so this masks its positive (right) half while the negative (left) half
-            # rides on dense MSE — the same treatment the proven signed PAFs get. The target is
+            # background under dense MSE alone without this term (PLAN.md Obs 14); for a signed
+            # lr_bridge this masks its positive (right) half while the negative (left) half rides
+            # on dense MSE; a lit one (DataLoader BRIDGE_ENCODING_LIT) is masked along its whole
+            # length, like the child-lit PAFs. The target is
             # y_true, not 1.0 (PLAN.md Obs 15 recalibration).
             penalty_instance = self._fn_penalty(y_true_inst, y_pred_inst, self.instance_gain, float_type)
         else:
