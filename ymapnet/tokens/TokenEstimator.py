@@ -392,7 +392,9 @@ class TokenEstimator2D:
 
         #Search only in possible embeddings
         self.possible_glove_embeddings = dict()
-        with open("%s/embeddings_6B_D%u.json" % (modelPath, self.D), 'r') as json_file:
+
+        #TODO: This needs to be updated, hardcoding conceptnet-numberbatch/!
+        with open("%s/conceptnet-numberbatch/embeddings_6B_D%u.json" % (modelPath, self.D), 'r') as json_file:
             self.possible_glove_embeddings = json.load(json_file)
         #Read straight off the embeddings header so this can never drift from the C loader
         self.gloveOffset, self.gloveScaling = read_embeddings_offset_scaling(modelPath, self.D)
