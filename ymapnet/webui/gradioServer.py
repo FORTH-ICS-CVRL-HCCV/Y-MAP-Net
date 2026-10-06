@@ -95,6 +95,9 @@ def t(inputString):
 
 #----------------------------------------------------------------------
 
+# Allow running this file directly (python3 ymapnet/webui/gradioServer.py) as well as via -m
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
 from ymapnet.core.YMAPNet import YMAPNet, visualization, retrieveHeatmapIndex
 from ymapnet.tokens.TokenEstimator import TokenEstimator2D
 
@@ -290,7 +293,8 @@ def describe_image(image, crop_button, threshold, keypoint_threshold, history):
         else:
             seg_outputs.append(_raw(cfg_name))
 
-    history = [(t("Result"), caption)]
+    history = [{"role": "user", "content": t("Result")},
+               {"role": "assistant", "content": caption}]
 
     return (history, input_image, visRGB, union_joints, union_pafs, union_segms, normal_output, depthmap_col,
             improved_depth, *seg_outputs)
