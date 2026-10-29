@@ -19,9 +19,9 @@ Youtube Supplementary Video of Y-MAP-Net
 
 ## Android Application
 
-There is now an Android APK application that runs Y-MAP-Net (model v288) at ~2.5Hz on a Samsung Galaxy S25.
+There is now an Android APK application that runs Y-MAP-Net (model v292) at ~2.5Hz on a Samsung Galaxy S25.
 
-[![Download APK](https://img.shields.io/badge/Download-Android%20APK-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://huggingface.co/AmmarkoV/Y-MAP-Net/resolve/main/YMAPNet-v288.apk?download=true)
+[![Download APK](https://img.shields.io/badge/Download-Android%20APK-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://huggingface.co/AmmarkoV/Y-MAP-Net/resolve/main/YMAPNet-v292.apk?download=true)
 [![Watch Demo Video](https://img.shields.io/badge/Watch-Demo%20Video-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://huggingface.co/AmmarkoV/Y-MAP-Net/resolve/main/SAMSUNGS21YMAPNet288.mp4)
 
 
