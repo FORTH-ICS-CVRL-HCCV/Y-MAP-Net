@@ -63,7 +63,7 @@ source venv/bin/activate
 scripts/downloadPretrained.sh
 ```
 
-This downloads the default model (v288). To get the ICRA 2026 paper model instead, run `scripts/downloadModel.sh 180`.
+This downloads the default model (v292). To get the ICRA 2026 paper model instead, run `scripts/downloadModel.sh 180`.
 
 ### 3. Run
 

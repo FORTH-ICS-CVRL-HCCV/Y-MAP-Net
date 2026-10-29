@@ -5,7 +5,7 @@ cd "$DIR"
 cd ..
 
 #V180 is the ICRA 26 model! (scripts/downloadModel.sh 180)
-#V288 is the current default model
-scripts/downloadModel.sh 288
+#V292 is the current default model
+scripts/downloadModel.sh 292
 
 exit 0
