@@ -68,6 +68,9 @@ static void swap16bitEndiannessSimple(struct Image *img16)
 }
 
 
+//DEPTH STEP 2 of PrepareBatch.c: swap the two bytes of every 16-bit sample in place. PNG (libpng without
+//png_set_swap) and PZP decode 16-bit samples big-endian, so depth FILES need this to get native values;
+//depth split from a multiplexed "all" image is already native and must not be swapped.
 static void swap16bitEndianness(struct Image *img16)
 {
  #if INTEL_OPTIMIZATIONS
@@ -458,6 +461,12 @@ static void copy16BitHeatmapTo8BitHeatmap(struct Heatmaps * heatmaps8Bit, //NOTI
 }
 
 
+//DEPTH STEP 4 of PrepareBatch.c: 16-bit depth heatmap -> 8-bit depth heatmap of the same sample.
+//  in : signed short depth (resize16BitImageTo16BitHeatmapWithBorders1Ch output, -32767..32768, larger = nearer)
+//  out: signed char  depth in [-120, 120]: the content's min (farthest) -> -120, its max (nearest) -> +120,
+//       linear in between, rounded half away from zero. A constant depth map becomes 0 everywhere.
+//  Only the content inside the letterbox borders (borderX/borderY) is scanned and written, so the borders keep
+//  the cleared -120. The 8-bit depth is the SIGNED input of the normals (STEP 5) and depth levels (STEP 6).
 static void copy16BitHeatmapTo8BitHeatmapWithRemap(struct Heatmaps * heatmaps8Bit,
                                                    Heatmap8BitIndex target8BitChannel,
                                                    struct Heatmaps * heatmaps16Bit,
@@ -584,17 +593,75 @@ static struct Image * allocateSingleChannelImage(unsigned int w, unsigned int h,
 
 
 /*
+    Channel layout of the combined ("all") files, as written by depthanythingv3/append16bitToSAM3.py and
+    compressSegmentDepth.py: channel 0 (R) = segmentation label, 1 (G) = depth high byte, 2 (B) = depth low
+    byte. The DataLoader's default (db_set_combined_layout(), DataLoader.py combinedChannels=(0,1,2)).
+    Until 2026-09-23 this function read channel 2 as the high byte and 1 as the low byte (it assumed an
+    [R,B,G] memory order), i.e. depth from combined files was byte-swapped -- and the unconditional
+    swap16bitEndianness() in PrepareBatch.c (meant for big-endian PNG/PZP depth files) swapped it back, so
+    the depth targets were correct. Commit 8adc694 (2026-09-23) fixed the channel order here but kept that
+    swap, which then scrambled every multiplexed depth map into byte-wrapped noise until 2026-10-06, when
+    PrepareBatch.c stopped swapping multiplexed depth (DEPTH STEP 2). Keep the two in sync: this function
+    returns NATIVE-endian depth.
+*/
+#define COMBINED_SEG_CHANNEL        0
+#define COMBINED_DEPTH_HIGH_CHANNEL 1
+#define COMBINED_DEPTH_LOW_CHANNEL  2
+
+#if INTEL_OPTIMIZATIONS
+/*
+    Byte `pos` (0, 1 or 2) of each of the 16 pixels in a 48-byte stride-3 block a|b|c, in order.
+    The shifts of _mm_slli_si128 must be compile-time constants, hence one case per position.
+*/
+static inline __m128i deinterleave3(__m128i a, __m128i b, __m128i c, unsigned int pos)
+{
+    // position 0: a{0,3,..,15} b{2,5,..,14} c{1,4,..,13}   (6 + 5 + 5 bytes)
+    static const signed char m0a[16] = { 0, 3, 6, 9,12,15,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    static const signed char m0b[16] = { 2, 5, 8,11,14,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    static const signed char m0c[16] = { 1, 4, 7,10,13,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    // position 1: a{1,4,..,13} b{0,3,..,15} c{2,5,..,14}   (5 + 6 + 5 bytes)
+    static const signed char m1a[16] = { 1, 4, 7,10,13,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    static const signed char m1b[16] = { 0, 3, 6, 9,12,15,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    static const signed char m1c[16] = { 2, 5, 8,11,14,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    // position 2: a{2,5,..,14} b{1,4,..,13} c{0,3,..,15}   (5 + 5 + 6 bytes)
+    static const signed char m2a[16] = { 2, 5, 8,11,14,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    static const signed char m2b[16] = { 1, 4, 7,10,13,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    static const signed char m2c[16] = { 0, 3, 6, 9,12,15,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
+    switch (pos)
+    {
+      case 0:
+        return _mm_or_si128(_mm_or_si128(_mm_shuffle_epi8(a, _mm_loadu_si128((const __m128i*)m0a)),
+                                         _mm_slli_si128(_mm_shuffle_epi8(b, _mm_loadu_si128((const __m128i*)m0b)), 6)),
+                                         _mm_slli_si128(_mm_shuffle_epi8(c, _mm_loadu_si128((const __m128i*)m0c)), 11));
+      case 1:
+        return _mm_or_si128(_mm_or_si128(_mm_shuffle_epi8(a, _mm_loadu_si128((const __m128i*)m1a)),
+                                         _mm_slli_si128(_mm_shuffle_epi8(b, _mm_loadu_si128((const __m128i*)m1b)), 5)),
+                                         _mm_slli_si128(_mm_shuffle_epi8(c, _mm_loadu_si128((const __m128i*)m1c)), 11));
+      default:
+        return _mm_or_si128(_mm_or_si128(_mm_shuffle_epi8(a, _mm_loadu_si128((const __m128i*)m2a)),
+                                         _mm_slli_si128(_mm_shuffle_epi8(b, _mm_loadu_si128((const __m128i*)m2b)), 5)),
+                                         _mm_slli_si128(_mm_shuffle_epi8(c, _mm_loadu_si128((const __m128i*)m2c)), 10));
+    }
+}
+#endif
+
+/*
     Main function that:
-    - Loads the PNG containing segmentation + depth (RGB)
+    - Takes the image containing segmentation + depth (8-bit, 3 or 4 channels)
     - Allocates two new Image objects:
-         seg_img  = 8-bit class ID
-         depth_img = 16-bit depth image
-    - Extracts the data into the new images
+         seg_img  = 8-bit class ID                       (channel segChannel)
+         depth_img = 16-bit depth image                  (channel depthHighChannel * 256 + channel depthLowChannel)
+    - Extracts the data into the new images; img is consumed (destroyed)
+    DEPTH STEP 0a of PrepareBatch.c. depth_img holds the depth VALUES in NATIVE byte order (unsigned, 0..65535,
+    larger = nearer for Depth Anything depth): it must NOT go through swap16bitEndianness() like a depth file.
 */
 static int splitSegmentationAndDepthFromSingleFileGeneric(
                                                           struct Image * img,
                                                           struct Image ** seg_img_out,
-                                                          struct Image ** depth_img_out
+                                                          struct Image ** depth_img_out,
+                                                          unsigned int segChannel,
+                                                          unsigned int depthHighChannel,
+                                                          unsigned int depthLowChannel
                                                          )
 {
     *seg_img_out   = 0;
@@ -614,8 +681,15 @@ static int splitSegmentationAndDepthFromSingleFileGeneric(
         fprintf(stderr, "ERROR: Expected 8-bit RGB file\n");
         return 0;
     }
+    if ( (segChannel >= img->channels) || (depthHighChannel >= img->channels) || (depthLowChannel >= img->channels) )
+    {
+        fprintf(stderr, "ERROR: combined layout channels %u,%u,%u don't fit a %u channel image\n", segChannel, depthHighChannel, depthLowChannel, img->channels);
+        destroyImage(img);   // consumed, as on success
+        return 0;
+    }
 
     unsigned int W = img->width;
+    unsigned int C = img->channels;   // pixel stride (3 for RGB, 4 for RGBA combined files)
     unsigned int H = img->height;
 
     const unsigned char * src = img->pixels;
@@ -640,126 +714,43 @@ static int splitSegmentationAndDepthFromSingleFileGeneric(
     // -------------------------------------------------------
     // 3. Extract segmentation + depth values
     // -------------------------------------------------------
-    #define CHANNEL_R 0
-    #define CHANNEL_G 2
-    #define CHANNEL_B 1
-
     unsigned int n = W * H;
+    unsigned int i = 0;
 
 #if INTEL_OPTIMIZATIONS
-    // AVX2 / SSE4.1 stride-3 deinterleave — 16 pixels (48 bytes) per iteration.
-    //
-    // Pixel layout in memory: [R0,B0,G0, R1,B1,G1, ...]
-    //   CHANNEL_R=0 (position 0) → seg byte
-    //   CHANNEL_B=1 (position 1) → depth low byte
-    //   CHANNEL_G=2 (position 2) → depth high byte
-    //   depth[i] = (G[i] << 8) | B[i]
-    //
-    // We load three consecutive 16-byte blocks a/b/c covering pixels i..i+15:
-    //   a = src[0..15],  b = src[16..31],  c = src[32..47]
-    //
-    // Channel R at relative byte positions:  a:{0,3,6,9,12,15}  b:{2,5,8,11,14}  c:{1,4,7,10,13}
-    // Channel B at relative byte positions:  a:{1,4,7,10,13}    b:{0,3,6,9,12,15} c:{2,5,8,11,14}
-    // Channel G at relative byte positions:  a:{2,5,8,11,14}    b:{1,4,7,10,13}   c:{0,3,6,9,12,15}
-    //
-    // pshufb compacts each group to the low bytes of the result; two byte-shift-and-OR
-    // operations then stitch the three partial results into one contiguous 16-byte vector.
-
-    // pshufb masks stored as byte arrays (portable C99; -1 = 0xFF zeroes that output byte).
-    // R masks (position 0 per pixel):
-    //   a → 6 bytes at output[0..5];   pshufb indices: 0,3,6,9,12,15
-    //   b → 5 bytes at output[0..4];   pshufb indices: 2,5,8,11,14  (shift left 6 before OR)
-    //   c → 5 bytes at output[0..4];   pshufb indices: 1,4,7,10,13  (shift left 11 before OR)
-    static const signed char _mR_a[16] = { 0, 3, 6, 9,12,15,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
-    static const signed char _mR_b[16] = { 2, 5, 8,11,14,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
-    static const signed char _mR_c[16] = { 1, 4, 7,10,13,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
-    // B masks (position 1 per pixel):
-    //   a → 5 bytes;  b → 6 bytes (shift 5);  c → 5 bytes (shift 11)
-    static const signed char _mB_a[16] = { 1, 4, 7,10,13,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
-    static const signed char _mB_b[16] = { 0, 3, 6, 9,12,15,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
-    static const signed char _mB_c[16] = { 2, 5, 8,11,14,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
-    // G masks (position 2 per pixel):
-    //   a → 5 bytes;  b → 5 bytes (shift 5);  c → 6 bytes (shift 10)
-    static const signed char _mG_a[16] = { 2, 5, 8,11,14,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
-    static const signed char _mG_b[16] = { 1, 4, 7,10,13,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
-    static const signed char _mG_c[16] = { 0, 3, 6, 9,12,15,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 };
-
-    // Load masks into registers once (compiler will keep them in regs across loop iterations)
-    __m128i shuf_R_a = _mm_loadu_si128((const __m128i*)_mR_a);
-    __m128i shuf_R_b = _mm_loadu_si128((const __m128i*)_mR_b);
-    __m128i shuf_R_c = _mm_loadu_si128((const __m128i*)_mR_c);
-    __m128i shuf_B_a = _mm_loadu_si128((const __m128i*)_mB_a);
-    __m128i shuf_B_b = _mm_loadu_si128((const __m128i*)_mB_b);
-    __m128i shuf_B_c = _mm_loadu_si128((const __m128i*)_mB_c);
-    __m128i shuf_G_a = _mm_loadu_si128((const __m128i*)_mG_a);
-    __m128i shuf_G_b = _mm_loadu_si128((const __m128i*)_mG_b);
-    __m128i shuf_G_c = _mm_loadu_si128((const __m128i*)_mG_c);
-
-    unsigned int i = 0;
-    for (; i + 16 <= n; i += 16)
+    // SSSE3 / SSE4.1 stride-3 deinterleave, 16 pixels (48 bytes) per iteration (RGB images only):
+    // the three wanted bytes of each pixel are gathered with deinterleave3(), then depth = (high << 8) | low.
+    if (C == 3)
     {
-        const unsigned char *s = src + i * 3;
+        for (; i + 16 <= n; i += 16)
+        {
+            const unsigned char *s = src + i * 3;
+            __m128i a = _mm_loadu_si128((const __m128i*)(s +  0));
+            __m128i b = _mm_loadu_si128((const __m128i*)(s + 16));
+            __m128i c = _mm_loadu_si128((const __m128i*)(s + 32));
 
-        __m128i a = _mm_loadu_si128((const __m128i*)(s +  0));
-        __m128i b = _mm_loadu_si128((const __m128i*)(s + 16));
-        __m128i c = _mm_loadu_si128((const __m128i*)(s + 32));
+            __m128i seg_16  = deinterleave3(a, b, c, segChannel);
+            __m128i high_16 = deinterleave3(a, b, c, depthHighChannel);
+            __m128i low_16  = deinterleave3(a, b, c, depthLowChannel);
 
-        // --- R (seg) channel: 6 from a, 5 from b, 5 from c ---
-        __m128i seg_16 =
-            _mm_or_si128(
-                _mm_or_si128(_mm_shuffle_epi8(a, shuf_R_a),
-                             _mm_slli_si128(_mm_shuffle_epi8(b, shuf_R_b), 6)),
-                             _mm_slli_si128(_mm_shuffle_epi8(c, shuf_R_c), 11));
-
-        // --- B channel (depth low byte): 5 from a, 6 from b, 5 from c ---
-        __m128i B_16 =
-            _mm_or_si128(
-                _mm_or_si128(_mm_shuffle_epi8(a, shuf_B_a),
-                             _mm_slli_si128(_mm_shuffle_epi8(b, shuf_B_b), 5)),
-                             _mm_slli_si128(_mm_shuffle_epi8(c, shuf_B_c), 11));
-
-        // --- G channel (depth high byte): 5 from a, 5 from b, 6 from c ---
-        __m128i G_16 =
-            _mm_or_si128(
-                _mm_or_si128(_mm_shuffle_epi8(a, shuf_G_a),
-                             _mm_slli_si128(_mm_shuffle_epi8(b, shuf_G_b), 5)),
-                             _mm_slli_si128(_mm_shuffle_epi8(c, shuf_G_c), 10));
-
-        // --- Write 16 seg bytes ---
-        _mm_storeu_si128((__m128i*)(seg_pixels + i), seg_16);
-
-        // --- Build depth: depth[j] = (G[j] << 8) | B[j] ---
-        // Low 8 pixels: zero-extend bytes 0-7 of G/B to uint16, combine
-        __m128i depth_lo = _mm_or_si128(
-            _mm_slli_epi16(_mm_cvtepu8_epi16(G_16), 8),
-                           _mm_cvtepu8_epi16(B_16));
-        _mm_storeu_si128((__m128i*)(depth_pixels + i),     depth_lo);
-
-        // High 8 pixels: shift G/B right by 8 bytes to bring bytes 8-15 to low end, then same
-        __m128i depth_hi = _mm_or_si128(
-            _mm_slli_epi16(_mm_cvtepu8_epi16(_mm_srli_si128(G_16, 8)), 8),
-                           _mm_cvtepu8_epi16(_mm_srli_si128(B_16, 8)));
-        _mm_storeu_si128((__m128i*)(depth_pixels + i + 8), depth_hi);
-    }
-
-    // Scalar tail for the remaining < 16 pixels
-    for (; i < n; i++)
-    {
-        unsigned int idx = i * 3;
-        seg_pixels[i]   = src[idx + CHANNEL_R];
-        depth_pixels[i] = ((unsigned short)src[idx + CHANNEL_G] << 8)
-                        |  (unsigned short)src[idx + CHANNEL_B];
-    }
-#else
-    // Flat scalar loop
-    for (unsigned int i = 0; i < n; i++)
-    {
-        unsigned int idx = i * 3;
-        seg_pixels[i]   = src[idx + CHANNEL_R];
-        depth_pixels[i] = ((unsigned short)src[idx + CHANNEL_G] << 8)
-                        |  (unsigned short)src[idx + CHANNEL_B];
+            _mm_storeu_si128((__m128i*)(seg_pixels + i), seg_16);
+            // pixels 0-7, then 8-15 (bytes 8-15 shifted down), zero-extended to 16 bits
+            _mm_storeu_si128((__m128i*)(depth_pixels + i),
+                             _mm_or_si128(_mm_slli_epi16(_mm_cvtepu8_epi16(high_16), 8), _mm_cvtepu8_epi16(low_16)));
+            _mm_storeu_si128((__m128i*)(depth_pixels + i + 8),
+                             _mm_or_si128(_mm_slli_epi16(_mm_cvtepu8_epi16(_mm_srli_si128(high_16, 8)), 8),
+                                          _mm_cvtepu8_epi16(_mm_srli_si128(low_16, 8))));
+        }
     }
 #endif
+
+    // Scalar: the remaining pixels (all of them without INTEL_OPTIMIZATIONS or for 4-channel images)
+    for (; i < n; i++)
+    {
+        const unsigned char * px = src + (size_t) i * C;
+        seg_pixels[i]   = px[segChannel];
+        depth_pixels[i] = (unsigned short) (((unsigned short) px[depthHighChannel] << 8) | px[depthLowChannel]);
+    }
 
     // -------------------------------------------------------
     // 4. Return both output images
@@ -799,7 +790,7 @@ static int splitSegmentationAndDepthFromSingleFilePNG(
     }
 
 
-   return splitSegmentationAndDepthFromSingleFileGeneric(img,seg_img_out,depth_img_out);
+   return splitSegmentationAndDepthFromSingleFileGeneric(img,seg_img_out,depth_img_out,COMBINED_SEG_CHANNEL,COMBINED_DEPTH_HIGH_CHANNEL,COMBINED_DEPTH_LOW_CHANNEL);
 
 }
 
@@ -834,7 +825,7 @@ static int splitSegmentationAndDepthFromSingleFilePZP(
 
    img->bitsperpixel = 8; // <- Recode bits per pixel how the next function expects it ..
 
-   return splitSegmentationAndDepthFromSingleFileGeneric(img,seg_img_out,depth_img_out);
+   return splitSegmentationAndDepthFromSingleFileGeneric(img,seg_img_out,depth_img_out,COMBINED_SEG_CHANNEL,COMBINED_DEPTH_HIGH_CHANNEL,COMBINED_DEPTH_LOW_CHANNEL);
 
 }
 

@@ -9,6 +9,15 @@ extern "C" {
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
+
+// configuration.h is normally pulled in AFTER this header (DataLoader.h:19 vs :34), so it
+// is included explicitly here to make its toggles visible; it has its own include guard.
+#include "configuration.h"
+
+#ifndef L2_NORMALIZE_DESCRIPTORS
+#define L2_NORMALIZE_DESCRIPTORS 0
+#endif
 
 #define MAX_LINE_LEN 32000
 
@@ -77,6 +86,37 @@ static void free_descriptor_dataset(DescriptorDataset *ds)
     ds->entries = NULL;
     }
   }
+}
+
+// Scale every descriptor to unit L2 norm, in place, once per file load.
+// DescriptorLoss (NNLosses.py) documents its targets as unit-norm, but the shipped DINOv3
+// dumps arrive with ||v|| ~ 14.2, which makes its norm-reg term dominate the objective.
+// A vector that is exactly zero means "this sample has no descriptor" (its source has no
+// .dinov3 sidecar); those are left as zeros so the Python-side guard can still spot them
+// and so we never divide by zero.
+static void l2_normalize_descriptor_dataset(DescriptorDataset *ds, const char *filename)
+{
+#if L2_NORMALIZE_DESCRIPTORS
+    if (ds == NULL || ds->entries == NULL) { return; }
+
+    unsigned long normalized = 0, zeros = 0;
+    for (int i = 0; i < ds->count; ++i)
+    {
+        DescriptorEntry *e = &ds->entries[i];
+        if (e->values == NULL || e->value_count <= 0) { continue; }
+
+        double sum = 0.0;
+        for (int d = 0; d < e->value_count; ++d) { sum += (double) e->values[d] * (double) e->values[d]; }
+
+        if (sum <= 0.0) { zeros++; continue; }   // missing descriptor -> deliberately left all-zero
+
+        const float inverse = (float) (1.0 / sqrt(sum));
+        for (int d = 0; d < e->value_count; ++d) { e->values[d] *= inverse; }
+        normalized++;
+    }
+    fprintf(stderr, "Descriptor file '%s': L2-normalised %lu vectors (%lu all-zero left untouched)\n",
+            filename, normalized, zeros);
+#endif
 }
 
 static DescriptorDataset * load_descriptor_csv(const char *filename)
@@ -160,6 +200,7 @@ static DescriptorDataset * load_descriptor_csv(const char *filename)
     }
 
     fclose(fp);
+    l2_normalize_descriptor_dataset(ds, filename);
     return ds;
 }
 
@@ -188,6 +229,43 @@ static int save_descriptor_bin(const char *filename, const DescriptorDataset *ds
     return 1;
 }
 
+// Maximum plausible descriptor dimensionality. Real embeddings are at most a few
+// thousand (DINOv2/v3: 384/768/1024/1280/1536). A "value_count" far above this means
+// we are reading a pre-2026-01-03 file whose 8-byte header has NO value_count field,
+// so the int32 we read as value_count is actually entry-0's name_len+filename bytes.
+#define DESCRIPTOR_MAX_PLAUSIBLE_DIM 8192
+
+// Recover the per-entry float count of a legacy (8-byte header) descriptor file by
+// trying the known embedding dimensions and keeping whichever makes the entry walk
+// land EXACTLY on EOF after 'count' entries. 'dataStart' is the byte offset of the
+// first entry (8 for legacy files). Returns the dim, or -1 if none fit.
+// The file position is left undefined; the caller must fseek before reading entries.
+static int infer_legacy_descriptor_value_count(FILE *fp, int count, long dataStart)
+{
+    static const int candidates[] = { 768, 1024, 1280, 384, 512, 1536, 2048, 300 };
+    const int nCand = (int)(sizeof(candidates) / sizeof(candidates[0]));
+
+    if (fseek(fp, 0, SEEK_END) != 0) { return -1; }
+    long fileSize = ftell(fp);
+    if (fileSize < dataStart) { return -1; }
+
+    for (int c = 0; c < nCand; ++c)
+    {
+        const long V = candidates[c];
+        long pos = dataStart;
+        int ok = 1;
+        for (int i = 0; i < count; ++i)
+        {
+            uint8_t nl;
+            if (fseek(fp, pos, SEEK_SET) != 0 || fread(&nl, 1, 1, fp) != 1) { ok = 0; break; }
+            pos += 1 + (long)nl + V * (long)sizeof(float);
+            if (pos > fileSize) { ok = 0; break; }   // overshoot -> wrong dim
+        }
+        if (ok && pos == fileSize) { return (int)V; }  // exact fit -> this is the dim
+    }
+    return -1;
+}
+
 static DescriptorDataset * load_descriptor_bin(const char *filename)
 {
     FILE *fp = fopen(filename, "rb");
@@ -210,6 +288,37 @@ static DescriptorDataset * load_descriptor_bin(const char *filename)
         fread(&ds->value_count, sizeof(int32_t), 1, fp) != 1)
     {
         fprintf(stderr, "Failed to read dataset header\n");
+        free(ds);
+        fclose(fp);
+        return NULL;
+    }
+
+    // Backward compatibility with legacy (pre-2026-01-03) descriptor files: those
+    // have an 8-byte header (count, max_filename_len) with NO value_count field, so
+    // the third int32 we just read really belongs to entry 0 and comes out garbage.
+    // Detect that, rewind the data to offset 8, and recover the dim by counting.
+    long dataStart = 12;  // current format: 12-byte header incl. value_count
+    if (ds->value_count <= 0 || ds->value_count > DESCRIPTOR_MAX_PLAUSIBLE_DIM)
+    {
+        dataStart = 8;    // legacy format: entries begin right after count+max_filename_len
+        int inferred = infer_legacy_descriptor_value_count(fp, ds->count, dataStart);
+        if (inferred <= 0)
+        {
+            fprintf(stderr, "Descriptor file '%s': legacy 8-byte header but descriptor "
+                            "dimension could not be inferred; ignoring file.\n", filename);
+            free(ds);
+            fclose(fp);
+            return NULL;
+        }
+        ds->value_count = inferred;
+        fprintf(stderr, "Descriptor file '%s': legacy 8-byte header, inferred descriptor dim = %d\n",
+                filename, ds->value_count);
+    }
+    // infer_legacy_descriptor_value_count moved the file pointer; (re)position it at
+    // the first entry for both formats before the per-entry read loop below.
+    if (fseek(fp, dataStart, SEEK_SET) != 0)
+    {
+        fprintf(stderr, "Failed to seek to descriptor data in '%s'\n", filename);
         free(ds);
         fclose(fp);
         return NULL;
@@ -264,7 +373,8 @@ static DescriptorDataset * load_descriptor_bin(const char *filename)
     if (fread(e->filename, 1, e->name_len, fp) != e->name_len)
     {
         fprintf(stderr, "Failed to read filename for entry %d\n", i);
-        free(e->filename);
+        // e->filename is owned by ds->entries[i]; free_descriptor_dataset frees it.
+        // Do NOT free it here too (that double-frees -> "free(): double free in tcache").
         free_descriptor_dataset(ds);
         fclose(fp);
         return NULL;
@@ -287,8 +397,9 @@ static DescriptorDataset * load_descriptor_bin(const char *filename)
     if ( actuallyRead != (size_t)e->value_count)
     {
         fprintf(stderr, "Failed to read descriptor values for entry %d (actually read %lu)\n", i,actuallyRead);
-        free(e->filename);
-        free(e->values);
+        // e->filename and e->values are owned by ds->entries[i]; free_descriptor_dataset
+        // frees both. Do NOT free them here too (double-free -> tcache abort, the exact
+        // crash seen when libDataLoader.so reads an old 8-byte-header descriptor file).
         free_descriptor_dataset(ds);
         fclose(fp);
         return NULL;
@@ -297,6 +408,7 @@ static DescriptorDataset * load_descriptor_bin(const char *filename)
 
 
     fclose(fp);
+    l2_normalize_descriptor_dataset(ds, filename);
     return ds;
 }
 

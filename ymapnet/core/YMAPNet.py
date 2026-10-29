@@ -2118,7 +2118,7 @@ class YMAPNet:
             'Joint Heatmap Union', 'PAFs Union', 'Class segmentation Union',
             'Person Union', 'Person', 'Vehicle', 'Unsegmented', 'Person IDs',
             'Combined Normals', 'Description', 'Monitor Visualization',
-            'Activity', 'Threshold Controls',
+            'Activity', 'Threshold Controls', 'TENpamy',
         ]
         monitor_specs = {entry[3]: entry[0] for entry in self.monitor}
         candidates = list(dict.fromkeys(
@@ -2306,7 +2306,8 @@ class YMAPNet:
                 depth_heatmap=_depth_hm,
                 part_heatmaps=_parts_hm,
                 paf_encoding=self.cfg.get('heatmapPAFEncoding', 'signed'),
-                bridge_encoding=self.cfg.get('heatmapBridgeEncoding', 'signed'))
+                bridge_encoding=self.cfg.get('heatmapBridgeEncoding', 'signed'),
+                score_weights=self.cfg.get('skeletonScoreWeights'))  # learned person score (skeletons/score.py), None = default
 
         self.keypoint_in_nn_coordinate_image = keypoint_results
         self.keypoint_results = castNormalizedCoordinatesToOriginalImage(

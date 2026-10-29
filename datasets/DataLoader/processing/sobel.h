@@ -258,6 +258,18 @@ static void sobelXY8Bit(struct Image *image, float *gradientX, float *gradientY,
     //fprintf(stderr,"sobelXY8Bit survived \n",width,height);
 }
 
+//sobelXY8Bit on a SIGNED channel. Heatmaps store depth as signed char [-120,120]; read as unsigned, -1 becomes
+//255 next to a 0, a false +-255 edge along every zero crossing. Flipping the sign bit maps v to v+128 (order and
+//differences kept), so the gradients are those of the signed values; the bytes are restored afterwards.
+static void sobelXY8BitSigned(struct Image *image, float *gradientX, float *gradientY, int channel)
+{
+    unsigned char * p = (unsigned char *) image->pixels + channel;
+    const unsigned long n = (unsigned long) image->width * image->height;
+    for (unsigned long i = 0; i < n; i++) { p[i * image->channels] ^= 0x80; }
+    sobelXY8Bit(image, gradientX, gradientY, channel);
+    for (unsigned long i = 0; i < n; i++) { p[i * image->channels] ^= 0x80; }
+}
+
 
 
 static void sobelX8Bit(struct Image *image, float *gradientX,int channel)

@@ -46,6 +46,7 @@ import cv2
 import numpy as np
 
 from ymapnet.skeletons.peaks import findPeaks
+from ymapnet.skeletons.score import personFeatures, personScore
 from ymapnet.skeletons.limbs import buildLimbs, prepareChannel, scoreLimbCandidates
 
 # Face joints attached geometrically, in dependency order: (joint, anchors to try in order).
@@ -278,7 +279,7 @@ def resolveSkeletons(keypoint_heatmaps, PAF_heatmaps, depth_map, keypoint_names,
                      owned_bonus=0.5, max_limb_length=0.6, face_gate=1.3, min_joints=3, min_person_score=0.1,
                      side_heatmaps=None, depth_heatmap=None, depth_weight=0.5, part_heatmaps=None,
                      paf_encoding='signed', bridge_encoding='signed', skip_limbs=False, torso_ratio=2.0, min_coverage=0.0, neck_gate=1.0, seed_leftovers=False,
-                     **ignored):
+                     score_weights=None, **ignored):
     """
     Drop-in replacement for ymapnet.utils.resolveJointHierarchy.resolveJointHierarchyNew
     (same positional arguments; depth_map / keypoint_children / sanity_check /
@@ -322,6 +323,8 @@ def resolveSkeletons(keypoint_heatmaps, PAF_heatmaps, depth_map, keypoint_names,
     paf_encoding      : how the model's PAFs were drawn, configuration.json
                         cfg.get('heatmapPAFEncoding', 'signed'): 'signed' (serials <= 288)
                         or 'child_lit' (see limbs.py)
+    score_weights     : configuration.json "skeletonScoreWeights" (score.py): each skeleton gets its
+                        learned person score appended as element J*3 and the list is sorted by it
     """
     kp = np.asarray(keypoint_heatmaps, dtype=np.float32)
     H, W = kp.shape[:2]
@@ -428,7 +431,7 @@ def resolveSkeletons(keypoint_heatmaps, PAF_heatmaps, depth_map, keypoint_names,
             for i in np.nonzero(asm.owner[j] < 0)[0]:
                 asm.set(asm.new(), j, i)
 
-    skeletons = []
+    skeletons, kept = [], []
     for person in asm.persons:
         present = np.nonzero(person >= 0)[0]
         if len(present) < min_joints:
@@ -440,4 +443,17 @@ def resolveSkeletons(keypoint_heatmaps, PAF_heatmaps, depth_map, keypoint_names,
             x, y, v = peaks[j][person[j]]
             sk[j * 3:j * 3 + 3] = [float(x) / W, float(y) / H, float(v)]
         skeletons.append(sk)
+        kept.append(person)
+    if score_weights is not None:
+        # learned person score (score.py): appended as element J*3, people sorted best first
+        aux = {'bridge': bridge_heatmap, 'hand': (part_heatmaps or {}).get('Hand'), 'foot': (part_heatmaps or {}).get('Foot'),
+               'face': (part_heatmaps or {}).get('Face'),
+               'right': side_heatmaps[0] if side_heatmaps is not None else None,
+               'left': side_heatmaps[1] if side_heatmaps is not None else None}
+        for sk, person in zip(skeletons, kept):
+            xy, conf = np.zeros((J, 2)), np.zeros(J)
+            for j in np.nonzero(person >= 0)[0]:
+                xy[j], conf[j] = peaks[j][person[j], :2], peaks[j][person[j], 2]
+            sk.append(personScore(personFeatures(xy, conf, len(skeletons), J, W, H, aux), score_weights))
+        skeletons.sort(key=lambda sk: -sk[J * 3])
     return skeletons

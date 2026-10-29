@@ -269,8 +269,8 @@ static void computeNormalsOnHeatmaps8Bit_Simple(signed char * heatmapPixels, uns
    //#if INTEL_OPTIMIZATIONS
    //  sobelXY8BitLoop(&heatmapWrapper, gradientX, gradientY, depthMapSourceChannel);
    //#else
-     //This is optimized for regular non SIMD operations
-     sobelXY8Bit(&heatmapWrapper, gradientX, gradientY, depthMapSourceChannel);
+     //This is optimized for regular non SIMD operations. The depth channel is SIGNED [-120,120]: signed wrapper.
+     sobelXY8BitSigned(&heatmapWrapper, gradientX, gradientY, depthMapSourceChannel);
    //#endif // INTEL_OPTIMIZATIONS
 
    //unsigned long gradientIndex = 0;
@@ -334,6 +334,17 @@ static void computeNormalsOnHeatmaps8Bit_Simple(signed char * heatmapPixels, uns
 }
 
 
+//DEPTH STEP 5 of PrepareBatch.c (also re-run after a flip / rotate90): surface normals from the 8-bit depth.
+//  in : channel depthMapSourceChannel = SIGNED depth [-120 farthest .. +120 nearest] (STEP 4)
+//  out: channels normalOutputChannel+0/+1/+2 = normalX/normalY/normalZ = 120 * (dx, dy, 1) / |(dx, dy, 1)|,
+//       dx/dy = 3x3 Sobel of the signed depth (sobelXY8BitSigned; the depth bytes were read as UNSIGNED until
+//       2026-10-06, which put a false +-255 edge along every zero crossing). Within the image: normalZ in
+//       (0,120], normalX > 0 where depth increases (gets nearer) to the right, normalY > 0 where it increases downwards.
+//  Only inside the letterbox borders, shrunk by one more pixel on a bordered axis (the Sobel edge there is the
+//  border, not the scene). The Sobel never writes the outermost row/column of gradientX/Y, so on an axis without
+//  a border those pixels read never-written gradient cells (zero in practice -> a flat (0,0,120) normal).
+//  INTEL_OPTIMIZATIONS selects the AVX2 version (rsqrt, rounding) over the scalar one (sqrtf, truncation);
+//  they agree to within 1.
 static void computeNormalsOnHeatmaps8Bit(signed char * heatmapPixels, unsigned int heatmapWidth, unsigned int heatmapHeight,unsigned int heatmapChannels,
                                          unsigned int depthMapSourceChannel,unsigned int normalOutputChannel,
                                          float *gradientX,float *gradientY, unsigned int borderX, unsigned int borderY)

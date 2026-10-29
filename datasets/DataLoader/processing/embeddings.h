@@ -9,6 +9,7 @@ extern "C"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define MAX_KEY_LENGTH 50  // Maximum length of each string
 
@@ -107,14 +108,33 @@ static void _save_embeddings_binary(const char *bin_path, const struct Embedding
     fprintf(stderr, "Embeddings binary cache written to %s\n", bin_path);
 }
 
+// The .bin sidecar carries no version/hash, so a regenerated text file (different D,
+// retrofitted vectors) would otherwise be silently shadowed by the old cache forever.
+// returns 1 = usable, 0 = stale (text file is newer), -1 = no cache present
+// Nanosecond precision matters: regenerating the text file and re-running within the same
+// second is the normal case while iterating on embeddings, and plain st_mtime cannot see it.
+static int _binary_cache_state(const char *bin_path, const char *txt_path)
+{
+    struct stat bs, ts;
+    if (stat(bin_path, &bs) != 0) return -1;
+    if (stat(txt_path, &ts) != 0) return  1;       // no text file, cache is all we have
+    if (bs.st_mtim.tv_sec != ts.st_mtim.tv_sec)
+        return (bs.st_mtim.tv_sec > ts.st_mtim.tv_sec) ? 1 : 0;
+    return (bs.st_mtim.tv_nsec >= ts.st_mtim.tv_nsec) ? 1 : 0;
+}
+
 static int load_embeddings(const char *filename, struct Embeddings *emb)
 {
     // Build sidecar path:  "foo.embeddings" -> "foo.embeddings.bin"
-    char bin_path[512];
+    char bin_path[1280];
     snprintf(bin_path, sizeof(bin_path), "%s.bin", filename);
 
-    if (_load_embeddings_from_binary(bin_path, emb))
+    int cacheState = _binary_cache_state(bin_path, filename);
+    if (cacheState == 1 && _load_embeddings_from_binary(bin_path, emb))
         return 1;
+    if (cacheState == 0)
+        fprintf(stderr, "Embeddings binary cache %s is older than %s — reparsing text\n",
+                bin_path, filename);
 
     // Binary cache missing or stale — fall back to text parsing.
     FILE *file = fopen(filename, "r");
@@ -172,6 +192,43 @@ static int load_embeddings(const char *filename, struct Embeddings *emb)
     // Write binary cache for future runs.
     _save_embeddings_binary(bin_path, emb);
 
+    return 1;
+}
+
+// Re-scale already-loaded vectors from the transform currently baked into them to a new
+// one. Vectors are stored PRE-scaled ((raw + offset) * scaling), so changing the constants
+// after load means undoing the old pair before applying the new one — there is no untouched
+// copy of the raw values in memory to fall back on.
+static int rescale_embeddings(struct Embeddings *emb, float newOffset, float newScaling)
+{
+    if (emb == 0 || emb->embeddings == 0) { return 0; }
+    if (emb->scaling == 0.0f)             { return 0; }   // cannot invert
+    if (emb->offset == newOffset && emb->scaling == newScaling) { return 1; }
+
+    float lo = 0.0f, hi = 0.0f;
+    for (int keyID = 0; keyID < emb->Classes; keyID++)
+    {
+        float *v = emb->embeddings[keyID].vector;
+        if (v == 0) { continue; }
+        for (int d = 0; d < emb->D; d++)
+        {
+            float raw = (v[d] / emb->scaling) - emb->offset;
+            v[d] = (raw + newOffset) * newScaling;
+            if (v[d] < lo) { lo = v[d]; }
+            if (v[d] > hi) { hi = v[d]; }
+        }
+    }
+    emb->offset  = newOffset;
+    emb->scaling = newScaling;
+
+    // The token head is a tanh layer, so anything beyond [-1,1] is a target it can never
+    // reach. Free to check here since we just walked every value anyway.
+    if (lo < -1.0f || hi > 1.0f)
+    {
+        fprintf(stderr, "Warning: offset %f / scaling %f puts embeddings in [%f, %f], "
+                        "outside the tanh range [-1,1] — those targets are unreachable\n",
+                newOffset, newScaling, lo, hi);
+    }
     return 1;
 }
 

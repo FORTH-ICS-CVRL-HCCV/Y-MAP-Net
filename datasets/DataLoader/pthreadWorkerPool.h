@@ -26,7 +26,7 @@ extern "C"
 {
 #endif
 
-static const char pthreadWorkerPoolVersion[]="0.40";
+static const char pthreadWorkerPoolVersion[]="0.42"; //0.42: fix threadpoolCreate hang/UB on partial pthread_create failure, use atomics for activeWorkers/workersWaiting, drop the mainThreadWaiting busy-wait spin in threadpoolWorkerLoopEnd
 
 #define SPIN_SLEEP_TIME_MICROSECONDS 120
 
@@ -41,6 +41,7 @@ struct threadContext
     struct workerPool * pool;
     unsigned int threadID;
     char threadInitialized;
+    char alive; //1 if pthread_create succeeded for this slot, 0 if this slot was never started
 };
 
 /**
@@ -49,10 +50,14 @@ struct threadContext
 struct workerPool
 {
     //---------------------
-    volatile char initialized;
-    volatile char work;
-    volatile char mainThreadWaiting;
+    volatile char initialized;      //Only ever touched by the controlling (main) thread, never by workers
+    volatile char work;             //Always read/written while holding startWorkMutex - protected by that lock
     //---------------------
+    // activeWorkers and workersWaiting are each written under one mutex (startWorkMutex) and read/decremented
+    // under a *different* mutex (completeWorkMutex), or read with no lock held at all (the busy-wait in
+    // threadpoolMainThreadPrepareWorkForWorkers). A single pthread mutex only guarantees memory visibility for
+    // accesses made while holding that same mutex, so relying purely on "volatile" here is not formally safe -
+    // access these two fields only through the __atomic_* builtins below.
     volatile int activeWorkers;
     volatile int workersWaiting;  // workers currently inside pthread_cond_wait on startWorkCondition
     //---------------------
@@ -68,7 +73,8 @@ struct workerPool
     pthread_cond_t  completeWorkCondition;
     //---------------------
 
-    unsigned int numberOfThreads;
+    unsigned int numberOfThreads;      //Number of threads that were successfully created (i.e. alive)
+    unsigned int numberOfThreadSlots;  //Number of slots allocated in workerPoolContext/workerPoolIDs (the requested spawn count)
     //---------------------
     struct threadContext *workerPoolContext;
     pthread_t * workerPoolIDs;
@@ -87,6 +93,8 @@ static void logmsg(const char *format, ...)
 
     // End processing the variable arguments
     va_end(args);
+ #else
+    (void) format;
  #endif // DEBUG_LOG
 }
 
@@ -149,6 +157,7 @@ static int stick_this_thread_to_core(int core_id)
    pthread_t current_thread = pthread_self();
    return pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset);
    #else
+    (void) core_id;
     fprintf(stderr,"Cannot stick thread to core without GNU source extensions during compilation\n");
     return EFAULT;
    #endif
@@ -157,10 +166,11 @@ static int stick_this_thread_to_core(int core_id)
 /**
  * @brief Function to change the priority of the process using `nice()`
  * @param priority The niceness value to set (-20 for highest priority, 19 for lowest)
- * @return Returns 0 on success, -1 on failure.
+ * @return Returns 1 on success, 0 on failure.
  */
 static int set_process_nice(int priority)
 {
+    errno = 0; // nice() can legitimately return -1 on success, so errno must be cleared first
     int ret = nice(priority);
     if (ret == -1 && errno != 0)  // Check for errors
     {
@@ -195,7 +205,7 @@ static int elevate_nice_priority(int priority)
 
 /**
  * @brief Function for setting the real-time priority of a thread.
- * @return Returns 0 on success, -1 on failure.
+ * @return Returns 1 on success, 0 on failure.
  */
 static int set_realtime_thread_priority()
 {
@@ -251,7 +261,7 @@ static int set_realtime_thread_priority()
  * @brief Function for retrieving the OMP_NUM_THREADS
  * @return Returns the number of threads or 0 if OMP_NUM_THREADS is not declared.
  */
-static int get_omp_num_threads_from_env(void) 
+static int get_omp_num_threads_from_env(void)
 {
     const char *env = getenv("OMP_NUM_THREADS");
     if (env != NULL) {
@@ -275,9 +285,9 @@ static int threadpoolWorkerInitialWait(struct threadContext * ctx)
      pthread_cond_signal(&ctx->pool->completeWorkCondition);
      pthread_mutex_unlock(&ctx->pool->completeWorkMutex);
      pthread_mutex_lock(&ctx->pool->startWorkMutex);
-     ctx->pool->workersWaiting += 1;
+     __atomic_fetch_add(&ctx->pool->workersWaiting, 1, __ATOMIC_SEQ_CST);
      pthread_cond_wait(&ctx->pool->startWorkCondition,&ctx->pool->startWorkMutex);
-     ctx->pool->workersWaiting -= 1;
+     __atomic_fetch_sub(&ctx->pool->workersWaiting, 1, __ATOMIC_SEQ_CST);
      return 1;
     }
     return 0;
@@ -313,37 +323,36 @@ static int threadpoolWorkerLoopEnd(struct threadContext * ctx)
 {
     if (ctx==0) { return 0; }
 
-    // Get a lock on "CompleteMutex" and make sure that the main thread is waiting, then set "TheCompletedBatch" to "ThisThreadNumber".  Set "MainThreadWaiting" to "FALSE".
-    // If the main thread is not waiting, continue trying to get a lock on "CompleteMutex" until "MainThreadWaiting" is "TRUE".
-
-    //Spin until the main thread is in its waiting state before we signal it.
+    // Report completion: decrement activeWorkers and signal completeWorkCondition while holding
+    // completeWorkMutex. The main thread's wait loop (threadpoolMainThreadWaitFor...) always
+    // re-checks "activeWorkers>0" under this same mutex immediately before (and after) sleeping
+    // on completeWorkCondition, so it is safe to report completion even if the main thread has not
+    // reached its wait call yet - it will simply see activeWorkers already decremented once it gets
+    // there and will not block at all. This used to be gated behind a "mainThreadWaiting" flag that
+    // workers spun on (usleep(SPIN_SLEEP_TIME_MICROSECONDS) loop) until the main thread announced it
+    // was ready to collect - that spin was unnecessary given the predicate re-check above, and was
+    // wasting a full CPU core whenever a worker finished before the main thread got around to calling
+    // the Wait function (e.g. while pipelining with threadpoolMainThreadKickWorkers).
     pthread_mutex_lock(&ctx->pool->completeWorkMutex);
-    while ( !ctx->pool->mainThreadWaiting )
-    {
-        pthread_mutex_unlock(&ctx->pool->completeWorkMutex);
-        usleep(SPIN_SLEEP_TIME_MICROSECONDS);
-        pthread_mutex_lock(&ctx->pool->completeWorkMutex);
-    }
-    //--------------------------------------------------
 
     //We are officially no longer an active worker!
-    ctx->pool->activeWorkers -=1;
+    __atomic_fetch_sub(&ctx->pool->activeWorkers, 1, __ATOMIC_SEQ_CST);
+    pthread_cond_signal(&ctx->pool->completeWorkCondition);
 
     //We are done communicating with Coordinator on our completed work
     pthread_mutex_unlock(&ctx->pool->completeWorkMutex);
 
 
-    // Lock the "StartWorkMutex" before we send out the "CompleteCondition" signal.
-    // This way, we can enter a waiting state for the next round before the main thread broadcasts the "StartWorkCondition".
+    // Lock the "StartWorkMutex" so we can enter a waiting state for the next round before the main
+    // thread broadcasts the "StartWorkCondition".
     pthread_mutex_lock(&ctx->pool->startWorkMutex); //<- This will get released by threadpoolWorkerLoopCondition
-    ctx->pool->workersWaiting += 1;
-    pthread_cond_signal(&ctx->pool->completeWorkCondition);
+    __atomic_fetch_add(&ctx->pool->workersWaiting, 1, __ATOMIC_SEQ_CST);
 
     // Wait for the Main thread to send us the next "StartWorkCondition" broadcast.
     // Be sure to unlock the corresponding mutex immediately so that the other worker threads can exit their waiting state as well.
     unsigned long workerLoopBlockStartTime = GetTickCountMicrosecondsT();
     pthread_cond_wait(&ctx->pool->startWorkCondition, &ctx->pool->startWorkMutex);
-    ctx->pool->workersWaiting -= 1;
+    __atomic_fetch_sub(&ctx->pool->workersWaiting, 1, __ATOMIC_SEQ_CST);
     unsigned long workerLoopBlockFinishTime = GetTickCountMicrosecondsT();
 
     //report Resyncing lag with the rest of the thread pool
@@ -366,12 +375,90 @@ static int threadpoolMainThreadPrepareWorkForWorkers(struct workerPool * pool)
         // Spin until every worker has entered pthread_cond_wait on startWorkCondition.
         // Without this, a worker that finished the previous batch but hasn't yet reached
         // pthread_cond_wait can miss the upcoming broadcast and deadlock indefinitely.
-        while (pool->workersWaiting < (int)pool->numberOfThreads)
+        while (__atomic_load_n(&pool->workersWaiting, __ATOMIC_SEQ_CST) < (int)pool->numberOfThreads)
         {
             usleep(SPIN_SLEEP_TIME_MICROSECONDS);
         }
 
         pthread_mutex_lock(&pool->startWorkMutex); //This will be released by threadpoolMainThreadWaitForWorkersToFinishTimeoutSeconds
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * @brief Actually RELEASE the workers that threadpoolMainThreadPrepareWorkForWorkers
+ *        armed, WITHOUT waiting for them — the broadcast half of
+ *        threadpoolMainThreadWaitForWorkersToFinishTimeoutSeconds. This is what makes a true
+ *        start/collect pipeline possible: historically "StartUpdate" only called Prepare (which
+ *        merely takes the start lock), so the workers did not begin until the combined wait
+ *        function ran — i.e. nothing ever overlapped. Call sequence for async use:
+ *        Prepare -> Kick -> (main thread does other things) -> WaitForKickedWorkers.
+ *        A worker that finishes while the main thread is away does not block or spin at all: it
+ *        reports completion immediately (see threadpoolWorkerLoopEnd) and goes straight back to
+ *        sleep waiting for the next round, so the main thread's later WaitForKickedWorkers call
+ *        just finds activeWorkers already decremented.
+ * @param pool Pointer to the worker pool.
+ * @return Returns 1 on success, 0 on failure.
+ */
+static int threadpoolMainThreadKickWorkers(struct workerPool * pool)
+{
+    if (pool==0) { return 0; }
+    if (pool->initialized)
+    {
+        pool->work=1;
+        //We consider all workers as active from now on!
+        //Written under startWorkMutex but read/decremented under completeWorkMutex by workers -
+        //use an atomic store so that cross-mutex visibility does not depend on incidental barriers.
+        __atomic_store_n(&pool->activeWorkers, (int)pool->numberOfThreads, __ATOMIC_SEQ_CST);
+        pthread_cond_broadcast(&pool->startWorkCondition); //Broadcast starting condition
+        //Release lock for starting work that main thread held since threadpoolMainThreadPrepareWorkForWorkers was called
+        pthread_mutex_unlock(&pool->startWorkMutex);       //Now start worker threads
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * @brief Wait for workers previously released by threadpoolMainThreadKickWorkers.
+ *        ONLY the waiting half — it does NOT re-broadcast / reset activeWorkers (using the
+ *        combined WaitForWorkersToFinish function after a Kick would reset activeWorkers to N
+ *        after some workers already completed, waiting for completions that will never come).
+ * @param pool Pointer to the worker pool.
+ * @param timeout Number of seconds to wait, otherwise abort process as stuck (0 = wait forever).
+ * @return Returns 1 on success, 0 on failure.
+ */
+static int threadpoolMainThreadWaitForKickedWorkersToFinishTimeoutSeconds(struct workerPool * pool, int timeoutSeconds)
+{
+    if (pool==0) { return 0; }
+    if (pool->initialized)
+    {
+        struct timespec ts;
+        if (timeoutSeconds!=0)
+        {
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += timeoutSeconds;
+        }
+
+        pthread_mutex_lock(&pool->completeWorkMutex);
+
+        while (__atomic_load_n(&pool->activeWorkers, __ATOMIC_SEQ_CST)>0)
+        {
+            if (timeoutSeconds!=0)
+            {
+                int ret = pthread_cond_timedwait(&pool->completeWorkCondition, &pool->completeWorkMutex, &ts);
+                if (ret == ETIMEDOUT)
+                {
+                    fprintf(stderr, "\n\npthreadWorkerPool: Timeout (%u sec) occurred @ %u of %u, threads are stuck.\n", timeoutSeconds, __atomic_load_n(&pool->activeWorkers, __ATOMIC_SEQ_CST), pool->numberOfThreads);
+                    abort();
+                }
+            } else
+            {
+                pthread_cond_wait(&pool->completeWorkCondition, &pool->completeWorkMutex);
+            }
+        }
+
+        pthread_mutex_unlock(&pool->completeWorkMutex);
         return 1;
     }
     return 0;
@@ -392,7 +479,9 @@ static int threadpoolMainThreadWaitForWorkersToFinishTimeoutSeconds(struct worke
         pool->work=1;
 
         //We consider all workers as active from now on!
-        pool->activeWorkers = pool->numberOfThreads;
+        //Written under startWorkMutex but read/decremented under completeWorkMutex by workers -
+        //use an atomic store so that cross-mutex visibility does not depend on incidental barriers.
+        __atomic_store_n(&pool->activeWorkers, (int)pool->numberOfThreads, __ATOMIC_SEQ_CST);
 
         pthread_cond_broadcast(&pool->startWorkCondition); //Broadcast starting condition
 
@@ -418,13 +507,9 @@ static int threadpoolMainThreadWaitForWorkersToFinishTimeoutSeconds(struct worke
         //Signal that we can start and wait for finish...
         pthread_mutex_lock(&pool->completeWorkMutex);      //Make sure worker threads wont fall through after completion
         //From now on we are waiting for the workers to hand-over their finished jobs..
-        pool->mainThreadWaiting = 1;
 
-        while (pool->activeWorkers>0)
+        while (__atomic_load_n(&pool->activeWorkers, __ATOMIC_SEQ_CST)>0)
         {
-            // Keep mainThreadWaiting set so workers can proceed past their spin.
-            pool->mainThreadWaiting = 1;
-
             // pthread_cond_wait atomically releases completeWorkMutex and sleeps,
             // so no completion signal can be lost between the activeWorkers check and the wait.
             if (timeoutSeconds!=0)
@@ -432,7 +517,7 @@ static int threadpoolMainThreadWaitForWorkersToFinishTimeoutSeconds(struct worke
              int ret = pthread_cond_timedwait(&pool->completeWorkCondition, &pool->completeWorkMutex, &ts);
              if (ret == ETIMEDOUT)
                      {
-                        fprintf(stderr, "\n\npthreadWorkerPool: Timeout (%u sec) occurred @ %u of %u, threads are stuck.\n", timeoutSeconds, pool->activeWorkers, pool->numberOfThreads);
+                        fprintf(stderr, "\n\npthreadWorkerPool: Timeout (%u sec) occurred @ %u of %u, threads are stuck.\n", timeoutSeconds, __atomic_load_n(&pool->activeWorkers, __ATOMIC_SEQ_CST), pool->numberOfThreads);
                         abort();
                      }
             } else
@@ -442,8 +527,6 @@ static int threadpoolMainThreadWaitForWorkersToFinishTimeoutSeconds(struct worke
         }
 
         //We finished waiting..
-        pool->mainThreadWaiting = 0;
-
         pthread_mutex_unlock(&pool->completeWorkMutex);
 
         //--------------------------------------------------
@@ -487,9 +570,9 @@ static int threadpoolCreate(struct workerPool * pool,unsigned int numberOfThread
 
     //--------------------------------------------------
     pool->work = 0;
-    pool->mainThreadWaiting = 0;
     pool->workersWaiting = 0;
     pool->numberOfThreads = 0;
+    pool->numberOfThreadSlots = numberOfThreadsToSpawn;
     pool->workerPoolIDs     = (pthread_t*) malloc(sizeof(pthread_t) * numberOfThreadsToSpawn);
     pool->workerPoolContext = (struct threadContext*) malloc(sizeof(struct threadContext) * numberOfThreadsToSpawn);
     //--------------------------------------------------
@@ -525,6 +608,7 @@ static int threadpoolCreate(struct workerPool * pool,unsigned int numberOfThread
     {
         pool->workerPoolContext[i].threadID=i;
         pool->workerPoolContext[i].threadInitialized = 0;
+        pool->workerPoolContext[i].alive = 0;
         pool->workerPoolContext[i].argumentToPass=argument;
         pool->workerPoolContext[i].pool=pool;
 
@@ -539,18 +623,29 @@ static int threadpoolCreate(struct workerPool * pool,unsigned int numberOfThread
                                      (void*) &pool->workerPoolContext[i]
                                    );
 
+        pool->workerPoolContext[i].alive = (result == 0);
         threadsCreated += (result == 0);
     }
 
-    //Wait for all threads to signal that they are initialized
+    if (threadsCreated!=(int)numberOfThreadsToSpawn)
+    {
+        fprintf(stderr,"Failed spawning %u of %u worker threads, continuing with the ones that started\n",numberOfThreadsToSpawn-threadsCreated,numberOfThreadsToSpawn);
+    }
+
+    //Wait for all threads that actually started to signal that they are initialized.
+    //We must scan every requested slot (not just the first threadsCreated of them) since a
+    //failed pthread_create can leave a "dead" slot anywhere in the array - skip those via "alive".
     fprintf(stderr,"Waiting for threads to start : ");
     pthread_mutex_lock(&pool->completeWorkMutex);
     while (1)
     {
       unsigned int threadsThatAreReady=0;
-      for (unsigned int i=0; i<(unsigned int)threadsCreated; i++)
+      for (unsigned int i=0; i<numberOfThreadsToSpawn; i++)
       {
-          threadsThatAreReady+=pool->workerPoolContext[i].threadInitialized;
+          if (pool->workerPoolContext[i].alive)
+          {
+              threadsThatAreReady+=pool->workerPoolContext[i].threadInitialized;
+          }
       }
 
       if (threadsThatAreReady==(unsigned int)threadsCreated)
@@ -563,8 +658,8 @@ static int threadpoolCreate(struct workerPool * pool,unsigned int numberOfThread
     fprintf(stderr," done \n");
 
     pool->numberOfThreads = threadsCreated;
-    pool->initialized     = (threadsCreated==numberOfThreadsToSpawn);
-    return (threadsCreated==numberOfThreadsToSpawn);
+    pool->initialized     = ((unsigned int)threadsCreated==numberOfThreadsToSpawn);
+    return ((unsigned int)threadsCreated==numberOfThreadsToSpawn);
 }
 
 
@@ -586,9 +681,14 @@ static int threadpoolDestroy(struct workerPool *pool)
     pthread_mutex_unlock(&pool->startWorkMutex);
 
 
-    for (unsigned int i=0; i<pool->numberOfThreads; i++)
+    // Join only the slots that actually got a thread started (skip any "dead" slot
+    // left behind by a failed pthread_create in threadpoolCreate).
+    for (unsigned int i=0; i<pool->numberOfThreadSlots; i++)
     {
-        pthread_join(pool->workerPoolIDs[i],0);
+        if (pool->workerPoolContext[i].alive)
+        {
+            pthread_join(pool->workerPoolIDs[i],0);
+        }
     }
 
     // Clean up and exit.

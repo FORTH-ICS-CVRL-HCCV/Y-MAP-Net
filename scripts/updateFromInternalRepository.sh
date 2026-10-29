@@ -34,6 +34,7 @@ PACKAGE_FILES=(
     core/NNExecutor.py
     core/NNLosses.py
     core/NNModel.py
+    core/NNMuon.py
     core/NNOptimize.py
     core/NNTraining.py
     core/NNTransplant.py
@@ -50,6 +51,7 @@ PACKAGE_FILES=(
     skeletons/limbs.py
     skeletons/peaks.py
     skeletons/resolve.py
+    skeletons/score.py
     streams/datasetStream.py
     streams/espStream.py
     streams/folderStream.py

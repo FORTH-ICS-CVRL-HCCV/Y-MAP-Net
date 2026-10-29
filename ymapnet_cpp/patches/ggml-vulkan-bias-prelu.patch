@@ -1,0 +1,265 @@
+diff --git a/src/ggml-vulkan/ggml-vulkan-push-constants.h b/src/ggml-vulkan/ggml-vulkan-push-constants.h
+index f066d10..8047bbf 100644
+--- a/src/ggml-vulkan/ggml-vulkan-push-constants.h
++++ b/src/ggml-vulkan/ggml-vulkan-push-constants.h
+@@ -617,6 +617,11 @@ struct vk_op_conv_transpose_1d_push_constants {
+     int32_t s0;
+ };
+ 
++struct vk_op_bias_prelu_push_constants {
++    uint32_t ne;
++    uint32_t ne0;
++};
++
+ struct vk_op_snake_push_constants {
+     uint32_t ne0;
+     uint32_t ne1;
+diff --git a/src/ggml-vulkan/ggml-vulkan-types.h b/src/ggml-vulkan/ggml-vulkan-types.h
+index d12cc00..eaeb56c 100644
+--- a/src/ggml-vulkan/ggml-vulkan-types.h
++++ b/src/ggml-vulkan/ggml-vulkan-types.h
+@@ -528,6 +528,10 @@ static constexpr std::initializer_list<ggml_op> snake_pattern              { GGM
+                                                                              GGML_OP_SQR,      GGML_OP_MUL,
+                                                                              GGML_OP_ADD };
+ 
++static constexpr std::initializer_list<ggml_op> bias_prelu_pattern         { GGML_OP_ADD,      GGML_OP_UNARY,
++                                                                             GGML_OP_SUB,      GGML_OP_MUL,
++                                                                             GGML_OP_ADD };
++
+ static constexpr std::initializer_list<ggml_op> topk_qsa_pattern { GGML_OP_GET_ROWS, GGML_OP_PERMUTE,
+                                                                    GGML_OP_CONT,     GGML_OP_CPY,
+                                                                    GGML_OP_RESHAPE,  GGML_OP_ADD,
+@@ -964,6 +968,7 @@ struct vk_device_struct {
+     vk_pipeline pipeline_snake_f32;
+     vk_pipeline pipeline_snake_f16;
+     vk_pipeline pipeline_snake_bf16;
++    vk_pipeline pipeline_bias_prelu_f32;
+     vk_pipeline pipeline_pool1d_f32;
+     vk_pipeline pipeline_pool2d_f32;
+     vk_pipeline pipeline_rwkv_wkv6_f32;
+@@ -1283,6 +1288,8 @@ struct ggml_backend_vk_context {
+     bool fused_topk_moe_scale {};
+     // QSA indexer gather+add+top_k fused into one radix-select
+     bool fused_topk_qsa {};
++    // per-channel bias + PReLU (ADD, RELU, SUB, MUL, ADD) fused into bias_prelu.comp
++    bool fused_bias_prelu {};
+     rms_norm_mode fused_rms_norm_mode {RMS_NORM_COUNT};
+ 
+     // for GGML_VK_PERF_LOGGER
+diff --git a/src/ggml-vulkan/ggml-vulkan.cpp b/src/ggml-vulkan/ggml-vulkan.cpp
+index ded6541..ad60ce5 100644
+--- a/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -3463,6 +3463,8 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+     ggml_vk_create_pipeline(device, device->pipeline_snake_f16,  "snake_f16",  snake_f16_len,  snake_f16_data,  "main", 4, sizeof(vk_op_snake_push_constants), {256, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_snake_bf16, "snake_bf16", snake_bf16_len, snake_bf16_data, "main", 4, sizeof(vk_op_snake_push_constants), {256, 1, 1}, {}, 1);
+ 
++    ggml_vk_create_pipeline(device, device->pipeline_bias_prelu_f32, "bias_prelu_f32", bias_prelu_f32_len, bias_prelu_f32_data, "main", 4, sizeof(vk_op_bias_prelu_push_constants), {512, 1, 1}, {}, 1);
++
+     ggml_vk_create_pipeline(device, device->pipeline_pool1d_f32, "pool1d_f32", pool1d_f32_len, pool1d_f32_data, "main", 2, sizeof(vk_op_pool1d_push_constants), {512, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_pool2d_f32, "pool2d_f32", pool2d_f32_len, pool2d_f32_data, "main", 2, sizeof(vk_op_pool2d_push_constants), {512, 1, 1}, {}, 1);
+ 
+@@ -11632,6 +11634,35 @@ void ggml_vk_snake_dispatch_fused(ggml_backend_vk_context * ctx, vk_context& sub
+     ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { x_buf, a_buf, inv_b_buf, dst_buf }, pc, elements);
+ }
+ 
++void ggml_vk_bias_prelu_dispatch_fused(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_cgraph * cgraph, int node_idx) {
++    const ggml_tensor * add0 = cgraph->nodes[node_idx + 0];
++    const ggml_tensor * mul  = cgraph->nodes[node_idx + 3];
++    ggml_tensor *       out  = cgraph->nodes[node_idx + 4];
++
++    const ggml_tensor * x     = ggml_are_same_shape(add0, add0->src[0]) ? add0->src[0] : add0->src[1];
++    const ggml_tensor * bias  = (x == add0->src[0]) ? add0->src[1] : add0->src[0];
++    const ggml_tensor * alpha = (mul->src[0] == cgraph->nodes[node_idx + 2]) ? mul->src[1] : mul->src[0];
++
++    vk_pipeline pipeline = ctx->device->pipeline_bias_prelu_f32;
++    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
++
++    vk_op_bias_prelu_push_constants pc{};
++    pc.ne  = static_cast<uint32_t>(ggml_nelements(out));
++    pc.ne0 = static_cast<uint32_t>(out->ne[0]);
++
++    std::array<uint32_t, 3> elements;
++    if (pc.ne > 262144) {
++        elements = { 512, 512, CEIL_DIV(pc.ne, 262144) };
++    } else if (pc.ne > 512) {
++        elements = { 512, CEIL_DIV(pc.ne, 512), 1 };
++    } else {
++        elements = { pc.ne, 1, 1 };
++    }
++    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
++        { ggml_vk_tensor_subbuffer(ctx, x), ggml_vk_tensor_subbuffer(ctx, bias),
++          ggml_vk_tensor_subbuffer(ctx, alpha), ggml_vk_tensor_subbuffer(ctx, out) }, pc, elements);
++}
++
+ void ggml_vk_pool_1d(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
+     uint32_t op = static_cast<uint32_t>(dst->op_params[0]);
+     const int32_t k0 = dst->op_params[1];
+@@ -12105,7 +12136,9 @@ bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, in
+ 
+         break;
+     case GGML_OP_ADD:
+-        if (ctx->num_additional_fused_ops) {
++        if (ctx->fused_bias_prelu) {
++            ggml_vk_bias_prelu_dispatch_fused(ctx, compute_ctx, cgraph, node_idx);
++        } else if (ctx->num_additional_fused_ops) {
+             ggml_vk_multi_add(ctx, compute_ctx, cgraph, node_idx);
+         } else {
+             ggml_vk_add(ctx, compute_ctx, src0, src1, node);
+@@ -13797,6 +13830,53 @@ bool ggml_vk_can_fuse_snake(ggml_backend_vk_context * ctx, const struct ggml_cgr
+     return true;
+ }
+ 
++// v = x + bias; pos = relu(v); y = pos + (v - pos) * alpha   (PReLU with per-channel bias/alpha on ne0)
++bool ggml_vk_can_fuse_bias_prelu(ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx) {
++    if (node_idx + (int)bias_prelu_pattern.size() > cgraph->n_nodes) {
++        return false;
++    }
++    for (size_t j = 0; j < bias_prelu_pattern.size(); ++j) {
++        const ggml_tensor * n = cgraph->nodes[node_idx + j];
++        if (n->op != bias_prelu_pattern.begin()[j] || (n->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
++            return false;
++        }
++    }
++    const ggml_tensor * add0 = cgraph->nodes[node_idx + 0];
++    const ggml_tensor * relu = cgraph->nodes[node_idx + 1];
++    const ggml_tensor * sub  = cgraph->nodes[node_idx + 2];
++    const ggml_tensor * mul  = cgraph->nodes[node_idx + 3];
++    const ggml_tensor * out  = cgraph->nodes[node_idx + 4];
++
++    // wiring
++    if (ggml_get_unary_op(relu) != GGML_UNARY_OP_RELU || relu->src[0] != add0) return false;
++    if (sub->src[0] != add0 || sub->src[1] != relu) return false;
++    if (mul->src[0] != sub && mul->src[1] != sub) return false;
++    if (!((out->src[0] == relu && out->src[1] == mul) || (out->src[0] == mul && out->src[1] == relu))) return false;
++
++    // intermediates are only used inside the pattern
++    const int32_t uses[4] = { 2, 2, 1, 1 };
++    for (int j = 0; j < 4; ++j) {
++        if (!ggml_node_has_n_uses(cgraph, node_idx + j, uses[j])) return false;
++    }
++
++    const ggml_tensor * x     = ggml_are_same_shape(add0, add0->src[0]) ? add0->src[0] : add0->src[1];
++    const ggml_tensor * bias  = (x == add0->src[0]) ? add0->src[1] : add0->src[0];
++    const ggml_tensor * alpha = (mul->src[0] == sub) ? mul->src[1] : mul->src[0];
++    const int64_t C = out->ne[0];
++
++    for (const ggml_tensor * t : { x, bias, alpha, add0, relu, sub, mul, out }) {
++        if (t->type != GGML_TYPE_F32 || !ggml_is_contiguous(t)) return false;
++    }
++    if (!ggml_are_same_shape(x, out)) return false;
++    if (bias->ne[0] != C || ggml_nelements(bias) != C) return false;
++    if (alpha->ne[0] != C || ggml_nelements(alpha) != C) return false;
++    if (ggml_nelements(out) > UINT32_MAX) return false;
++    for (const ggml_tensor * t : { x, bias, alpha, out }) {
++        if (get_misalign_bytes(ctx, t) != 0) return false;
++    }
++    return true;
++}
++
+ bool ggml_vk_tensors_overlap(const ggml_tensor * a, const ggml_tensor * b, bool elementwise) {
+     ggml_backend_vk_buffer_context * a_buf_ctx = (ggml_backend_vk_buffer_context *)a->buffer->context;
+     vk_buffer a_buf = a_buf_ctx->dev_buffer;
+@@ -14077,11 +14157,18 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+         ctx->fused_topk_moe_mode = TOPK_MOE_COUNT;
+         ctx->fused_topk_moe_scale = false;
+         ctx->fused_topk_qsa = false;
++        ctx->fused_bias_prelu = false;
+         ctx->fused_rms_norm_mode = RMS_NORM_COUNT;
+         const char *fusion_string {};
+         if (!ctx->device->disable_fusion) {
+-            uint32_t num_adds = ggml_vk_fuse_multi_add(ctx, cgraph, i);
+-            if (num_adds) {
++            uint32_t num_adds = 0;
++            if (ggml_vk_can_fuse_bias_prelu(ctx, cgraph, i)) {
++                ctx->num_additional_fused_ops = 4;
++                ctx->fused_bias_prelu = true;
++                fusion_string = "BIAS_PRELU";
++                // elementwise: each thread reads x[idx] before writing y[idx]
++                std::fill_n(op_srcs_fused_elementwise, 5, true);
++            } else if ((num_adds = ggml_vk_fuse_multi_add(ctx, cgraph, i))) {
+                 ctx->num_additional_fused_ops = num_adds - 1;
+                 fusion_string = "MULTI_ADD";
+                 std::fill_n(op_srcs_fused_elementwise, ctx->num_additional_fused_ops + 1, true);
+@@ -14311,6 +14398,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+                 ctx->fused_topk_moe_mode = TOPK_MOE_COUNT;
+                 ctx->fused_topk_moe_scale = false;
+                 ctx->fused_topk_qsa = false;
++                ctx->fused_bias_prelu = false;
+                 ctx->fused_rms_norm_mode = RMS_NORM_COUNT;
+                 fusion_string = nullptr;
+             }
+@@ -14548,6 +14636,9 @@ void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * graph,
+         if (keep_pattern(snake_pattern)) {
+             continue;
+         }
++        if (keep_pattern(bias_prelu_pattern)) {
++            continue;
++        }
+         if (keep_pattern(topk_qsa_pattern)) {
+             continue;
+         }
+@@ -14601,6 +14692,7 @@ void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * graph,
+                 match_pattern(topk_moe_early_softmax, j) ||
+                 match_pattern(topk_moe_late_softmax, j) ||
+                 match_pattern(snake_pattern, j) ||
++                match_pattern(bias_prelu_pattern, j) ||
+                 in_qsa_pattern(j) ||
+                 match_pattern(rms_norm_mul_add_mul_pattern, j) ||
+                 match_pattern(rms_norm_mul_add_pattern, j) ||
+diff --git a/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp b/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+index 12f9b3f..559cb5e 100644
+--- a/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
++++ b/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+@@ -1130,6 +1130,8 @@ void process_shaders() {
+     string_to_spv("snake_f16",  "snake.comp", {{"DATA_A_F16", "1"},  {"A_TYPE", "float16_t"}, {"D_TYPE", "float16_t"}});
+     string_to_spv("snake_bf16", "snake.comp", {{"DATA_A_BF16", "1"}, {"DATA_D_BF16", "1"}, {"A_TYPE", "uint16_t"},  {"D_TYPE", "uint16_t"}});
+ 
++    string_to_spv("bias_prelu_f32", "bias_prelu.comp", {});
++
+     string_to_spv("pool1d_f32", "pool1d.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
+     string_to_spv("pool2d_f32", "pool2d.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
+ 
+diff --git a/src/ggml-vulkan/vulkan-shaders/bias_prelu.comp b/src/ggml-vulkan/vulkan-shaders/bias_prelu.comp
+new file mode 100644
+index 0000000..c6ac92c
+--- /dev/null
++++ b/src/ggml-vulkan/vulkan-shaders/bias_prelu.comp
+@@ -0,0 +1,37 @@
++#version 450
++
++// Fused per-channel bias + PReLU, replacing the graph
++//   v = x + bias;  pos = relu(v);  y = pos + (v - pos) * alpha
++// i.e. y = v > 0 ? v : alpha * v, with bias/alpha indexed by the ne0 (channel) coordinate.
++//   data_x [ne]   contiguous input
++//   data_b [ne0]  per channel bias
++//   data_a [ne0]  per channel slope
++//   data_d [ne]   contiguous output
++layout (binding = 0) readonly  buffer X {float data_x[];};
++layout (binding = 1) readonly  buffer B {float data_b[];};
++layout (binding = 2) readonly  buffer A {float data_a[];};
++layout (binding = 3) writeonly buffer D {float data_d[];};
++
++const uint num_threads = 256;
++
++layout(local_size_x = num_threads, local_size_y = 1, local_size_z = 1) in;
++
++layout (push_constant) uniform parameter {
++    uint ne;
++    uint ne0;
++} p;
++
++void main() {
++    // num_threads * num_iter must equal 512, to match the wg_denoms and the 512x512xN dispatch
++    const uint num_iter = 2;
++    uint idx = gl_GlobalInvocationID.z * 262144 + gl_GlobalInvocationID.y * 512 + gl_GlobalInvocationID.x;
++
++    for (uint i = 0; i < num_iter; ++i) {
++        if (idx < p.ne) {
++            const uint c = idx % p.ne0;
++            const float v = data_x[idx] + data_b[c];
++            data_d[idx] = v > 0.0 ? v : v * data_a[c];
++        }
++        idx += num_threads;
++    }
++}

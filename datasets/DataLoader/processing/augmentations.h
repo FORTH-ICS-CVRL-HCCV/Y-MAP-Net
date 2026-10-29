@@ -813,6 +813,10 @@ static int panAndZoom8BitImage(struct Image *input_img, float zoom_factor, int p
 // Function to pan and zoom the image
 // pan_x, pan_y refer to the upper left coordinate of the tile
 // zoom factor refers to the zoom of the input_img, for example assuming a 100x100 image, targetWidth/Height 50x50,  with zoom_factor 2.0 and panx/y 0 will get the upper [0..50,0..50] pixels
+//DEPTH STEP 1 of PrepareBatch.c: the 16-bit twin of panAndZoom8BitImage, applied to the depth image with the SAME
+//zoom/pan as the RGB so depth stays aligned with it: crop [pan, pan + target*zoom] of the full-resolution depth and
+//resample it (nearest neighbour) to targetWidth x targetHeight. Byte order is untouched (the swap of DEPTH STEP 2
+//comes after). Fast path: no zoom/pan -> the image is left as it is.
 static int panAndZoom16BitImage(struct Image *input_img, float zoom_factor, int pan_x, int pan_y, int targetWidth, int targetHeight)
 {
     //fprintf(stderr,"panAndZoom(zoom=%0.2f/pan=%u,%u)\n",zoom_factor,pan_x,pan_y);

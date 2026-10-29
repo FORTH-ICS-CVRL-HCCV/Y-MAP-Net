@@ -6,8 +6,20 @@
 
 #define MAX_LINE_LENGTH 1000
 
+// Embeddings source is GloVe by default; Python can point createPoseDatabase at a
+// different trio (e.g. ymapnet_model/conceptnet-numberbatch/GloVe_D300.embeddings)
+// by calling db_set_embeddings_path() BEFORE db_create. Kept as a module global for the
+// same reason as db_set_geolocation_config in DataLoader.c: the db_create ctypes
+// signature stays unchanged and existing behaviour is byte-identical when not called.
+static char g_embeddingsPath[1024] = "ymapnet_model/conceptnet-numberbatch/GloVe_D300.embeddings";
+void db_set_embeddings_path(const char *path)
+{
+    if (path == 0 || path[0] == '\0') { return; }
+    snprintf(g_embeddingsPath, sizeof(g_embeddingsPath), "%s", path);
+}
+
 // Parse one skeleton line from the .db file into pdb->sample[sampleNumber].sk[skID].
-// The line format is: SK<id>,<bboxX>,<bboxY>,<bboxW>,<bboxH>,<coord0>,<coord1>,...
+// The line format is: SK<id>,<bboxX1>,<bboxY1>,<bboxX2>,<bboxY2>,<coord0>,<coord1>,...  (box corners, see DATALOADER.md A9)
 // The first 5 comma-separated fields are the bbox; everything after is keypoint coords.
 // The file stores skeleton IDs 1-based; skID passed in is 0-based — we adjust for that.
 int parseSkeleton(struct PoseDatabase * pdb,unsigned long sampleNumber,int skID,char *line)
@@ -18,7 +30,7 @@ int parseSkeleton(struct PoseDatabase * pdb,unsigned long sampleNumber,int skID,
 
     // Read the 1-based skeleton ID and bounding box from the line prefix.
     unsigned short skIDFromFile;
-    sscanf(line, "SK%hu,%hu,%hu,%hu,%hu,", &skIDFromFile, &sk->bboxX, &sk->bboxY, &sk->bboxW, &sk->bboxH);
+    sscanf(line, "SK%hu,%hu,%hu,%hu,%hu,", &skIDFromFile, &sk->bboxX, &sk->bboxY, &sk->bboxX2, &sk->bboxY2);
 
     // File stores IDs starting at 1; convert to 0-based before comparing.
     skIDFromFile = skIDFromFile - 1;
@@ -144,7 +156,7 @@ struct PoseDatabase* createPoseDatabase(unsigned long numberOfSamples,unsigned s
           pdb->tokenBlackList->blackListSize = 0;//explicit cleanup
       }
 
-      if (!load_embeddings("2d_pose_estimation/GloVe_D300.embeddings", &pdb->embeddings))
+      if (!load_embeddings(g_embeddingsPath, &pdb->embeddings))
       {
           fprintf(stderr,"Will not go on without embeddings!\n");
           abort();
@@ -228,7 +240,7 @@ int parseDescriptionTokens(struct PoseDatabase * pdb,unsigned long sampleNumber,
 
 
 
-struct PoseDatabase* readPoseDatabase(struct PoseDatabase* pdb,DescriptorDataset *ds,const char * path,unsigned int sourceID,unsigned long startOffset,unsigned long * loadedSamples,int ignoreNoSkeletonSamples)
+struct PoseDatabase* readPoseDatabase(struct PoseDatabase* pdb,DescriptorDataset *ds,SuperpointDataset *sp,const char * path,unsigned int sourceID,unsigned long startOffset,unsigned long * loadedSamples,int ignoreNoSkeletonSamples)
 {
     unsigned long poseIndex  = startOffset;
     FILE *fp = fopen(path, "r");
@@ -380,6 +392,38 @@ struct PoseDatabase* readPoseDatabase(struct PoseDatabase* pdb,DescriptorDataset
              }
          }
          #endif // USE_DINOV2_FEATURES
+
+         // ── SuperPoint matching ───────────────────────────────────────────────
+         // Same positional, basename-verified scheme as descriptors above, but
+         // NOT behind USE_DINOV2_FEATURES (runtime-gated, optional file).
+         pdb->sample[poseIndex].superpoint = NULL;
+         if (sp != 0)
+         {
+             if (entriesLoaded < (unsigned long)sp->numImages)
+             {
+                 const char *img_base = strrchr(pdb->sample[poseIndex].imagePath, '/');
+                 img_base = img_base ? img_base + 1 : pdb->sample[poseIndex].imagePath;
+                 const char *sp_name  = sp->entries[entriesLoaded].filename;
+                 const char *sp_base  = strrchr(sp_name, '/');
+                 sp_base = sp_base ? sp_base + 1 : sp_name;
+
+                 if (strcmp(img_base, sp_base) == 0)
+                 {
+                     pdb->sample[poseIndex].superpoint = &sp->entries[entriesLoaded];
+                 } else
+                 {
+                     fprintf(stderr,"SuperPoint Mismatch @ %lu of %s | Image (%s) | SuperPoint (%s)\n",
+                             poseIndex, path, pdb->sample[poseIndex].imagePath, sp_name);
+                     fclose(fp);
+                     return 0;
+                 }
+             } else
+             {
+                 fprintf(stderr,"Pose Index out of SuperPoint range (%lu vs %d)?\n",poseIndex,sp->numImages);
+                 fclose(fp);
+                 return 0;
+             }
+         }
 
          // ── Description tokens ────────────────────────────────────────────────
          // Each sample line is followed by a comma-separated token list,

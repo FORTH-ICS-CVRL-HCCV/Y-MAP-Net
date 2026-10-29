@@ -89,7 +89,7 @@ int WritePZP(const char *filename, struct Image *pic)
            { pzp_RLE_filter(buffers, channelsInternal, pic->width, pic->height); }
 
 
-    pzp_compress_combined(buffers, pic->width, pic->height, pic->bitsperpixel, pic->channels, bitsperpixelInternal, channelsInternal, configuration, filename);
+    pzp_compress_combined(buffers, pic->width, pic->height, pic->bitsperpixel, pic->channels, bitsperpixelInternal, channelsInternal, configuration, NULL, 0, filename);
 
     for (unsigned int ch = 0; ch < channelsInternal; ch++)
     {

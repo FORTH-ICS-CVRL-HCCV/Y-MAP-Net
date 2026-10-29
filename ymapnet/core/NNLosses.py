@@ -1592,6 +1592,9 @@ class GloVeContrastiveLoss(keras.losses.Loss):
         affine transform) and targets that are not in candidate_table.
     norm_reg_weight: same |‖ŷ‖-‖y‖|² term as GloVeHybridLoss -- the softmax is scale-free, and the
         multihot head consumes these vectors as features.
+    temperature: logits span 2/temperature (40 at 0.05), past the ~16.6 fp32 margin where the target
+        gradient rounds to zero (softmax collapse, arXiv 2610.31642). GloVe neighbours within ~0.4 cos
+        keep real margins near 8; re-check before lowering it much further.
     """
 
     def __init__(self, candidate_table, temperature=0.05, weight=1.0, norm_reg_weight=0.01, **kwargs):

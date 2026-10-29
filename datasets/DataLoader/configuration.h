@@ -177,23 +177,49 @@ hm  0       depth 16 bit
 
 #define STRICT_CHECK_WHEN_OPENING_FILES 1
 
-//PAFs
-#define START_OF_PAF_HEATMAPS 17
-#define END_OF_PAF_HEATMAPS 28
-#define START_OF_NON_JOINT_HEATMAPS_THAT_NEED_FLIPPING 29
+// ----------------------------------------------------------------------------
+//  Heatmap modality TOGGLES / COUNTS  (INPUTS — kept)
+// ----------------------------------------------------------------------------
+//  These decide *which* modalities exist and *how many* channels each occupies.
+//  They feed db_build_heatmap_layout() (DataLoader.c) and calculateNumberOf8BitHeatmaps().
+//
+//  The per-modality START indices that used to live here
+//  (START_OF_PAF_HEATMAPS, END_OF_PAF_HEATMAPS,
+//   START_OF_NON_JOINT_HEATMAPS_THAT_NEED_FLIPPING, DEPTH_LEVELS_HEATMAP_START,
+//   DENOISING_OUTPUT_HEATMAP_START, LEFT_RIGHT_JOINT_DISAMBIGUATION_HEATMAP_START)
+//  have been REMOVED: they were hand-maintained literals that silently drifted
+//  when toggles changed. The channel layout is now resolved at runtime from the
+//  toggles below into db->...HeatmapIndex fields (single source of truth — see
+//  HeatmapLayout.h). For the canonical all-enabled layout see the HEATMAP OUTLINE
+//  comment at the top of this file.
 
-//Depth Level Heatmaps
+//Depth Level Heatmaps (count of depth-threshold channels)
 #define DEPTH_LEVELS_HEATMAPS 1
-#define DEPTH_LEVELS_HEATMAP_START 33
 
 //Enable RGB Denoising Output
 #define ENABLE_DENOISING_OUTPUT 1
 #define ENABLE_DENOISING_DIFFERENCE_OUTPUT 1
-#define DENOISING_OUTPUT_HEATMAP_START (DEPTH_LEVELS_HEATMAP_START+DEPTH_LEVELS_HEATMAPS)
 
 //Left/Right
 #define ENABLE_LEFT_RIGHT_JOINT_DISAMBIGUATION_OUTPUT 1
-#define LEFT_RIGHT_JOINT_DISAMBIGUATION_HEATMAP_START (DENOISING_OUTPUT_HEATMAP_START+3) //+3 because noise affects R, G, and B
+
+//Per-instance person detection (CenterNet-style center + size head).
+//Appended after segmentation; enabled at runtime via db->addInstanceHeatmaps
+//(see db_build_heatmap_layout / the "instance" group in HeatmapLayout).
+// +0 = person center (Gaussian splat, like a joint)
+// +1 = bbox width   (real-valued disk around the center)
+// +2 = bbox height  (real-valued disk around the center)
+#define INSTANCE_CHANNELS 3
+//SEGMENTATION_PLAN §E redesign (2026-06-20): the 3 instance channels are re-tasked for
+//bottom-up instance SEGMENTATION (not box regression). +0 = person_blob (large size-adaptive
+//Gaussian anchor), +1 = person_lr_bridge (signed left<->right cross-body line), +2 = person_head
+//(neck Gaussian anchor). INSTANCE_SIZE_NORM / INSTANCE_SIZE_DISK_RADIUS below are now DEAD (the
+//old size-value disk and edge-ridge encodings, Obs 14/17) — kept only so old call sites compile.
+#define INSTANCE_SIZE_NORM 100.0f
+#define INSTANCE_SIZE_DISK_RADIUS 4
+//person_blob Gaussian radius = clamp(INSTANCE_BLOB_RADIUS_FRAC * min(boxW,boxH), MINIMUM_GRADIENT_SIZE, INSTANCE_BLOB_RADIUS_MAX)
+#define INSTANCE_BLOB_RADIUS_FRAC 0.25f
+#define INSTANCE_BLOB_RADIUS_MAX 40
 
 // Dino descriptor code — dimension is read at runtime from the file header's
 // value_count field, so it works for any model (DINOv2=768, DINOv3 variants up
@@ -201,86 +227,27 @@ hm  0       depth 16 bit
 // fallback buffer; set it well above any expected model size.
 #define MAX_DESCRIPTOR_LENGTH 4096
 #define DINOV2_FEATURES_LENGTH MAX_DESCRIPTOR_LENGTH  // kept for any legacy references
-#define USE_DINOV2_FEATURES 0
+#define USE_DINOV2_FEATURES 1
 
-//Change of augmentations happening
-//------------------------------------------------------
-//The chance of a samples being completely destroyed (Does this negatively impact tokens?)
-#define AUGMENTATION_CHANCE_PERCENT_DESTROY 0.0
+// L2-normalise every descriptor vector once, at load time (DescriptorLoss assumes unit
+// norm; the shipped DINOv3 dumps arrive with ||v|| ~ 14.2, which makes its norm-reg term
+// dominate). All-zero vectors (= a source with no .dinov3 sidecar) are left untouched so
+// they stay detectable as "missing" instead of turning into NaN.
+#define L2_NORMALIZE_DESCRIPTORS 1
 
-//The chance of a sample having perturbations
-#define AUGMENTATION_CHANCE_PERCENT_PERTURBED 35.0
-//<- This is the chance of perturbation for the magnitude see: PERTURBATION_MAGNITUDE
-
-//The chance of a sample having burned pixels
-#define AUGMENTATION_CHANCE_PERCENT_PAN_AND_ZOOM 45.0
-
-//The chance of a sample having burned pixels
-#define AUGMENTATION_CHANCE_PERCENT_BURNED_PIXELS 50.0
-
-//The chance of a sample having brightness/contrast
-#define AUGMENTATION_CHANCE_PERCENT_BRIGHTNESS_CONTRAST 50.0
-
-//The chance of a sample having brightness_contrast augmentation in a uniform fashion
-#define AUGMENTATION_CHANCE_PERCENT_BRIGHTNESS_CONTRAST_UNIFORM 50.0
-
-//The chance of a sample having brightness_contrast augmentation in a uniform fashion
-#define AUGMENTATION_CHANCE_PERCENT_HORIZONTAL_FLIP 0.0
-
-//The chance of 90° rotation (CW or CCW chosen randomly per sample).
-//The rotated content fills the full frame so no black border is left visible.
-#define AUGMENTATION_CHANCE_PERCENT_ROTATE90 10.0
-
-//The chance of coarse dropout (random rectangular occlusion patches)
-#define AUGMENTATION_CHANCE_PERCENT_COARSE_DROPOUT 30.0
-#define COARSE_DROPOUT_NUM_HOLES_MIN 1
-#define COARSE_DROPOUT_NUM_HOLES_MAX 8
-#define COARSE_DROPOUT_MIN_SIZE 8
-#define COARSE_DROPOUT_MAX_SIZE 24
-
-//The chance of Gaussian blur (separable, sigma in [min, max])
-#define AUGMENTATION_CHANCE_PERCENT_GAUSSIAN_BLUR 20.0
-#define GAUSSIAN_BLUR_SIGMA_MIN 0.5f
-#define GAUSSIAN_BLUR_SIGMA_MAX 3.0f
-
-//The chance of defocus blur (flat disk kernel, radius in [min, max])
-#define AUGMENTATION_CHANCE_PERCENT_DEFOCUS_BLUR 15.0
-#define DEFOCUS_BLUR_RADIUS_MIN 1
-#define DEFOCUS_BLUR_RADIUS_MAX 5
-
-//The chance of motion blur (random-angle line kernel, length in [min, max])
-#define AUGMENTATION_CHANCE_PERCENT_MOTION_BLUR 15.0
-#define MOTION_BLUR_LENGTH_MIN 5
-#define MOTION_BLUR_LENGTH_MAX 15
-
-
-//Magnitude of augmentations happening
-//------------------------------------------------------
-//This is the maximum number of simulated burned pixels
-#define MAXIMUM_REL_ZOOM_FACTOR 1.1
-
-//This is the perturbation magnitude (the maximum perturbation is actually half plus or minus)
-//------------------------------------------------------
-#define PERTURBATION_MAGNITUDE 100
-
-//This is the maximum number of simulated burned pixels
-//------------------------------------------------------
-#define MAXIMUM_BURNED_PIXELS 10
-
-//This is the augmentation values for brightness change
-//------------------------------------------------------
-#define MINIMUM_BRIGHTNESS_CHANGE -55.0
-#define MAXIMUM_BRIGHTNESS_CHANGE  55.0
-
-//This is the augmentation values for brightness change
-//------------------------------------------------------
-#define MINIMUM_REL_CONTRAST_CHANGE 0.8
-#define MAXIMUM_REL_CONTRAST_CHANGE 1.2
-
-//This is the augmentation values for uniform brightness change
-//------------------------------------------------------
-#define MINIMUM_UNIFORM_BRIGHTNESS_CHANGE -100.0
-#define MAXIMUM_UNIFORM_BRIGHTNESS_CHANGE  120.0
+// ----------------------------------------------------------------------------
+//  Data-augmentation parameters  (MOVED — no longer compile-time defines)
+// ----------------------------------------------------------------------------
+//  All augmentation chance percentages and magnitude values that used to be
+//  #defines here (AUGMENTATION_CHANCE_PERCENT_*, MAXIMUM_REL_ZOOM_FACTOR,
+//  PERTURBATION_MAGNITUDE, MAXIMUM_BURNED_PIXELS, MINIMUM/MAXIMUM_BRIGHTNESS_*,
+//  COARSE_DROPOUT_*, GAUSSIAN/DEFOCUS/MOTION_BLUR_*) have been moved into
+//  struct DataAugmentation (DataAugmentation.h).
+//
+//  The struct is embedded in struct ImageDatabase as db->aug and is seeded
+//  from the same default values by augmentationParamsSetDefaults() in db_create.
+//  Fields can be overridden at runtime from Python via
+//  db_get/set_augmentation_params() without recompilation.
 
 //Use RAM caching -----
 //This can be used instead of the TMPFS mechanism
@@ -305,6 +272,8 @@ hm  0       depth 16 bit
 
 //Common limits for 8/16 bit signed values
 //------------------------------------------------------
+//Depth (PrepareBatch.c DEPTH PIPELINE): unsigned 16-bit depth - ABS_MINV_16BIT -> signed 16-bit heatmap, later
+//re-stretched to [MINV_16BIT, MAXV_16BIT]; the 8-bit depth / normals / depth levels live in [MINV, MAXV].
 #define ABS_MINV_16BIT 32767
 #define MINV_16BIT -32767
 #define MAXV_16BIT  32767
@@ -320,7 +289,42 @@ hm  0       depth 16 bit
 #define MAXIMUM_GRADIENT_SIZE_DIFFICULTY 6
 
 #define SET_PAF_HEATMAP_BACKGROUND_TO_ZERO 0 //<- This causes training to fail (tried until Epoch 19)
-#define FLIP_PAF_GRADIENTS_FOR_LEFT_JOINTS 1
+#define FLIP_PAF_GRADIENTS_FOR_LEFT_JOINTS 1 //Legacy PAF encoding only (PAF_ENCODING_CHILD_LIT 0)
+
+//Limb PAF encoding (PLAN.md Observation 29 / Experiment W). 1 = every limb is a ramp from PAF_CHILD_VALUE at
+//the child joint to PAF_PARENT_VALUE at the parent, independent of body side, never near the -120 background.
+//0 = legacy signed -127..+127 ramp (serials <= 288): right limbs lit only at the parent, dark half == background.
+//Changing this needs the matching resolver template (ymapnet/skeletons, ymapnet_cpp/src/skeleton.hpp).
+#define PAF_ENCODING_CHILD_LIT 1
+#define PAF_CHILD_VALUE  127.0f
+#define PAF_PARENT_VALUE  64.0f   //keep > ~40: NNLosses _fn_penalty foreground is y_true > 0.33
+
+//Hip limb PAFs. 1 = left/right hip PAF goes to the same-side shoulder; 0 = to the nose, as in the dataset joint
+//tables (serials <= 288). With the nose as the only torso hub, a person without an annotated nose (back views,
+//~30% of COCO val persons) has no PAF joining upper and lower body; on perfect GT heatmaps the resolver goes
+//0.672 -> 0.803 COCO AP with this on (ymapnet/skeletons). Channel count is unchanged; configuration.json must say
+//"lhip->lshoulder" / "rhip->rshoulder" and keypoint_parents left_hip:left_shoulder, right_hip:right_shoulder.
+#define PAF_HIPS_TO_SHOULDERS 1
+
+//person_lr_bridge encoding. 0 = signed -127 (left joint) -> +127 (right joint), the left half indistinguishable from
+//the -120 background; 1 = lit along the whole line like PAF_ENCODING_CHILD_LIT, PAF_CHILD_VALUE at the left joint ->
+//PAF_PARENT_VALUE at the right one. The bridges are all that joins the two sides of a person without an annotated
+//nose once hips hang off the shoulders: on DataLoader GT (cocoVal) 1 halves the left/right-swapped skeletons of
+//nose-less persons (67 -> 30) and lifts the resolver 0.827 -> 0.843 COCO AP. configuration.json must say
+//"heatmapBridgeEncoding": "child_lit" (1) or "signed" (0) for the resolver template (ymapnet/skeletons, skeleton.hpp).
+#define BRIDGE_ENCODING_LIT 1
+
+//Limb PAF whose parent joint is not annotated (a wrist without its elbow, a knee without its hip, ...). 0 = no PAF
+//(the joint can only be grouped geometrically); 1 = draw it to the grandparent instead (wrist -> shoulder,
+//ankle -> hip, knee -> shoulder, hip/elbow -> nose) in the same channel with the same ramp. ~0.8% of COCO val PAF
+//joints, 5.6% of persons. Needs the resolver's skip limbs (ymapnet/skeletons skip_limbs).
+#define PAF_SKIP_MISSING_PARENT 0
+
+//db_shuffle_indices_via_loss: samples are sorted by their average batch loss, but every sample of a batch gets
+//that batch's loss, so batch-mates tie and an exact sort would serve the same batches every epoch. Each sorted
+//rank is jittered by up to +/- this many places before the final order (~1-2% of COCO train), which mixes
+//equal-loss neighbours into different batches while keeping the order by loss.
+#define LOSS_SHUFFLE_RANK_JITTER 2048
 
 //Switch dumping 16 bit heatmaps when using test
 #define TEST_16BIT_HEATMAPS 1

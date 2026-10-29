@@ -53,6 +53,7 @@ DataLoader.c
 HeatmapGenerator.c
 DBLoader.c
 cache.c
+PZPDLoader.c
 "
 
 INTEL_OPTIMIZATIONS=`cat /proc/cpuinfo | grep sse3`
@@ -63,22 +64,33 @@ else
  echo "Intel Optimizations available and will be used"
  EXTRA_FLAGS="-DINTEL_OPTIMIZATIONS -mavx2"
 fi
+#pzpdir (.pzpd archives) is vendored in pzpdir/ and built as its own library, pzpdir/libpzpdir.so, that
+#everything below links; it only hands out raw bytes, decoding stays in codecs/
+EXTRA_FLAGS="$EXTRA_FLAGS -DPZPDIR_WITH_PZP=0"
+#DT_RPATH (not RUNPATH): found next to us before anything on LD_LIBRARY_PATH
+PZPDIR_LINK='-Lpzpdir -lpzpdir -Wl,-rpath,$ORIGIN/pzpdir -Wl,--disable-new-dtags'
  
 #Make sure previous files are wiped
-rm ./libDataLoader.so ./test
+rm ./libDataLoader.so ./test pzpdir/libpzpdir.so
+
+gcc -shared -o pzpdir/libpzpdir.so $EXTRA_FLAGS -D_GNU_SOURCE -O3 -fPIC -march=native -mtune=native pzpdir/pzpdir_*.c -pthread -lzstd -llz4
+if [ $? -ne 0 ]; then
+    echo -e "$BRed Error: Unable to compile pzpdir/libpzpdir.so $Color_Off"
+    exit 1
+fi
 
 #This is the library to be linked to Python code
-gcc -shared -o libDataLoader.so $EXTRA_FLAGS $OPENMP -D_GNU_SOURCE -O3 -fPIC -Wno-unused-function -march=native -mtune=native $SOURCE -pthread -lm -lpng -ljpeg -lzstd -llz4
+gcc -shared -o libDataLoader.so $EXTRA_FLAGS $OPENMP -D_GNU_SOURCE -O3 -fPIC -Wno-unused-function -march=native -mtune=native $SOURCE $PZPDIR_LINK -pthread -lm -lpng -ljpeg -lzstd -llz4
 
 #This executable is for optimized run
-gcc -o opt_test $EXTRA_FLAGS $OPENMP -D_GNU_SOURCE -O3 -fPIE -fPIC -march=native -mtune=native $SOURCE test.c -pthread -lm -lpng -ljpeg -lzstd -llz4
+gcc -o opt_test $EXTRA_FLAGS $OPENMP -D_GNU_SOURCE -O3 -fPIE -fPIC -march=native -mtune=native $SOURCE test.c $PZPDIR_LINK -pthread -lm -lpng -ljpeg -lzstd -llz4
 
 #This executable is for debugging
 #https://cheatsheetseries.owasp.org/cheatsheets/C-Based_Toolchain_Hardening_Cheat_Sheet.html     -fsanitize=thread
-gcc -o test $EXTRA_FLAGS $OPENMP -D_GNU_SOURCE -O0 -g3 -fno-omit-frame-pointer -pg -Wstrict-overflow -fsanitize=address -fPIE -fPIC -Wno-unused-function -march=native -mtune=native $SOURCE test.c -pthread -lm -lpng -ljpeg -lzstd -llz4
+gcc -o test $EXTRA_FLAGS $OPENMP -D_GNU_SOURCE -O0 -g3 -fno-omit-frame-pointer -pg -Wstrict-overflow -fsanitize=address -fPIE -fPIC -Wno-unused-function -march=native -mtune=native $SOURCE test.c $PZPDIR_LINK -pthread -lm -lpng -ljpeg -lzstd -llz4
 
 #This executable is for profiling
-gcc -o profile_test $EXTRA_FLAGS $OPENMP -D_GNU_SOURCE -O0 -g3 -fno-omit-frame-pointer -pg -Wstrict-overflow -fPIE -fPIC -Wno-unused-function -march=native -mtune=native $SOURCE test.c -pthread -lm -lpng -ljpeg -lzstd -llz4
+gcc -o profile_test $EXTRA_FLAGS $OPENMP -D_GNU_SOURCE -O0 -g3 -fno-omit-frame-pointer -pg -Wstrict-overflow -fPIE -fPIC -Wno-unused-function -march=native -mtune=native $SOURCE test.c $PZPDIR_LINK -pthread -lm -lpng -ljpeg -lzstd -llz4
 
 
 gcc -o pzp codecs/pzp.c -pthread -lm -lpng -ljpeg -lzstd -llz4

@@ -1,0 +1,18 @@
+--- a/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -757,11 +757,13 @@
+     }
+ #endif
+ 
++    // ymapnet: name the shader before the driver compiles it, so a crash inside the driver's shader
++    // compiler (seen on Adreno) leaves the culprit as the last line of the app's error log
++    GGML_LOG_INFO("ggml_vulkan: compiling pipeline %s\n", pipeline->name.c_str());
+     try {
+         pipeline->pipeline = device->device.createComputePipeline(VK_NULL_HANDLE, compute_pipeline_create_info).value;
+     } catch (const vk::SystemError& e) {
+-        std::cerr << "ggml_vulkan: Compute pipeline creation failed for " << pipeline->name << std::endl;
+-        std::cerr << "ggml_vulkan: " << e.what() << std::endl;
++        GGML_LOG_ERROR("ggml_vulkan: Compute pipeline creation failed for %s: %s\n", pipeline->name.c_str(), e.what());
+         throw e;
+     }
+ 

@@ -19,25 +19,17 @@
 #include "processing/conversions.h"
 #include "processing/bilateral.h"
 #include "processing/flip.h"
+#include "processing/recalibration.h"
 
 #include "DBLoader.h"
 #include "HeatmapGenerator.h"
 
 #include "PrepareBatch.h"
+#include "PZPDLoader.h"
 #include "tools.h"
 
 #include <fcntl.h>
 
-/*
-void initializeHeatmap16BitSlow(signed short* heatmapDestination16Bit, int width, int height, int channels)
-{
-    size_t totalElements = (size_t)width * height * channels;
-    for (size_t i = 0; i < totalElements; ++i)
-    {
-        heatmapDestination16Bit[i] = MINV_16BIT;
-    }
-}
-*/
 
 void initializeHeatmap16Bit(signed short* heatmapDestination16Bit, int width, int height, int channels)
 {
@@ -94,7 +86,8 @@ void freeFileDescriptor(int fd)
 {
    if (fd==0)
    {
-       fprintf(stderr,"Bug?: freeFileDescriptor(0);\n");
+       //Already empty file descriptor..
+       //fprintf(stderr,"Bug?: freeFileDescriptor(0);\n");
        return;
    }
    if (fd!=-1)
@@ -106,72 +99,122 @@ void freeFileDescriptor(int fd)
 
 
 
+// Every resolved input-file path + codec flag for one sample, filled by resolveSampleFiles().
+// Buffers are sized to match the [2049] path buffers / 2048 limit used by the resolver.
+struct ResolvedSampleFiles
+{
+  char rgb[2049];           int rgbIsPZP;
+  char depth[2049];         int depthIsPZP;   int depthFound;
+  char segmentation[2049];  int segIsPZP;     int segFound;
+  char combined[2049];      int combinedIsPZP;
+  char geolocation[2049];   int geoFound;     // global lat/lon density PZP (single format)
+  int  multiplexed;         // derived: combined[0] != '\0'
+};
+
+// [B5] resolvePathToRequestedFiles() used to fileExists()-probe up to ~6 file variants
+// (depth pzp/png/_depth.png, seg pzp/png, combined pzp/png) for EVERY sample EVERY epoch —
+// >600K stat() syscalls per epoch, all returning last epoch's answers. The choice is now
+// resolved once (first touch) and cached in the sample's PoseEntry (enum DL_FileKind); on
+// every later touch the paths are rebuilt from the cached kind with zero stat() calls.
+// Output strings/flags are byte-identical to the original probing for all cases (incl. the
+// "not found" fall-throughs), so downstream behaviour is unchanged. depthFound/segFound are
+// derived from the cached kind so the caller can drop its own fileExists() re-check too.
 void resolvePathToRequestedFiles(
                                  const char * pathToCOCOImages,
                                  const char * pathToCOCODepthMaps,
                                  const char * pathToCOCOSegmentations,
                                  const char * pathToCombinedMetaData,
+                                 const char * pathToCOCOGeolocation,
                                  const char * thisFilename,
                                  int limit,
                                  char* tmp,
+                                 struct PoseEntry * sampleCache,
                                  char * pathToRGBFile,
                                  int *rgbIsPZP,
                                  char * pathToDepthFile,
                                  int * depthIsPZP,
+                                 int * depthFound,
                                  char * pathToSegmentationFile,
                                  int * segIsPZP,
+                                 int * segFound,
                                  char * pathToCombinedMetaDataFile,
-                                 int * combinedIsPZP
+                                 int * combinedIsPZP,
+                                 char * pathToGeolocationFile,
+                                 int * geoFound
                                 )
 {
-  //Resolve RGB Input image path
+  int alreadyResolved = (sampleCache!=0) && (sampleCache->pathResolved);
+  unsigned char depthKind    = alreadyResolved ? sampleCache->depthKind    : DL_FILE_NONE;
+  unsigned char segKind      = alreadyResolved ? sampleCache->segKind      : DL_FILE_NONE;
+  unsigned char combinedKind = alreadyResolved ? sampleCache->combinedKind : DL_FILE_NONE;
+  unsigned char geoKind      = alreadyResolved ? sampleCache->geoKind      : DL_FILE_NONE;
+
+  //Resolve RGB Input image path (never probed — always <images>/<filename>)
   snprintf(pathToRGBFile,limit,"%.1023s/%.1023s",pathToCOCOImages,thisFilename);
+  *rgbIsPZP = 0;
 
   //Resolve Depth Input image path
+  *depthFound = 0;
   snprintf(tmp,limit/2,"%s",thisFilename);
   if (strlen(tmp)>4)
             {
                tmp[strlen(tmp)-4]=0; //quick & dirty remove extension
 
-               //Depth Anything uses %s_depth.png  / Depth Anything V2 uses %s.png
-               int depthFilePathFound = 1;
-
-               //Try first to open the Depth Anything V2 file..
-               *depthIsPZP = 1;
-               snprintf(pathToDepthFile,limit,"%.1023s/%.1000s.pzp",pathToCOCODepthMaps,tmp);
-               if (!fileExists(pathToDepthFile))
+               if (!alreadyResolved)
                {
-                *depthIsPZP = 0; //Not a pzp file any more
-                //Try first to open the Depth Anything V2 file..
-                snprintf(pathToDepthFile,limit,"%.1023s/%.1000s.png",pathToCOCODepthMaps,tmp);
-                if (!fileExists(pathToDepthFile))
-                {
-                 //If we fail, fall back to open the Depth Anything V1 file..
-                 snprintf(pathToDepthFile,limit,"%.1023s/%.1000s_depth.png",pathToCOCODepthMaps,tmp);
-                 if (!fileExists(pathToDepthFile))
+                 //FIRST TOUCH: probe disk. Depth Anything uses %s_depth.png / V2 uses %s.png
+                 depthKind = DL_FILE_NONE;
+                 snprintf(pathToDepthFile,limit,"%.1023s/%.1000s.pzp",pathToCOCODepthMaps,tmp);
+                 if (fileExists(pathToDepthFile)) { depthKind = DL_FILE_PZP; }
+                 else
                  {
-                   depthFilePathFound = 0; //Could not find depth file..
+                  snprintf(pathToDepthFile,limit,"%.1023s/%.1000s.png",pathToCOCODepthMaps,tmp);
+                  if (fileExists(pathToDepthFile)) { depthKind = DL_FILE_PNG; }
+                  else
+                  {
+                   snprintf(pathToDepthFile,limit,"%.1023s/%.1000s_depth.png",pathToCOCODepthMaps,tmp);
+                   if (fileExists(pathToDepthFile)) { depthKind = DL_FILE_DEPTHPNG; }
+                  }
                  }
-                }
+               }
+
+               //Rebuild the resolved path + flags from the kind (byte-identical to the probe,
+               //including the "not found" case which leaves the _depth.png variant string).
+               switch (depthKind)
+               {
+                 case DL_FILE_PZP:      *depthIsPZP=1; snprintf(pathToDepthFile,limit,"%.1023s/%.1000s.pzp",pathToCOCODepthMaps,tmp);        *depthFound=1; break;
+                 case DL_FILE_PNG:      *depthIsPZP=0; snprintf(pathToDepthFile,limit,"%.1023s/%.1000s.png",pathToCOCODepthMaps,tmp);        *depthFound=1; break;
+                 case DL_FILE_DEPTHPNG: *depthIsPZP=0; snprintf(pathToDepthFile,limit,"%.1023s/%.1000s_depth.png",pathToCOCODepthMaps,tmp); *depthFound=1; break;
+                 default:               *depthIsPZP=0; snprintf(pathToDepthFile,limit,"%.1023s/%.1000s_depth.png",pathToCOCODepthMaps,tmp); *depthFound=0; break;
                }
             }
 
   //Resolve Segmentation File Input image path
+  *segFound = 0;
   snprintf(tmp,limit/2,"%s",thisFilename);
             if (strlen(tmp)>4)
             {
                tmp[strlen(tmp)-4]=0; //quick & dirty remove extension
-               int segmentFilePathFound = 1;
 
-               *segIsPZP = 1;
-               snprintf(pathToSegmentationFile,limit,"%.1023s/%.1000s.pzp",pathToCOCOSegmentations,tmp);
-               if (!fileExists(pathToSegmentationFile))
+               if (!alreadyResolved)
                {
-               *segIsPZP = 0;
-                //Try first to open the Depth Anything V2 file..
-                snprintf(pathToSegmentationFile,limit,"%.1023s/%.1000s.png",pathToCOCOSegmentations,tmp);
-                if (!fileExists(pathToSegmentationFile))
-                   { segmentFilePathFound = 0; }
+                 //FIRST TOUCH: probe disk (PZP takes priority, then PNG)
+                 segKind = DL_FILE_NONE;
+                 snprintf(pathToSegmentationFile,limit,"%.1023s/%.1000s.pzp",pathToCOCOSegmentations,tmp);
+                 if (fileExists(pathToSegmentationFile)) { segKind = DL_FILE_PZP; }
+                 else
+                 {
+                  snprintf(pathToSegmentationFile,limit,"%.1023s/%.1000s.png",pathToCOCOSegmentations,tmp);
+                  if (fileExists(pathToSegmentationFile)) { segKind = DL_FILE_PNG; }
+                 }
+               }
+
+               //Rebuild from kind (the "not found" case leaves the .png variant string, as before)
+               switch (segKind)
+               {
+                 case DL_FILE_PZP: *segIsPZP=1; snprintf(pathToSegmentationFile,limit,"%.1023s/%.1000s.pzp",pathToCOCOSegmentations,tmp); *segFound=1; break;
+                 case DL_FILE_PNG: *segIsPZP=0; snprintf(pathToSegmentationFile,limit,"%.1023s/%.1000s.png",pathToCOCOSegmentations,tmp); *segFound=1; break;
+                 default:          *segIsPZP=0; snprintf(pathToSegmentationFile,limit,"%.1023s/%.1000s.png",pathToCOCOSegmentations,tmp); *segFound=0; break;
                }
             }
 
@@ -186,25 +229,118 @@ void resolvePathToRequestedFiles(
       {
           tmp[strlen(tmp)-4] = '\0'; // strip extension
 
-          snprintf(pathToCombinedMetaDataFile, limit, "%.1023s/%.1000s.pzp", pathToCombinedMetaData, tmp);
-          if (fileExists(pathToCombinedMetaDataFile))
+          if (!alreadyResolved)
           {
-              *combinedIsPZP = 1;
+            //FIRST TOUCH: probe disk
+            combinedKind = DL_FILE_NONE;
+            snprintf(pathToCombinedMetaDataFile, limit, "%.1023s/%.1000s.pzp", pathToCombinedMetaData, tmp);
+            if (fileExists(pathToCombinedMetaDataFile)) { combinedKind = DL_FILE_PZP; }
+            else
+            {
+                snprintf(pathToCombinedMetaDataFile, limit, "%.1023s/%.1000s.png", pathToCombinedMetaData, tmp);
+                if (fileExists(pathToCombinedMetaDataFile)) { combinedKind = DL_FILE_PNG; }
+            }
           }
-          else
+
+          //Rebuild from kind (NONE leaves the path empty, matching the original convention)
+          switch (combinedKind)
           {
-              snprintf(pathToCombinedMetaDataFile, limit, "%.1023s/%.1000s.png", pathToCombinedMetaData, tmp);
-              if (!fileExists(pathToCombinedMetaDataFile))
-              {
-                  pathToCombinedMetaDataFile[0] = '\0'; // not found
-              }
+            case DL_FILE_PZP: *combinedIsPZP=1; snprintf(pathToCombinedMetaDataFile, limit, "%.1023s/%.1000s.pzp", pathToCombinedMetaData, tmp); break;
+            case DL_FILE_PNG: *combinedIsPZP=0; snprintf(pathToCombinedMetaDataFile, limit, "%.1023s/%.1000s.png", pathToCombinedMetaData, tmp); break;
+            default:          *combinedIsPZP=0; pathToCombinedMetaDataFile[0] = '\0'; break;
           }
       }
+  }
+
+  //Resolve Geolocation density file path. Single format (.pzp) and — unlike depth/seg —
+  //named "<imageFilename>.pzp" (extension KEPT), matching run_plonk_teacher.py's output.
+  //Un-augmented global heatmap; the caller copies it verbatim after all augmentation.
+  *geoFound = 0;
+  pathToGeolocationFile[0] = '\0';
+  if (pathToCOCOGeolocation && pathToCOCOGeolocation[0] != '\0')
+  {
+      if (!alreadyResolved)
+      {
+        geoKind = DL_FILE_NONE;
+        snprintf(pathToGeolocationFile, limit, "%.1023s/%.1023s.pzp", pathToCOCOGeolocation, thisFilename);
+        if (fileExists(pathToGeolocationFile)) { geoKind = DL_FILE_PZP; }
+      }
+      switch (geoKind)
+      {
+        case DL_FILE_PZP: snprintf(pathToGeolocationFile, limit, "%.1023s/%.1023s.pzp", pathToCOCOGeolocation, thisFilename); *geoFound=1; break;
+        default:          pathToGeolocationFile[0] = '\0'; break;
+      }
+  }
+
+  //Publish the resolution to the cache on first touch (kinds written before the flag, which
+  //is read by later epochs after a full worker barrier — no concurrent touch of one sample).
+  if (!alreadyResolved && sampleCache!=0)
+  {
+      sampleCache->depthKind    = depthKind;
+      sampleCache->segKind      = segKind;
+      sampleCache->combinedKind = combinedKind;
+      sampleCache->geoKind      = geoKind;
+      sampleCache->pathResolved = 1;
   }
 
   return ;
 }
 
+
+// Bundles the per-sample file resolution that both the worker and the preloader repeated
+// verbatim: pull the source's 4 base paths, build every input path/codec via
+// resolvePathToRequestedFiles(), and derive 'multiplexed'. Takes an already-resolved
+// sampleNumber/sourceID (both callers get these from db_resolve_sample_and_source before
+// they need them) so this is a sibling to that call, not a second resolution of it.
+// 'tmp' is caller scratch (>= limit); every field of 'out' is fully written.
+void resolveSampleFiles(struct ImageDatabase * db,
+                        SampleNumber sampleNumber,
+                        DatasetSourceID sourceID,
+                        char * tmp,
+                        struct ResolvedSampleFiles * out)
+{
+  resolvePathToRequestedFiles(
+                              db->dbSources->source[sourceID].pathToCOCOImages,
+                              db->dbSources->source[sourceID].pathToCOCODepthMaps,
+                              db->dbSources->source[sourceID].pathToCOCOSegmentations,
+                              db->dbSources->source[sourceID].pathToCombinedMetaData,
+                              db->dbSources->source[sourceID].pathToCOCOGeolocation,
+                              db->pdb->sample[sampleNumber].imagePath,
+                              2048,tmp,
+                              &db->pdb->sample[sampleNumber],
+                              out->rgb,          &out->rgbIsPZP,
+                              out->depth,        &out->depthIsPZP,  &out->depthFound,
+                              out->segmentation, &out->segIsPZP,    &out->segFound,
+                              out->combined,     &out->combinedIsPZP,
+                              out->geolocation,  &out->geoFound);
+
+  //DEPTH: a combined ("all") file wins over the separate depth/segmentation files (DEPTH STEP 0a)
+  out->multiplexed = (out->combined[0] != '\0');
+}
+
+// The .pzpd counterpart of resolveSampleFiles(): presence and codecs come from the sample's cache,
+// filled from the archive index at load (PZPDLoader.c). The "paths" only name the sample in messages.
+void resolveArchiveSampleFiles(struct ImageDatabase * db,
+                               SampleNumber sampleNumber,
+                               struct ResolvedSampleFiles * out)
+{
+  const struct PoseEntry * e = &db->pdb->sample[sampleNumber];
+  snprintf(out->rgb,         sizeof(out->rgb),         "%s (archive rgb)",  e->imagePath);
+  snprintf(out->depth,       sizeof(out->depth),       "%s (archive depth)",e->imagePath);
+  snprintf(out->segmentation,sizeof(out->segmentation),"%s (archive seg)",  e->imagePath);
+  out->combined[0] = '\0';
+  if (e->combinedKind!=DL_FILE_NONE) { snprintf(out->combined,sizeof(out->combined),"%s (archive all)",e->imagePath); }
+  out->geolocation[0] = '\0';
+  out->rgbIsPZP      = 0;
+  out->depthIsPZP    = (e->depthKind==DL_FILE_PZP);
+  out->depthFound    = (e->depthKind!=DL_FILE_NONE);
+  out->segIsPZP      = (e->segKind==DL_FILE_PZP);
+  out->segFound      = (e->segKind!=DL_FILE_NONE);
+  out->combinedIsPZP = (e->combinedKind==DL_FILE_PZP);
+  out->geoFound      = 0;
+  //DEPTH: a record with an "all" blob is multiplexed (DEPTH STEP 0a) and its "depth" / "seg" blobs are not read
+  out->multiplexed   = (out->combined[0] != '\0');
+}
 
 
 struct Image * cachedReadImage(struct cache * c,unsigned int threadID,const char *filename,unsigned int type)
@@ -245,10 +381,11 @@ struct Image * cachedReadImage(struct cache * c,unsigned int threadID,const char
 void preloadAllFiles(struct ImageDatabase * db)
 {
     unsigned long iteration;
-    char rgbpath[2049]           = {0};
-    char depthpath[2049]         = {0};
-    char segmentationspath[2049] = {0};
-    char combinedmdatapath[2049] = {0};
+    struct ResolvedSampleFiles files = {0};
+    char *rgbpath           = files.rgb;
+    char *depthpath         = files.depth;
+    char *segmentationspath = files.segmentation;
+    char *combinedmdatapath = files.combined;
     char tmp[2049]               = {0};
 
     fprintf(stderr,"Preloading %lu samples\n ",db->numberOfSamples);
@@ -256,56 +393,19 @@ void preloadAllFiles(struct ImageDatabase * db)
         {
           if (db->numberOfSamples>iteration)
            {//Check if iteration is valid..
-            unsigned long sampleNumber = iteration;
-
-            if (db->indices!=0)
-                { sampleNumber = db->indices[iteration]; }
-
-           if (sampleNumber >= db->pdb->numberOfSamples)
-           {
-               fprintf(stderr,RED "Out of memory access for sample %lu / iteration %lu / limit %lu \n" NORMAL,sampleNumber,iteration,db->in.numberOfImages);
-               fprintf(stderr,"Asked to access sample %lu / %lu \n",sampleNumber,db->pdb->numberOfSamples);
-               fprintf(stderr,"This is probably index corruption\n");
-               abort();
-            }
-
-            //This is just needed to get the correct paths to the files
-            DatasetSourceID sourceID = db_resolve_sample_sourceID((void *) db,sampleNumber);
-
-            if (sourceID>=db->dbSources->numberOfSources)
+            //Canonical position -> sampleNumber -> sourceID resolution (single source of
+            //truth, see db_resolve_sample_and_source in DataLoader.c).
+            unsigned long sampleNumber = 0;
+            DatasetSourceID sourceID   = 0;
+            if (!db_resolve_sample_and_source(db,iteration,&sampleNumber,&sourceID))
             {
-               fprintf(stderr,"\n\n\nOut of memory access for sample %lu / iteration %lu / limit %lu \n",sampleNumber,iteration,db->in.numberOfImages);
-               fprintf(stderr,"Asked to access source %lu / %u \n",sourceID,db->dbSources->numberOfSources);
+               fprintf(stderr,RED "preloadAllFiles could not resolve sample for iteration %lu, aborting\n" NORMAL,iteration);
                abort();
             }
 
 
-            const char * pathToCOCOImages        = db->dbSources->source[sourceID].pathToCOCOImages;
-            const char * pathToCOCODepthMaps     = db->dbSources->source[sourceID].pathToCOCODepthMaps;
-            const char * pathToCOCOSegmentations = db->dbSources->source[sourceID].pathToCOCOSegmentations;
-            const char * pathToCombinedMetadata  = db->dbSources->source[sourceID].pathToCombinedMetaData;
-            const char * thisFilename            = db->pdb->sample[sampleNumber].imagePath;
-
-
-            //Use the new loader if needed
-            int rgbIsPZP      = 0;
-            int depthIsPZP    = 0;
-            int segIsPZP      = 0;
-            int combinedIsPZP = 0;
-
-            //Resolve all paths..
-            resolvePathToRequestedFiles(
-                                        db->dbSources->source[sourceID].pathToCOCOImages,
-                                        db->dbSources->source[sourceID].pathToCOCODepthMaps,
-                                        db->dbSources->source[sourceID].pathToCOCOSegmentations,
-                                        db->dbSources->source[sourceID].pathToCombinedMetaData,
-                                        db->pdb->sample[sampleNumber].imagePath,
-                                        2048,tmp,
-                                        rgbpath,&rgbIsPZP,
-                                        depthpath,&depthIsPZP,
-                                        segmentationspath,&segIsPZP,
-                                        combinedmdatapath,&combinedIsPZP
-                                        );
+            //Resolve every input-file path/codec for this sample into 'files' (paths aliased above).
+            resolveSampleFiles(db,sampleNumber,sourceID,tmp,&files);
 
 
             unsigned long hash = 0;
@@ -326,6 +426,13 @@ void preloadAllFiles(struct ImageDatabase * db)
                 //------------------------------------------------
                 hash = hash_filename(segmentationspath);
                 cache_add(db->files,segmentationspath,hash,&filenameSize,0);
+            }
+            //------------------------------------------------
+            //Geolocation density PZP (only when enabled and present for this sample).
+            if (db->addGeolocationHeatmap && files.geoFound && files.geolocation[0] != '\0')
+            {
+                hash = hash_filename(files.geolocation);
+                cache_add(db->files,files.geolocation,hash,&filenameSize,0);
             }
            }
         }
@@ -368,6 +475,7 @@ void logAllThreadsProgress(unsigned int numberOfThreads,char start,const char * 
  #endif // PROFILE_THREAD_ACTIVITY
 }
 
+
 void *workerThread(void * arg)
 {
     //We are a worker thread so let's retrieve our variables..
@@ -391,7 +499,10 @@ void *workerThread(void * arg)
 
     // Seed the per-thread fast PRNG (splitmix64) so each worker has independent
     // randomness without contending on glibc's global rand() lock.
-    rng_seed((uint64_t)time(NULL) ^ ((uint64_t)ptr->threadID * 0x9E3779B97F4A7C15ULL));
+    // The db instance pointer is mixed in so worker k of the TRAIN pool and worker k of
+    // the VALIDATION pool (created within the same 1-second time() tick) do not end up
+    // with identical seeds / correlated augmentation streams. (DATALOADER.md A5)
+    rng_seed((uint64_t)time(NULL) ^ (uint64_t)(uintptr_t)ctx->db ^ ((uint64_t)ptr->threadID * 0x9E3779B97F4A7C15ULL));
 
     //---------------------------------------------------
     //DEBUG BEHAVIOR OF DIFFERENT FUNCTIONS
@@ -422,10 +533,11 @@ void *workerThread(void * arg)
       unsigned int gradientSize        = ctx->gradientSize;
       unsigned int PAFSize             = ctx->PAFSize;
       //--------------------------------------------------------------
-      char rgbpath[2049]               = {0};
-      char depthpath[2049]             = {0};
-      char segmentationspath[2049]     = {0};
-      char combinedmdatapath[2049]     = {0};
+      struct ResolvedSampleFiles files = {0};
+      char *rgbpath           = files.rgb;
+      char *depthpath         = files.depth;
+      char *segmentationspath = files.segmentation;
+      char *combinedmdatapath = files.combined;
       char tmp[2049]                   = {0};
       unsigned long iteration          = 0;
       SampleNumber sampleNumber        = 0;
@@ -458,6 +570,13 @@ void *workerThread(void * arg)
       struct Image * segment = 0;
       float offX,offY,sclX,sclY; // <- Careful these are a second set of variables..!
 
+      //[B1] Double-buffer design property (DATALOADER.md B1): this whole worker body reads
+      //and writes ONLY through db->in / db->out8bit / db->out16bit — which stay the
+      //fill-side buffers under the double-buffer plan (db_swap_buffers exchanges pixel
+      //pointers between fill and shadow sets while the pipeline is idle). Therefore
+      //NOTHING in this hot path changes when double buffering lands. Keep it that way:
+      //new code here must keep going through db->in/out*, never a cached pixels pointer
+      //taken before the batch started.
       if ( (db->in.numberOfImages!=0) && (db->out8bit.numberOfImages!=0) )
       { //Guard against activation without data..!
        for (iteration=sampleStart; iteration<sampleEnd; iteration++)
@@ -469,23 +588,13 @@ void *workerThread(void * arg)
 
            if (db->numberOfSamples>iteration)
            {//Check if iteration is valid..
-            sampleNumber = db->indices[iteration];
-
-           if (sampleNumber >= pdb->numberOfSamples)
-           {
-               fprintf(stderr,RED "Out of memory access for sample %lu / iteration %lu / limit %lu \n" NORMAL,sampleNumber,iteration,db->in.numberOfImages);
-               fprintf(stderr,"Asked to access sample %lu / %lu \n",sampleNumber,pdb->numberOfSamples);
-               fprintf(stderr,"This is probably index corruption\n");
-               abort();
-            }
-
-            //This is just needed to get the correct paths to the files
-            DatasetSourceID sourceID = db_resolve_sample_sourceID((void *) db,sampleNumber);
-
-            if (sourceID>=db->dbSources->numberOfSources)
+            //Canonical position -> sampleNumber -> sourceID resolution: all bounds and
+            //corruption checks (which used to be inlined here) live inside
+            //db_resolve_sample_and_source — index/source corruption aborts in there.
+            DatasetSourceID sourceID = 0;
+            if (!db_resolve_sample_and_source(db,iteration,&sampleNumber,&sourceID))
             {
-               fprintf(stderr,"\n\n\nOut of memory access for sample %lu / iteration %lu / limit %lu \n",sampleNumber,iteration,db->in.numberOfImages);
-               fprintf(stderr,"Asked to access source %lu / %u \n",sourceID,db->dbSources->numberOfSources);
+               fprintf(stderr,RED "Worker thread %u could not resolve sample for iteration %lu, aborting\n" NORMAL,thisThreadNumber,iteration);
                abort();
             }
 
@@ -510,31 +619,25 @@ void *workerThread(void * arg)
                abort();
             }
 
-            const char * pathToCOCOImages        = db->dbSources->source[sourceID].pathToCOCOImages;
-            const char * pathToCOCODepthMaps     = db->dbSources->source[sourceID].pathToCOCODepthMaps;
-            const char * pathToCOCOSegmentations = db->dbSources->source[sourceID].pathToCOCOSegmentations;
-            const char * thisFilename            = pdb->sample[sampleNumber].imagePath;
-
-
-            //Use the new loader if needed
-            int rgbIsPZP      = 0;
-            int depthIsPZP    = 0;
-            int segIsPZP      = 0;
-            int combinedIsPZP = 0;
-            int depthAndSegAreMultiplexed = 0;
-
-            //Resolve all paths..
-            resolvePathToRequestedFiles(
-                                        db->dbSources->source[sourceID].pathToCOCOImages,
-                                        db->dbSources->source[sourceID].pathToCOCODepthMaps,
-                                        db->dbSources->source[sourceID].pathToCOCOSegmentations,
-                                        db->dbSources->source[sourceID].pathToCombinedMetaData,
-                                        pdb->sample[sampleNumber].imagePath,
-                                        2048,tmp,
-                                        rgbpath,&rgbIsPZP,
-                                        depthpath,&depthIsPZP,
-                                        segmentationspath,&segIsPZP,
-                                        combinedmdatapath,&combinedIsPZP);
+            //Resolve every input-file path/codec for this sample into 'files' (paths aliased above).
+            //Archive sources take the sample's blobs (prefetched, or mmap views) instead of files.
+            const int fromArchive = (db->dbSources->archive!=0);
+            struct ArchiveSample archiveSample;
+            if (fromArchive)
+            {
+              resolveArchiveSampleFiles(db,sampleNumber,&files);
+              pzpdSampleBegin(db,sampleNumber,&archiveSample);
+            } else
+            {
+              resolveSampleFiles(db,sampleNumber,sourceID,tmp,&files);
+            }
+            int rgbIsPZP      = files.rgbIsPZP;
+            int depthIsPZP    = files.depthIsPZP;
+            int segIsPZP      = files.segIsPZP;
+            int combinedIsPZP = files.combinedIsPZP;
+            int depthFound    = files.depthFound;
+            int segFound      = files.segFound;
+            int depthAndSegAreMultiplexed = files.multiplexed;
 
             float progress = 0.0;
             if (sampleEnd-sampleStart>0) { progress = 100.0 * ((float) (iteration-sampleStart) / (sampleEnd-sampleStart)); }
@@ -545,16 +648,33 @@ void *workerThread(void * arg)
             //###############################################################
             //         Combined Depth and Segmentation loading
             //###############################################################
-            depthAndSegAreMultiplexed = (combinedmdatapath[0] != '\0');
-            if (depthAndSegAreMultiplexed)
+            // DEPTH STEP 0a (multiplexed sources only, see the DEPTH PIPELINE overview further down).
+            // A multiplexed ("all") file packs segmentation AND 16-bit depth into one 8-bit, 3-channel image:
+            //   channel db->combinedSegChannel       (default 0) = segmentation label
+            //   channel db->combinedDepthHighChannel (default 1) = depth >> 8   (high byte)
+            //   channel db->combinedDepthLowChannel  (default 2) = depth & 0xFF (low byte)
+            // (layout of append16bitToSAM3.py / compressSegmentDepth.py; changeable from Python with
+            // DataLoader(combinedChannels=...) -> db_set_combined_layout). The file comes from the archive's "all"
+            // stream or, for .db sources, from the all_* directory (given, or derived from depth_* by
+            // convertDepthPathToAllPath). When it exists it is used INSTEAD of the separate depth/segmentation
+            // files. splitSegmentationAndDepthFromSingleFileGeneric rebuilds depth = (high << 8) | low as a
+            // NATIVE-endian unsigned short image (dpth); depth STEP 2 below must therefore NOT byte-swap it.
+            // The DO_* flags come from db->doHeatmapOutput (the "master switch" that
+            // db_disable_heatmap_output() clears for token-only training). Every separate
+            // depth/segmentation path already honours it; this multiplexed path did not, so
+            // with heatmaps off it still read+decoded the combined file and split it into two
+            // images that nothing downstream consumed OR freed (~25MB leaked per batch, and a
+            // wasted PZP decode per sample). Gate it the same way.
+            if ( (depthAndSegAreMultiplexed) && ((DO_DEPTH) || (DO_SEGMENTATION)) )
             {
                 logThreadProgress(thisThreadNumber,1,"combined_depth_segmentation_loading");
-                struct Image * combined = cachedReadImage(db->files, thisThreadNumber, combinedmdatapath,
-                                                          combinedIsPZP ? PZP_CODEC : PNG_CODEC);
+                struct Image * combined = fromArchive ? pzpdSampleReadImage(db,sampleNumber,&archiveSample,PZPD_STREAM_ALL) :
+                                                        cachedReadImage(db->files, thisThreadNumber, combinedmdatapath, combinedIsPZP ? PZP_CODEC : PNG_CODEC);
                 if (combined && combined->pixels)
                 {
                     if (combinedIsPZP) { combined->bitsperpixel = 8; } // PZP stores as 24-bit RGB; generic expects 8-bit flag
-                    splitSegmentationAndDepthFromSingleFileGeneric(combined, &segment, &dpth);
+                    splitSegmentationAndDepthFromSingleFileGeneric(combined, &segment, &dpth, db->combinedSegChannel,
+                                                                   db->combinedDepthHighChannel, db->combinedDepthLowChannel);
                     // combined is consumed (destroyed) by splitSegmentationAndDepthFromSingleFileGeneric
                 }
                 logThreadProgress(thisThreadNumber,0,"combined_depth_segmentation_loading");
@@ -571,7 +691,7 @@ void *workerThread(void * arg)
             int eraseSample = 0;
 
             //Completely destroy 1% of background images (they dont have skeletons) with total noise
-            if ( (pdb->sample[sampleNumber].numberOfSkeletons==0) && (eventOccurs(AUGMENTATION_CHANCE_PERCENT_DESTROY)) )
+            if ( (pdb->sample[sampleNumber].numberOfSkeletons==0) && (eventOccurs(db->aug.chanceDestroy)) )
             {
                   //This is a seperate data path if the destructive eraseSample mode is enabled
                   //This skips any disk I/O at the cost of making the code a little more complex
@@ -592,11 +712,15 @@ void *workerThread(void * arg)
                   }
             } else
             { //Normal Sample loading
+
+             //When se to zero it means they are not set up!
              int RGBInputDescriptor = 0, DepthDescriptor = 0, SegmentationDescriptor = 0;
 
+             if (!fromArchive) //archive samples were prefetched as one record
+             {
              RGBInputDescriptor     = signalPrefetchFile(rgbpath);
 
-             if (depthAndSegAreMultiplexed)
+             if ( (depthAndSegAreMultiplexed) && ((DO_DEPTH) || (DO_SEGMENTATION)) )
              {
                DepthDescriptor = signalPrefetchFile(combinedmdatapath);
              }
@@ -607,10 +731,12 @@ void *workerThread(void * arg)
                if ( (db->addSegmentationHeatmaps) && (DO_SEGMENTATION) )
                  { SegmentationDescriptor = signalPrefetchFile(segmentationspath); }
              }
+             }
 
              //Read RGB input
              logThreadProgress(thisThreadNumber,1,"rgb_loading");
-             img = cachedReadImage(db->files,thisThreadNumber,rgbpath,NO_CODEC); //JPG_CODEC
+             img = fromArchive ? pzpdSampleReadImage(db,sampleNumber,&archiveSample,PZPD_STREAM_RGB) :
+                                 cachedReadImage(db->files,thisThreadNumber,rgbpath,NO_CODEC); //JPG_CODEC
              logThreadProgress(thisThreadNumber,0,"rgb_loading");
              if ( (img!=0) && (img->pixels!=0) )
              {
@@ -625,7 +751,7 @@ void *workerThread(void * arg)
               int   originalImageWidth  = img->width;
               int   originalImageHeight = img->height;
               float zoom_factor     = 1.0;
-              float max_zoom_factor = MAXIMUM_REL_ZOOM_FACTOR;
+              float max_zoom_factor = db->aug.maxZoomFactor;
               int   pan_x = 0, pan_y = 0;
 
               int   doPanAndZoom = 1; //Debug switch
@@ -636,14 +762,14 @@ void *workerThread(void * arg)
                //Augmentation transform stack
                if (pdb->sample[sampleNumber].numberOfSkeletons==0)
                { //High chance to pan & zoom empty skeletons
-                if ( (doPanAndZoom) && (eventOccurs(AUGMENTATION_CHANCE_PERCENT_PAN_AND_ZOOM)) )
+                if ( (doPanAndZoom) && (eventOccurs(db->aug.chancePanAndZoom)) )
                   {//50 percent chance to pan&zoom
                    randomizeZoomAndPan(img, max_zoom_factor, db->in.width, db->in.height, &zoom_factor, &pan_x, &pan_y);
                   }
                } else
                {
                 //We have skeletons!
-                if ( (doPanAndZoom) && (eventOccurs(AUGMENTATION_CHANCE_PERCENT_PAN_AND_ZOOM)) )
+                if ( (doPanAndZoom) && (eventOccurs(db->aug.chancePanAndZoom)) )
                   {//Chance to pan&zoom if we have persons in scene (special handling to keep them visible)
                    const int MAX_TRIES_TO_CROP_WITH_JOINTS = 3;
                    int tries = 0;
@@ -714,7 +840,7 @@ void *workerThread(void * arg)
                                            (unsigned int) offsetX,
                                            (unsigned int) offsetY,
                                            targetImageNumber,
-                                           DENOISING_OUTPUT_HEATMAP_START
+                                           db->denoiseHeatmapIndex
                                           );
 
                 }
@@ -732,81 +858,84 @@ void *workerThread(void * arg)
                db_map_sample_in_to_image((void*) db,&augmentImage,targetImageNumber);
 
 
-                if (eventOccurs(AUGMENTATION_CHANCE_PERCENT_HORIZONTAL_FLIP))
+                if (eventOccurs(db->aug.chanceHorizontalFlip))
                 {
                     doLRFlip=1; //Decide this here so it is known for functions that need it..
                 }
 
                 //99% of time we are here..
-                if (eventOccurs(AUGMENTATION_CHANCE_PERCENT_BRIGHTNESS_CONTRAST))
+                if (eventOccurs(db->aug.chanceBrightnessContrast))
                 { //Change Brightness/Contrast of input image
 
                   float brightnessR,brightnessG,brightnessB;
 
                   //From the 50% of the 99% :P
-                  if (eventOccurs(AUGMENTATION_CHANCE_PERCENT_BRIGHTNESS_CONTRAST_UNIFORM))
+                  if (eventOccurs(db->aug.chanceBrightnessContrastUniform))
                   {
                     //50% of the time altering brightness/contrast
                     //we do each channel seperately
-                    brightnessR = getRandomFloat(MINIMUM_BRIGHTNESS_CHANGE,MAXIMUM_BRIGHTNESS_CHANGE);
-                    brightnessG = getRandomFloat(MINIMUM_BRIGHTNESS_CHANGE,MAXIMUM_BRIGHTNESS_CHANGE);
-                    brightnessB = getRandomFloat(MINIMUM_BRIGHTNESS_CHANGE,MAXIMUM_BRIGHTNESS_CHANGE);
+                    brightnessR = getRandomFloat(db->aug.minBrightnessChange, db->aug.maxBrightnessChange);
+                    brightnessG = getRandomFloat(db->aug.minBrightnessChange, db->aug.maxBrightnessChange);
+                    brightnessB = getRandomFloat(db->aug.minBrightnessChange, db->aug.maxBrightnessChange);
                   } else
                   {
                     //50% of the time we alter all channels together (but more drastically :) )
-                    brightnessR = getRandomFloat(MINIMUM_UNIFORM_BRIGHTNESS_CHANGE, MAXIMUM_UNIFORM_BRIGHTNESS_CHANGE); //Slightly favor brightening up the image..
+                    brightnessR = getRandomFloat(db->aug.minUniformBrightnessChange, db->aug.maxUniformBrightnessChange); //Slightly favor brightening up the image..
                     brightnessG = brightnessR; //Use same change as R
                     brightnessB = brightnessR; //Use same change as R
                   }
 
                   adjustBrightnessContrast(&augmentImage,
-                                           brightnessR, getRandomFloat(MINIMUM_REL_CONTRAST_CHANGE,MAXIMUM_REL_CONTRAST_CHANGE), // R
-                                           brightnessG, getRandomFloat(MINIMUM_REL_CONTRAST_CHANGE,MAXIMUM_REL_CONTRAST_CHANGE), // G
-                                           brightnessB, getRandomFloat(MINIMUM_REL_CONTRAST_CHANGE,MAXIMUM_REL_CONTRAST_CHANGE), // B
+                                           brightnessR, getRandomFloat(db->aug.minRelContrastChange, db->aug.maxRelContrastChange), // R
+                                           brightnessG, getRandomFloat(db->aug.minRelContrastChange, db->aug.maxRelContrastChange), // G
+                                           brightnessB, getRandomFloat(db->aug.minRelContrastChange, db->aug.maxRelContrastChange), // B
                                            offsetX,offsetY);
                 }
 
-                if (eventOccurs(AUGMENTATION_CHANCE_PERCENT_PERTURBED))
+                if (eventOccurs(db->aug.chancePerturbed))
                 {   //Add noise on top of existing signal
-                   perturbGaussianNoise(&augmentImage, PERTURBATION_MAGNITUDE ,offsetX,offsetY);
+                   perturbGaussianNoise(&augmentImage, db->aug.perturbationMagnitude, offsetX, offsetY);
                 } else
-                if (eventOccurs(AUGMENTATION_CHANCE_PERCENT_BURNED_PIXELS))
+                if (eventOccurs(db->aug.chanceBurnedPixels))
                 {
                     //Burn up to 9 pixels on the camera sensor, for a 300x300 input frame this is 1/10000 corruption
-                    burnedPixels(&augmentImage,rand()%MAXIMUM_BURNED_PIXELS, offsetX, offsetY);
+                    //rng_next32: avoid glibc rand()'s global lock in the worker hot path;
+                    //the >0 guard: maxBurnedPixels is runtime-settable, %0 is UB. (DATALOADER.md A3)
+                    int maxBurned = (db->aug.maxBurnedPixels > 0) ? db->aug.maxBurnedPixels : 1;
+                    burnedPixels(&augmentImage, rng_next32() % maxBurned, offsetX, offsetY);
                 }
 
-                if ( (pdb->sample[sampleNumber].numberOfSkeletons > 0) && (eventOccurs(AUGMENTATION_CHANCE_PERCENT_ROTATE90)) )
+                if ( (pdb->sample[sampleNumber].numberOfSkeletons > 0) && (eventOccurs(db->aug.chanceRotate90)) )
                 {
                     doRotate90 = (rng_next32() & 1) ? 1 : 2; /* 1=CW, 2=CCW */
                     rotate90(&augmentImage, doRotate90 == 1, (unsigned int)offsetX, (unsigned int)offsetY);
                 }
 
-                if (eventOccurs(AUGMENTATION_CHANCE_PERCENT_COARSE_DROPOUT))
+                if (eventOccurs(db->aug.chanceCoarseDropout))
                 {
                     coarseDropout(&augmentImage,
-                                  getRandomNumber(COARSE_DROPOUT_NUM_HOLES_MIN, COARSE_DROPOUT_NUM_HOLES_MAX),
-                                  COARSE_DROPOUT_MIN_SIZE, COARSE_DROPOUT_MAX_SIZE,
-                                  COARSE_DROPOUT_MIN_SIZE, COARSE_DROPOUT_MAX_SIZE,
+                                  getRandomNumber(db->aug.coarseDropoutHolesMin, db->aug.coarseDropoutHolesMax),
+                                  db->aug.coarseDropoutMinSize, db->aug.coarseDropoutMaxSize,
+                                  db->aug.coarseDropoutMinSize, db->aug.coarseDropoutMaxSize,
                                   offsetX, offsetY);
                 }
 
-                if (eventOccurs(AUGMENTATION_CHANCE_PERCENT_GAUSSIAN_BLUR))
+                if (eventOccurs(db->aug.chanceGaussianBlur))
                 {
                     gaussianBlur(&augmentImage,
-                                 getRandomFloat(GAUSSIAN_BLUR_SIGMA_MIN, GAUSSIAN_BLUR_SIGMA_MAX),
+                                 getRandomFloat(db->aug.gaussianBlurSigmaMin, db->aug.gaussianBlurSigmaMax),
                                  offsetX, offsetY);
                 } else
-                if (eventOccurs(AUGMENTATION_CHANCE_PERCENT_DEFOCUS_BLUR))
+                if (eventOccurs(db->aug.chanceDefocusBlur))
                 {
                     defocusBlur(&augmentImage,
-                                getRandomNumber(DEFOCUS_BLUR_RADIUS_MIN, DEFOCUS_BLUR_RADIUS_MAX),
+                                getRandomNumber(db->aug.defocusBlurRadiusMin, db->aug.defocusBlurRadiusMax),
                                 offsetX, offsetY);
                 } else
-                if (eventOccurs(AUGMENTATION_CHANCE_PERCENT_MOTION_BLUR))
+                if (eventOccurs(db->aug.chanceMotionBlur))
                 {
                     motionBlur(&augmentImage,
-                               getRandomNumber(MOTION_BLUR_LENGTH_MIN, MOTION_BLUR_LENGTH_MAX),
+                               getRandomNumber(db->aug.motionBlurLengthMin, db->aug.motionBlurLengthMax),
                                offsetX, offsetY);
                 }
               } // Only do augmentations if enabled
@@ -824,7 +953,7 @@ void *workerThread(void * arg)
                                            (unsigned int) offsetX,
                                            (unsigned int) offsetY,
                                            targetImageNumber,
-                                           DENOISING_OUTPUT_HEATMAP_START
+                                           db->denoiseHeatmapIndex
                                           );
 
                 }
@@ -853,8 +982,8 @@ void *workerThread(void * arg)
                 setHeatmapValueForContinuousChannels(
                                                      &db->out8bit,
                                                      targetImageNumber,
-                                                     START_OF_PAF_HEATMAPS, //Start of PAFs
-                                                     END_OF_PAF_HEATMAPS, //End of PAFs
+                                                     db->PAFHeatmapIndex,                              //Start of PAFs
+                                                     db->PAFHeatmapIndex + numberOfPAFJoints - 1,      //End of PAFs (inclusive)
                                                      0
                                                     );
               }
@@ -886,15 +1015,50 @@ void *workerThread(void * arg)
            //At this point the heatmap for depth map is clean
            //If we want now is the time to load it in!
            //===========================================================================================================
+           // DEPTH PIPELINE (one sample). Depth exists twice in the outputs: a 16-bit channel (db->out16bit,
+           // db->depthmapHeatmapIndex16Bit, the 16-bit head) and an 8-bit channel (db->out8bit,
+           // db->depthmapHeatmapIndex8Bit = "depthmap", which also feeds the normals and depth-level channels).
+           // Source convention (Depth Anything relative depth): unsigned 16-bit, LARGER = NEARER, normalised per
+           // image so the nearest pixel is ~65535 and the farthest ~0.
+           //
+           //  STEP 0  read: multiplexed "all" image already split above (native byte order), otherwise the depth
+           //          file: the archive "depth" stream, or <depth dir>/<name>.pzp (preferred) / .png. PNG and PZP
+           //          both decode 16-bit samples BIG-endian (byte-identical; verified on 300W PZP vs PNG).
+           //  STEP 1  panAndZoom16BitImage: the same pan & zoom crop as the RGB input (nearest neighbour, 16-bit).
+           //  STEP 2  swap16bitEndianness: big-endian -> native, ONLY for depth files (not for multiplexed depth).
+           //  STEP 3  resize16BitImageTo16BitHeatmapWithBorders1Ch: bilinear letterbox resize into the 16-bit
+           //          heatmap, content pasted at the same whole-pixel offset as the RGB, value - 32767 -> SIGNED
+           //          short (0..65535 -> -32767..32768; an exact 65535 would wrap to -32768, but bilinear
+           //          interpolation practically never lands on it). Letterbox borders keep the cleared value -32767
+           //          ("farthest"); every content pixel is written (the last content row / column was skipped,
+           //          left at -32767, for images shrunk by less than 2x until 2026-10-06).
+           //  STEP 4  copy16BitHeatmapTo8BitHeatmapWithRemap: per-image min..max of the 16-bit content ->
+           //          linear to SIGNED char [-120,120]: -120 = farthest, +120 = nearest, 0 = mid range.
+           //          Borders stay -120. Every image therefore spans the full range and crosses 0 mid-scene.
+           //  STEP 5  computeNormalsOnHeatmaps8Bit: Sobel of the 8-bit depth (read as SIGNED) ->
+           //          normalX/normalY/normalZ = 120 * (dx, dy, 1) / |(dx, dy, 1)|.
+           //  STEP 6  copyThresholdedDepthHeatmap: depth-level channel(s) thresholded from the 8-bit depth
+           //          (1 level: +120 where depth is in [64,127], the nearest part of the range, else -120).
+           //  Later, after all heatmaps exist:
+           //  STEP 7  horizontal flip (if any): 8-bit and 16-bit depth mirrored with the image, normals recomputed
+           //          from the mirrored depth (normalX changes sign). rotate90 (if any): depth rotated with the
+           //          image, normals recomputed.
+           //  STEP 8  recalibrate8BitDepth / recalibrate16BitDepth: re-stretch the content of both depths to the full
+           //          range after augmentation. 8-bit: [-120,120], a no-op when STEP 4's result already spans it (the
+           //          usual case). 16-bit: ALWAYS stretched to [MINV_16BIT,MAXV_16BIT] = [-32767,32767], i.e. this is
+           //          where the 16-bit target gets its per-image normalisation. Normals / depth levels are NOT
+           //          recomputed here (they come from the pre-recalibration 8-bit depth).
            if ( (db->addDepthHeatmap) && (!eraseSample) && (DO_DEPTH) )
            {
                //If no file is present in file system just throw an early error message
-               if ( (depthAndSegAreMultiplexed) || (fileExists(depthpath)) )
+               //([B5] depthFound comes from the cached resolution — no per-epoch re-stat)
+               if ( (depthAndSegAreMultiplexed) || (depthFound) )
                { // START OF LOADING DEPTH MAP
 
                 logThreadProgress(thisThreadNumber,1,"depth_loading");
-                //Try to actually read the depth file..
+                //DEPTH STEP 0: read the depth file (multiplexed depth is already in dpth, native byte order)
                 if (depthAndSegAreMultiplexed) { /*fprintf(stderr,"TODO: Depth And Segmentations are multiplexed\n");*/  } else
+                if (fromArchive)               { dpth = pzpdSampleReadImage(db,sampleNumber,&archiveSample,PZPD_STREAM_DEPTH); } else
                 if (depthIsPZP)                { dpth = cachedReadImage(db->files,thisThreadNumber,depthpath,PZP_CODEC); } else
                                                { dpth = cachedReadImage(db->files,thisThreadNumber,depthpath,PNG_CODEC); }
                 logThreadProgress(thisThreadNumber,0,"depth_loading");
@@ -909,17 +1073,25 @@ void *workerThread(void * arg)
                  signed short* heatmapDestination16Bit = (signed short*) db->out16bit.pixels + (db->out16bit.width * db->out16bit.height * db->out16bit.channels * targetImageNumber); //* sizeof(signed short)This needs to be the start of the heatmap
                  if (dpth->bitsperpixel==16)
                     {
+                      //DEPTH STEP 1: the same pan & zoom crop as the RGB input (no-op when the sample is not zoomed)
                       panAndZoom16BitImage(dpth, zoom_factor, pan_x, pan_y, db->in.width, db->in.height);
-                      swap16bitEndianness(dpth); //swap should happen on reduced resolution image to conserve cycles
-                      //resize also converts to SIGNED short
+                      //DEPTH STEP 2: PNG / PZP depth files decode big-endian and need the swap; depth split out of a
+                      //multiplexed ("all") image is already native ((high<<8)|low in
+                      //splitSegmentationAndDepthFromSingleFileGeneric), and swapping it scrambled every such sample
+                      //into byte-wrapped noise
+                      if (!depthAndSegAreMultiplexed)
+                        { swap16bitEndianness(dpth); } //swap should happen on reduced resolution image to conserve cycles
+                      //DEPTH STEP 3: letterbox resize into the 16-bit heatmap; also converts unsigned -> SIGNED short
+                      //(value - 32767), borders stay at the cleared -32767
                       resize16BitImageTo16BitHeatmapWithBorders1Ch(dpth, heatmapDestination16Bit, db->out16bit.width, db->out16bit.height, db->out16bit.channels, db->depthmapHeatmapIndex16Bit ,&offX,&offY,&sclX,&sclY);
-                      //copy16BitHeatmapTo8BitHeatmap
+                      //DEPTH STEP 4: 16-bit content min..max -> 8-bit signed [-120 farthest .. +120 nearest]
                       copy16BitHeatmapTo8BitHeatmapWithRemap(&db->out8bit,db->depthmapHeatmapIndex8Bit,&db->out16bit,db->depthmapHeatmapIndex16Bit,targetImageNumber,
                                                       (unsigned int) offsetX,
                                                       (unsigned int) offsetY);
                       //-----------------------
                       if ( (db->addNormalHeatmaps) && (DO_NORMALS))
                         {
+                          //DEPTH STEP 5: normals from the SIGNED 8-bit depth (Sobel inside the letterbox borders)
                           //computeNormalsOnHeatmaps needs to be called after resizing and is computed on 8bit image
                           computeNormalsOnHeatmaps8Bit(heatmapDestination8Bit,
                                                        db->out8bit.width, db->out8bit.height, db->out8bit.channels,
@@ -931,7 +1103,7 @@ void *workerThread(void * arg)
                       //-----------------------
                       if (db->addDepthLevelsHeatmaps>0)
                       {
-                          //Depth Levels
+                          //DEPTH STEP 6: depth-level channel(s), thresholds of the SIGNED 8-bit depth
                           copyThresholdedDepthHeatmap((signed char *) db->out8bit.pixels,
                                                       (unsigned int) offsetX,
                                                       (unsigned int) offsetY,
@@ -940,7 +1112,7 @@ void *workerThread(void * arg)
                                                       db->out8bit.channels,
                                                       targetImageNumber,
                                                       db->depthmapHeatmapIndex8Bit,
-                                                      DEPTH_LEVELS_HEATMAP_START,
+                                                      db->depthLevelsHeatmapIndex,
                                                       db->addDepthLevelsHeatmaps
                                                       );
                       }
@@ -978,12 +1150,14 @@ void *workerThread(void * arg)
            //===========================================================================================================
            if ( (db->addSegmentationHeatmaps) && (!eraseSample) && (DO_SEGMENTATION) )
            {
-            if ( (depthAndSegAreMultiplexed) || (fileExists(segmentationspath)) )
+            //([B5] segFound comes from the cached resolution — no per-epoch re-stat)
+            if ( (depthAndSegAreMultiplexed) || (segFound) )
                { // START OF LOADING DEPTH MAP
                 //Try to actually read the segmentation data file..
 
                 logThreadProgress(thisThreadNumber,1,"segmentation_loading");
                 if (depthAndSegAreMultiplexed) { /*fprintf(stderr,"TODO: Depth And Segmentations are multiplexed\n");*/             } else
+                if (fromArchive)               { segment = pzpdSampleReadImage(db,sampleNumber,&archiveSample,PZPD_STREAM_SEG); } else
                 if (segIsPZP)                  { segment = cachedReadImage(db->files,thisThreadNumber,segmentationspath,PZP_CODEC); } else
                                                { segment = cachedReadImage(db->files,thisThreadNumber,segmentationspath,PNG_CODEC); }
                 logThreadProgress(thisThreadNumber,0,"segmentation_loading");
@@ -1053,10 +1227,42 @@ void *workerThread(void * arg)
                  // Flip 8-bit heatmaps in-place for this sample
                  unsigned char *out8Base = (unsigned char*)db->out8bit.pixels + (db->out8bit.width * db->out8bit.height * db->out8bit.channels * targetImageNumber);
 
-                 //startChannel used to be 0, now flipping is done inside the joint/PAF code so we start at heatmap #29 (Depth) see DataLoader.h
-                 unsigned int startChannel = START_OF_NON_JOINT_HEATMAPS_THAT_NEED_FLIPPING;
-                 flipImageHoriz_8bit(out8Base, db->out8bit.width, db->out8bit.height, startChannel, db->out8bit.channels, offx, offy);
+                 //startChannel used to be 0, now flipping is done inside the joint/PAF code so we start at the
+                 //first non-joint channel that needs flipping (Depth) — resolved from the heatmap layout.
+                 //The left/right, instance and SuperPoint groups are ALSO drawn at mirrored positions (with
+                 //swapped labels) by HeatmapGenerator.c, so they are skipped here: flipping them again
+                 //un-mirrored them. Everything else from depth on (depth, normals, levels, denoise,
+                 //segmentation) is rendered from unflipped sources and is mirrored here.
+                 {
+                   const char * preMirrored[] = { "left_right", "instance", "superpoint" };
+                   unsigned int c = db->depthmapHeatmapIndex8Bit;
+                   while (c < db->out8bit.channels)
+                   {
+                     unsigned int runEnd = db->out8bit.channels, skipTo = db->out8bit.channels;
+                     for (unsigned int g=0; g<sizeof(preMirrored)/sizeof(preMirrored[0]); g++)
+                     {
+                       unsigned int gs=0, gc=0;
+                       if ( heatmapLayoutGetRange(&db->heatmapLayout,preMirrored[g],&gs,&gc) && (gc>0) && (gs+gc>c) && (gs<runEnd) )
+                          { runEnd = (gs>c) ? gs : c; skipTo = gs+gc; }
+                     }
+                     flipImageHoriz_8bitChannels(out8Base, db->out8bit.width, db->out8bit.height, c, runEnd, db->out8bit.channels, offx, offy);
+                     c = skipTo;
+                   }
+                 }
 
+                 // Normals were computed from the unflipped depth: mirroring them leaves the x component
+                 // with the wrong sign, so recompute them from the flipped depth (as the rotation path does)
+                 if (db->addNormalHeatmaps && DO_NORMALS)
+                    {
+                      computeNormalsOnHeatmaps8Bit((signed char*)out8Base,
+                                                   db->out8bit.width, db->out8bit.height, db->out8bit.channels,
+                                                   db->depthmapHeatmapIndex8Bit, db->normalsHeatmapIndex,
+                                                   ctx->gradientX, ctx->gradientY,
+                                                   offx, offy);
+                    }
+
+                 // DEPTH STEP 7 (flip): the 8-bit depth / depth levels were mirrored above with the other unflipped
+                 // channels, normals were recomputed from that mirrored depth, and the 16-bit depth is mirrored here.
                  // Flip 16-bit heatmaps in-place for this sample (if present)
                  if (db->out16bit.pixels && db->out16bit.channels>0)
                     {
@@ -1092,6 +1298,32 @@ void *workerThread(void * arg)
                                                    0, 0);
                     }
 
+                 // A ±90° rotation swaps width<->height: rotate90_heatmap_8bit already
+                 // reoriented each size *tent* spatially, but the w/h tents now live in the
+                 // wrong channels, so swap the instance width/height channel contents per
+                 // pixel to match the new orientation (mirrors the normals recompute above;
+                 // the center channel is orientation-agnostic and needs no fixup).
+                 if (db->addInstanceHeatmaps)
+                    {
+                      const unsigned int wCh = db->instanceHeatmapIndex + 1;
+                      const unsigned int hCh = db->instanceHeatmapIndex + 2;
+                      const unsigned int ch  = db->out8bit.channels;
+                      signed char * px = (signed char*)out8Base;
+                      unsigned int yy,xx;
+                      for (yy=0; yy<db->out8bit.height; yy++)
+                        {
+                          for (xx=0; xx<db->out8bit.width; xx++)
+                            {
+                              signed char * base = px + ((yy*db->out8bit.width*ch) + (xx*ch));
+                              signed char tmp = base[wCh];
+                              base[wCh] = base[hCh];
+                              base[hCh] = tmp;
+                            }
+                        }
+                    }
+
+                 // DEPTH STEP 7 (rotate90): the 8-bit depth was rotated above with all 8-bit channels and the normals
+                 // recomputed from it; the 16-bit depth is rotated here the same way.
                  // Rotate 16-bit heatmaps (depth) if present
                  if (db->out16bit.pixels && db->out16bit.channels > 0)
                     {
@@ -1109,7 +1341,73 @@ void *workerThread(void * arg)
                  // all borders) with a plain copy of the correctly-rotated db->in pixels.
                  if (ENABLE_DENOISING_OUTPUT && !eraseSample)
                     {
-                      copyInputRGBFrameToOutput(&db->in, &db->out8bit, 0, 0, targetImageNumber, DENOISING_OUTPUT_HEATMAP_START);
+                      copyInputRGBFrameToOutput(&db->in, &db->out8bit, 0, 0, targetImageNumber, db->denoiseHeatmapIndex);
+                    }
+                }
+           //-----------------------------------------------------------
+
+           // DEPTH STEP 8: post-augmentation depth recalibration: stretch both heatmaps to their full range
+           // (see the DEPTH PIPELINE overview: the 16-bit stretch always runs, the 8-bit one only when needed).
+           // After a rotate90 there are no letterbox borders any more (bx = by = 0).
+           if ( (db->addDepthHeatmap) && (!eraseSample) && (DO_DEPTH) )
+                {
+                  const unsigned int bx = (doRotate90 != 0) ? 0u : (unsigned int)offsetX;
+                  const unsigned int by = (doRotate90 != 0) ? 0u : (unsigned int)offsetY;
+                  recalibrate8BitDepth (&db->out8bit,  db->depthmapHeatmapIndex8Bit,  targetImageNumber, bx, by);
+                  recalibrate16BitDepth(&db->out16bit, db->depthmapHeatmapIndex16Bit, targetImageNumber, bx, by);
+                }
+
+           //-----------------------------------------------------------
+           // Geolocation: a GLOBAL lat/lon density channel. It is world-aligned,
+           // NOT image-aligned, so it is written LAST — after flip/rotate90 — and
+           // copied verbatim with NO pan/zoom/flip/rotate (a re-framed photo is taken
+           // at the same place). The 128x64 density PZP is nearest-upsampled to the
+           // 256x256 output channel (x2 in x, x4 in y). See GEOLOCATION.md.
+           if ( (db->addGeolocationHeatmap) && (!eraseSample) )
+                {
+                 signed char* out8Base = (signed char*) db->out8bit.pixels
+                                       + (db->out8bit.width * db->out8bit.height * db->out8bit.channels * targetImageNumber);
+                 const unsigned int W = db->out8bit.width, H = db->out8bit.height, CH = db->out8bit.channels;
+                 const unsigned int geoCh = (unsigned int) db->geolocationHeatmapIndex;
+                 unsigned int oy,ox;
+                 int wrote = 0;
+
+                 if (files.geoFound)
+                    {
+                      struct Image * geo = cachedReadImage(db->files,thisThreadNumber,files.geolocation,PZP_CODEC);
+                      if (geo!=0)
+                         {
+                           if ( (geo->channels==1) && (geo->bitsperpixel==16) )
+                              {
+                                const unsigned short * g = (const unsigned short*) geo->pixels;
+                                const unsigned int gW = geo->width, gH = geo->height;
+                                swap16bitEndianness(geo); //PZP stores the PGM big-endian; make it native
+                                for (oy=0; oy<H; oy++)
+                                   {
+                                     unsigned int sy = (oy*gH)/H;
+                                     for (ox=0; ox<W; ox++)
+                                        {
+                                          unsigned int sx = (ox*gW)/W;                 //nearest upsample
+                                          int u16 = (int) g[sy*gW + sx];
+                                          int v   = MINV + (u16*MAXV_MINUS_MMINV)/65535; //[0,65535] -> [MINV,MAXV]
+                                          out8Base[(oy*W + ox)*CH + geoCh] = (signed char) v;
+                                        }
+                                   }
+                                wrote = 1;
+                              } else
+                              {
+                                fprintf(stderr,RED "Geolocation PZP %s must be 1ch/16bit (got %uch/%ubit)\n" NORMAL,
+                                        files.geolocation, geo->channels, geo->bitsperpixel);
+                              }
+                           destroyImage(geo);
+                         }
+                    }
+
+                 if (!wrote)
+                    { //Absent/unreadable: fill with background so no rotated/stale bytes remain.
+                      for (oy=0; oy<H; oy++)
+                        for (ox=0; ox<W; ox++)
+                          out8Base[(oy*W + ox)*CH + geoCh] = (signed char) MINV;
                     }
                 }
            //-----------------------------------------------------------
@@ -1130,19 +1428,25 @@ void *workerThread(void * arg)
               abort();
            }
 
-            //Free acquired file descriptors
+            //Simpler code with less state checking to free any acquired file descriptors
             freeFileDescriptor(RGBInputDescriptor);
-
-
-            if (!depthAndSegAreMultiplexed)
-            {
-             if ( (db->addDepthHeatmap) && (!eraseSample) && (DO_DEPTH) )
-               { freeFileDescriptor(DepthDescriptor); DepthDescriptor=0;}
-             if ( (db->addSegmentationHeatmaps) && (DO_SEGMENTATION) )
-               { freeFileDescriptor(SegmentationDescriptor); SegmentationDescriptor =0; }
-            }
+            RGBInputDescriptor = 0;
+            freeFileDescriptor(DepthDescriptor);
+            DepthDescriptor=0;
+            freeFileDescriptor(SegmentationDescriptor);
+            SegmentationDescriptor =0;
 
            } //<-- Not an empty/erased sample so we should actually read images etc.
+
+           // Catch-all: the multiplexed split allocates dpth+segment BEFORE the erase/normal
+           // branch, but they are only destroyed inside the depth/segmentation blocks, which
+           // are skipped for erased samples (and when their add* flags are off). Both pointers
+           // are nulled where they are consumed, so this is a no-op on the normal path.
+           if (dpth    != 0) { destroyImage(dpth);    dpth    = 0; }
+           if (segment != 0) { destroyImage(segment); segment = 0; }
+
+           //Every decode of this sample is done: give its blobs back to the prefetcher
+           if (fromArchive) { pzpdSampleEnd(db,&archiveSample); }
 
            //checkCanary("End of thread check B",db->canaryB.shouldRemainUntouched,CANARY_SIZE);
            //checkCanary("End of thread check C",db->canaryB.shouldRemainUntouched,CANARY_SIZE);

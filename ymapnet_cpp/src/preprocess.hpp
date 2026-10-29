@@ -2,6 +2,7 @@
 #include <opencv2/imgproc.hpp>
 #include <vector>
 #include <cstdint>
+#include <cstring>
 
 // Preprocess a BGR frame for YMAPNet inference.
 //

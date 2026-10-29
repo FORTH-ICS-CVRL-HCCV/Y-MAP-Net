@@ -12,17 +12,20 @@ extern "C"
 
 
 
-static void flipImageHoriz_8bit(
+//Mirror channels [startChannel, endChannel) of an interleaved image: pixel i -> W-1-i inside the borders
+static void flipImageHoriz_8bitChannels(
                                 unsigned char *data,
                                 unsigned int width,
                                 unsigned int height,
                                 unsigned int startChannel,
+                                unsigned int endChannel,
                                 unsigned int channels,
                                 unsigned int offsetX,
                                 unsigned int offsetY
                               )
 {
-  if (!data || channels==0) { return; }
+  if (!data || channels==0 || startChannel>=endChannel) { return; }
+  if (endChannel>channels) { endChannel = channels; }
 
   const unsigned int xStart = offsetX;
   const unsigned int xEnd   = width - 1 - offsetX; // inclusive
@@ -39,7 +42,7 @@ static void flipImageHoriz_8bit(
       unsigned char *R = data + ((y * width + right) * channels);
 
       // swap per-channel
-      for (unsigned int c = startChannel; c < channels; ++c)
+      for (unsigned int c = startChannel; c < endChannel; ++c)
       {
         unsigned char tmp = L[c];
         L[c] = R[c];
@@ -52,6 +55,15 @@ static void flipImageHoriz_8bit(
   }
 }
 
+static void flipImageHoriz_8bit(unsigned char *data, unsigned int width, unsigned int height,
+                                unsigned int startChannel, unsigned int channels,
+                                unsigned int offsetX, unsigned int offsetY)
+{
+  flipImageHoriz_8bitChannels(data, width, height, startChannel, channels, channels, offsetX, offsetY);
+}
+
+//Mirror ALL channels of an interleaved 16-bit heatmap (pixel i -> W-1-i inside the borders): DEPTH STEP 7 for the
+//16-bit depth target when a sample is flipped.
 static void flipImageHoriz_16bit(
                                  signed short *data,
                                  unsigned int width,

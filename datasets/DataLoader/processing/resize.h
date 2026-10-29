@@ -176,9 +176,11 @@ static void resizeImageWithBorders(struct Image *image, unsigned char *newPixels
         resizedHeight = newHeight;
     }
 
-    // Calculate offsets for pasting resized image onto new image
-    *keypointXOffset = (float)(newWidth - resizedWidth) / 2;
-    *keypointYOffset = (float)(newHeight - resizedHeight) / 2;
+    // Calculate offsets for pasting resized image onto new image. Integer division: the image is
+    // pasted at this whole pixel, and the joints/PAFs that use these offsets must land on it too
+    // (a .5 offset for odd padding put every joint target 0.5px off the image; depth already used ints)
+    *keypointXOffset = (float)((newWidth - resizedWidth) / 2);
+    *keypointYOffset = (float)((newHeight - resizedHeight) / 2);
 
     // Calculate keypoint multipliers
     *keypointXMultiplier = (float)resizedWidth / image->width;
@@ -230,7 +232,9 @@ static void resizeImageWithBorders(struct Image *image, unsigned char *newPixels
     {
         // Compute the source y-coordinate
         float src_y = (float)(y - offset_y) * inv_ky;
-        if (src_y < 0 || src_y > max_src_y) continue;  // Skip out-of-bound src_y values
+        // Clamp to the last full 2x2 block rather than skipping: a skipped pixel was never written and kept the
+        // previous image of this batch slot (the last content row/column when shrinking by less than 2x)
+        if (src_y > max_src_y) { src_y = (float) max_src_y; }
 
         // src_y >= 0 here, so (int) truncation == floor()
         int min_src_y = (int)src_y;
@@ -240,7 +244,7 @@ static void resizeImageWithBorders(struct Image *image, unsigned char *newPixels
         {
             // Compute the source x-coordinate
             float src_x = (float)(x - offset_x) * inv_kx;
-            if (src_x < 0 || src_x > max_src_x) continue;  // Skip out-of-bound src_x values
+            if (src_x > max_src_x) { src_x = (float) max_src_x; } // clamp, as src_y above
 
             // src_x >= 0 here, so (int) truncation == floor()
             int min_src_x = (int)src_x;
@@ -517,6 +521,10 @@ static void copyThresholdedDepthHeatmap_1Level(
    } // Y
 }
 
+//DEPTH STEP 6 of PrepareBatch.c: depth-level channel(s) from the SIGNED 8-bit depth (STEP 4, -120 farthest .. +120
+//nearest), only inside the letterbox borders; each level channel is +120 (MAXV) inside its band and -120 outside.
+//  levels = 1 (the configured heatmapAddDepthLevels): one channel, band [64,127] = the nearest part of the range.
+//  levels = 2 / 4: see copyThresholdedDepthHeatmap_2Levels / _4Levels for their bands.
 static void copyThresholdedDepthHeatmap(
                                         signed char *hmPixels,
                                         unsigned int borderX,
@@ -1089,6 +1097,16 @@ static void resize16BitImageTo16BitHeatmapWithBorders1ChOLD(
     }
 }*/
 
+//DEPTH STEP 3 of PrepareBatch.c: letterbox-resize a NATIVE-endian unsigned 16-bit depth image (after STEP 2)
+//into channel selectedChannel of a signed 16-bit heatmap.
+//  - same letterbox geometry as resizeImageWithBorders (RGB): aspect kept, content pasted at the whole-pixel
+//    offset ((newWidth-resizedWidth)/2, (newHeight-resizedHeight)/2), returned in keypointX/YOffset;
+//  - bilinear interpolation at src = dst * (source size / resized size) (corner-aligned, like the RGB resize);
+//  - value - ABS_MINV_16BIT (32767): unsigned 0..65535 -> signed -32767..32768 (an exact 65535 would wrap to
+//    -32768; bilinear interpolation practically never produces it);
+//  - every content pixel is written (bilinear samples clamped to the last source row / column; until 2026-10-06
+//    the last content row / column was skipped when shrinking by less than 2x and stayed -32767, a fake far edge);
+//    pixels outside the content (letterbox borders) are not written and keep the cleared value (-32767 = farthest).
 static void resize16BitImageTo16BitHeatmapWithBorders1Ch(
                                                          struct Image *image,
                                                          signed short *newPixels,
@@ -1134,17 +1152,13 @@ static void resize16BitImageTo16BitHeatmapWithBorders1Ch(
     float inv_kx = image->width  / (float)resizedWidth;
     float inv_ky = image->height / (float)resizedHeight;
 
-    // Determine valid source ranges to avoid out-of-bounds access
-    int max_src_x = image->width  - 2;
-    int max_src_y = image->height - 2;
-    int x_max_valid = (int)(max_src_x * (*keypointXMultiplier));
-    int y_max_valid = (int)(max_src_y * (*keypointYMultiplier));
-
-    // Clamp the valid ranges to the resized dimensions
-    int x_end = (resizedWidth - 1 < x_max_valid)  ? resizedWidth  - 1 : x_max_valid;
-    int y_end = (resizedHeight - 1 < y_max_valid) ? resizedHeight - 1 : y_max_valid;
-    x_end = x_end < 0 ? 0 : x_end;
-    y_end = y_end < 0 ? 0 : y_end;
+    // Every content pixel is written; the bilinear sample indices are clamped to the last source row / column
+    // below. (The loops used to stop where the 2x2 footprint would leave the source, which left the last
+    // content row / column at the cleared -32767 whenever the image was shrunk by less than 2x.)
+    int last_src_x = image->width  - 1;
+    int last_src_y = image->height - 1;
+    int x_end = resizedWidth  - 1;
+    int y_end = resizedHeight - 1;
 
     // Precompute destination indexing constants
     unsigned int dest_channel_offset = selectedChannel;
@@ -1158,7 +1172,8 @@ static void resize16BitImageTo16BitHeatmapWithBorders1Ch(
         // Compute source y and related weights
         float src_y = y * inv_ky;
         int src_y0 = (int)src_y;
-        int src_y1 = src_y0 + 1;
+        if (src_y0 > last_src_y) { src_y0 = last_src_y; }
+        int src_y1 = (src_y0 < last_src_y) ? src_y0 + 1 : last_src_y;   //last row: both samples on it
         float y_weight = src_y - src_y0;
         float one_minus_y_weight = 1.0f - y_weight;
 
@@ -1177,7 +1192,8 @@ static void resize16BitImageTo16BitHeatmapWithBorders1Ch(
             // Compute source x and related weights
             float src_x = x * inv_kx;
             int src_x0 = (int)src_x;
-            int src_x1 = src_x0 + 1;
+            if (src_x0 > last_src_x) { src_x0 = last_src_x; }
+            int src_x1 = (src_x0 < last_src_x) ? src_x0 + 1 : last_src_x;   //last column: both samples on it
             float x_weight = src_x - src_x0;
             float one_minus_x_weight = 1.0f - x_weight;
 

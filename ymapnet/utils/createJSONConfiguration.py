@@ -374,7 +374,7 @@ def saveJSONConfiguration(cfg, json_file_path):
 PZPD_SOURCE_ROOT = "/storage/ammarkov/YMAPNet"
 # Every root whose archives are RAMFS-backed (YMAPNet_dptext: the archives rebuilt with DPText-DETR text labels).
 # In RAMFS an archive lives at <ramfs>/YMAPNet/<archive directory name>/, so names must be unique across roots.
-PZPD_SOURCE_ROOTS = [PZPD_SOURCE_ROOT, "/storage/ammarkov/YMAPNet_dptext"]
+PZPD_SOURCE_ROOTS = [PZPD_SOURCE_ROOT, "/storage/ammarkov/YMAPNet_v2"]
 
 
 def pzpd_ramfs_copy_is_current(src_dir, ram_dir):

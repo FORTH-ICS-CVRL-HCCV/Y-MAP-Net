@@ -125,6 +125,7 @@
 		<Unit filename="processing/getpixels.h" />
 		<Unit filename="processing/labels.h" />
 		<Unit filename="processing/normals.h" />
+		<Unit filename="processing/recalibration.h" />
 		<Unit filename="processing/resize.h" />
 		<Unit filename="processing/sobel.h" />
 		<Unit filename="pthreadWorkerPool.h" />

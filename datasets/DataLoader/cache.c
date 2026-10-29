@@ -224,7 +224,16 @@ void *cache_open(struct cache *c, const char *filename,  unsigned long *size)
         }
     }
 
-    // Not found, add new
+    // Not found. Before cache_arrange() (preload phase, single-threaded) we can add.
+    // AFTER cache_arrange() the record table is shared read-only by many worker threads:
+    // cache_add would race (unsynchronized c->records[c->count++]) and reset c->arranged
+    // while other threads binary-search. A runtime miss means the preload did not cover
+    // this file — refuse loudly instead of corrupting. (DATALOADER.md A6e)
+    if (c->arranged)
+    {
+        fprintf(stderr, "cache_open: miss for %s AFTER cache_arrange — preload incomplete, refusing thread-unsafe add\n", filename);
+        return NULL;
+    }
     return cache_add(c, filename, hash, size, 0);
 }
 
@@ -403,11 +412,15 @@ void *read_file_to_common_memory_of_cache(struct cache *c,unsigned int threadID,
     if ( (atomic_load(&c->commonCache_ReadSizeBytes[threadID])             > 10000000UL) &&
          (atomic_load(&c->commonCache_TotalReadTimeMicroseconds[threadID]) > 10000000UL) )
     {
-        atomic_fetch_and(&c->commonCache_ReadSizeBytes[threadID],             ~0UL << 1);  // divide by 2 via mask
-        atomic_fetch_and(&c->commonCache_TotalReadTimeMicroseconds[threadID], ~0UL << 1);
-        // Note: atomic_fetch_and with ~0UL<<1 clears the lowest bit (equivalent to
-        // integer /2 for even values).  A proper /2 via compare-exchange would be
-        // heavier; for a statistics counter the one-bit rounding error is acceptable.
+        // Halve both counters (DATALOADER.md A4 — the previous atomic_fetch_and with
+        // ~0UL<<1 only cleared the lowest bit, it never actually divided).  Only this
+        // worker thread writes slot [threadID], so a load+shift+store is race-free;
+        // the concurrent stats reader at worst sees one counter halved before the
+        // other for a single report — fine for a statistics estimate.
+        atomic_store(&c->commonCache_ReadSizeBytes[threadID],
+                     atomic_load(&c->commonCache_ReadSizeBytes[threadID]) >> 1);
+        atomic_store(&c->commonCache_TotalReadTimeMicroseconds[threadID],
+                     atomic_load(&c->commonCache_TotalReadTimeMicroseconds[threadID]) >> 1);
     }
 
     if (size) *size = read_size;

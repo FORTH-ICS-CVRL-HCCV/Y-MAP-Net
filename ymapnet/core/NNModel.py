@@ -62,6 +62,7 @@ Layer.from_config = _layer_from_config_compat
 def load_keypoints_model(model_path, compile=True):
     from ymapnet.utils.tools import bcolors
     from ymapnet.core.NNLosses import HeatmapDistanceMetric, GloVeMSELoss, HeatmapCoreLoss, WeightedBinaryCrossEntropy, HeatmapDistanceMetricPartial, CustomTopKCategoricalAccuracy
+    from ymapnet.core.NNMuon import MuonConv  #registers the optimizer so Muon-trained checkpoints resume
     print(bcolors.OKGREEN, "Loading %s model.. " % model_path, bcolors.ENDC)
     print(bcolors.OKGREEN, "This takes a while to compile the model and ensure the best possible performance.. ", bcolors.ENDC)
     try:

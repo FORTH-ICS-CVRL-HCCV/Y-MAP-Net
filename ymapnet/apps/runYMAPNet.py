@@ -67,6 +67,11 @@ def build_arg_parser():
                    help="Model directory or file (default: 2d_pose_estimation)")
     p.add_argument("--save", action="store_true")
     p.add_argument("--prune", action="store_true", dest="pruneTokens")
+    p.add_argument("--tenpamy", action="store_true",
+                   help="Pass the predicted heatmaps back through the experimental TENpamy "
+                        "inverse network (knowledge/PLAN.md Experiment Y, ymapnet/training/"
+                        "trainTENpamy.py) and show the synthesized RGB reconstruction. "
+                        "Requires tenpamy_model/best.weights.h5 to exist; not supported with --tile.")
     p.add_argument("--tile", action="store_true")
     p.add_argument("--illustrate", action="store_true")
     p.add_argument("--collab", action="store_true", help="illustrate + save, no display")
@@ -490,6 +495,34 @@ def parse_singlewindow_args(singlewindow_args):
     return size, cols, (feeds or None)
 
 
+def load_tenpamy_model(cfg):
+    """Build the TENpamy architecture for this cfg's dimensions (ymapnet/training/
+    trainTENpamy.py: heatmaps -> RGB, see knowledge/PLAN.md Experiment Y) and load its
+    checkpoint. Raises FileNotFoundError with a clear message if it hasn't been trained yet."""
+    from ymapnet.training.trainTENpamy import build_tenpamy, WEIGHTS_PATH as TENPAMY_WEIGHTS_PATH
+    if not os.path.isfile(TENPAMY_WEIGHTS_PATH):
+        raise FileNotFoundError(
+            "--tenpamy requires %s (train it first: python3 -m ymapnet.training.trainTENpamy)" %
+            TENPAMY_WEIGHTS_PATH)
+    model = build_tenpamy(cfg['outputWidth'], cfg['outputHeight'], cfg['outputChannels'], cfg['inputChannels'])
+    model.load_weights(TENPAMY_WEIGHTS_PATH)
+    print(bcolors.OKGREEN, "[TENpamy] Loaded", TENPAMY_WEIGHTS_PATH, bcolors.ENDC)
+    return model
+
+
+def run_tenpamy(tenpamy_model, estimator):
+    """Feed the estimator's own raw heatmap predictions (the same -120..120 ranged,
+    76-channel tensor TENpamy trains on -- NOT self.heatmapsOut, which convertIO() has
+    already rescaled to uint8 display range) through TENpamy and return a displayable
+    uint8 image in the same channel order as estimator.imageIn (no extra cv2 color
+    conversion is applied elsewhere in this file before showing imageIn, so none is
+    applied here either)."""
+    from ymapnet.training.trainTENpamy import RGB_CENTER
+    heatmaps = estimator.keypoints_predictions[None, ...].astype(np.float32)
+    synthesized = tenpamy_model(heatmaps, training=False).numpy()[0]  # signed ~[-128, 128]
+    return np.clip(synthesized + RGB_CENTER, 0, 255).astype(np.uint8)
+
+
 def build_estimator(args):
     """Construct the YMAPNet estimator and its tile wrapper from CLI args."""
     from ymapnet.core.YMAPNet import YMAPNet, PoseEstimatorTiler
@@ -704,6 +737,26 @@ def main_pose_estimation(args):
     apply_layout(args)
     estimator, tiler = build_estimator(args)
 
+    tenpamy_model = None
+    if args.tenpamy:
+        if args.tile:
+            print(bcolors.WARNING, "--tenpamy is not supported with --tile, ignoring --tenpamy", bcolors.ENDC)
+        else:
+            tenpamy_model = load_tenpamy_model(estimator.cfg)
+            if show:
+                # Not part of YMAPNet's own auto-tiling layout (it's drawn from here, not from
+                # estimator.visualize), so without an explicit position it opens wherever the WM
+                # defaults new windows to -- typically stacked directly behind the much larger
+                # pose-visualization windows, making it look like it never appeared at all.
+                # Honor a saved/--win "TENpamy" entry if present (see save_window_layout in
+                # YMAPNet.py), otherwise default to a corner clear of the other windows.
+                win_override = {label: (int(x), int(y)) for x, y, label in args.win}
+                tx, ty = win_override.get("TENpamy", (args.screen[0] - 300, args.screen[1] - 300))
+                cv2.namedWindow("TENpamy", cv2.WINDOW_NORMAL)
+                cv2.resizeWindow("TENpamy", 256, 256)
+                cv2.moveWindow("TENpamy", tx, ty)
+                print(bcolors.OKGREEN, "[TENpamy] Window created at (%d, %d)" % (tx, ty), bcolors.ENDC)
+
     if save and show:
         disable_screensaver()
     if show:
@@ -767,6 +820,12 @@ def main_pose_estimation(args):
                 else:
                     frameWithVis = frame.copy()
                     estimator.visualize(frameWithVis, show=show, save=save)
+                    if tenpamy_model is not None and show:
+                        try:
+                            cv2.imshow("TENpamy", run_tenpamy(tenpamy_model, estimator))
+                        except Exception as e:
+                            print(bcolors.FAIL, "[TENpamy] render failed, disabling:", e, bcolors.ENDC)
+                            tenpamy_model = None
 
                 key = cv2.waitKey(1) & 0xFF if show else 255
                 if handle_keypress(key, args, estimator, frame, pose_matcher):

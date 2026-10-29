@@ -1,6 +1,5 @@
 #include "model.hpp"
 #include "preprocess.hpp"
-#include "postprocess.hpp"
 #include "skeleton.hpp"
 #include "heatmap_vis.hpp"
 
@@ -17,11 +16,14 @@
 // CLI
 // ---------------------------------------------------------------------------
 struct Config {
-    std::string model_path  = "../2d_pose_estimation/model_f32.gguf";
+    std::string model_path  = "ymapnet_model/model_f32.gguf";
     std::string input_src   = "0";       // "0" = webcam 0, or path to video/image
     int         input_size  = 256;
     float       threshold   = 0.3f;
     int         cuda_device = 0;
+    int         vulkan_device = -1;      // >= 0 selects the Vulkan backend
+    int         threads     = 0;         // CPU backend threads, 0 = all
+    bool        upcast_f16  = false;     // load F16 weights as F32
     bool        cpu_only    = false;
     bool        headless    = false;
     bool        centre_crop = true;
@@ -31,15 +33,18 @@ struct Config {
 
 static void print_usage(const char* prog) {
     printf("Usage: %s [options]\n", prog);
-    printf("  --model PATH      GGUF model file (default: %s)\n", "../2d_pose_estimation/model_f32.gguf");
+    printf("  --model PATH      GGUF model file (default: %s)\n", "ymapnet_model/model_f32.gguf");
     printf("  --from SRC        Input: 0=webcam, path to video/image (default: 0)\n");
-    printf("  --threshold T     Keypoint confidence threshold 0..1 (default: 0.30)\n");
+    printf("  --threshold T     Joint peak threshold, fraction of the 0..240 heatmap range (default: 0.30)\n");
     printf("  --cuda DEVICE     CUDA device index (default: 0)\n");
+    printf("  --vulkan DEVICE   Use Vulkan device index (build with -DYMAPNET_VULKAN=ON)\n");
     printf("  --cpu             Force CPU backend\n");
+    printf("  --threads N       CPU backend threads (default: all hardware threads)\n");
+    printf("  --upcast          Load F16 weights as F32 (faster on GPUs with slow F16 matmul)\n");
     printf("  --headless        No display window\n");
     printf("  --nocrop          Disable centre-crop\n");
     printf("  --info            Print model info and exit\n");
-    printf("  --dump PATH       Save raw float32 heatmap of first frame to PATH and exit\n");
+    printf("  --dump PATH       Save raw float32 heatmap of first frame to PATH (16-bit head to PATH.16bit) and exit\n");
 }
 
 static Config parse_args(int argc, char** argv) {
@@ -49,6 +54,9 @@ static Config parse_args(int argc, char** argv) {
         else if (!strcmp(argv[i], "--from")      && i+1 < argc) cfg.input_src   = argv[++i];
         else if (!strcmp(argv[i], "--threshold") && i+1 < argc) cfg.threshold   = std::stof(argv[++i]);
         else if (!strcmp(argv[i], "--cuda")      && i+1 < argc) cfg.cuda_device = std::stoi(argv[++i]);
+        else if (!strcmp(argv[i], "--vulkan")    && i+1 < argc) cfg.vulkan_device = std::stoi(argv[++i]);
+        else if (!strcmp(argv[i], "--threads")   && i+1 < argc) cfg.threads     = std::stoi(argv[++i]);
+        else if (!strcmp(argv[i], "--upcast")) cfg.upcast_f16  = true;
         else if (!strcmp(argv[i], "--cpu"))    cfg.cpu_only    = true;
         else if (!strcmp(argv[i], "--headless"))cfg.headless   = true;
         else if (!strcmp(argv[i], "--nocrop")) cfg.centre_crop = false;
@@ -85,6 +93,7 @@ int main(int argc, char** argv) {
         // pass cuda_device = -1 as a sentinel; model.cpp will skip cuda_init
         cfg.cuda_device = -1;
 #endif
+        cfg.vulkan_device = -1;
     }
 
     // -----------------------------------------------------------------------
@@ -93,7 +102,7 @@ int main(int argc, char** argv) {
     YMAPNetModel model;
     {
         auto t0 = Clock::now();
-        if (!model.load(cfg.model_path, cfg.cuda_device)) {
+        if (!model.load(cfg.model_path, cfg.cuda_device, cfg.vulkan_device, cfg.threads, cfg.upcast_f16)) {
             fprintf(stderr, "[main] Model load failed.\n");
             return 1;
         }
@@ -136,6 +145,9 @@ int main(int argc, char** argv) {
     const int  W   = cfg.input_size;
     const int  H   = cfg.input_size;
     const int  OCH = static_cast<int>(model.meta().output_ch);
+    const skel::AuxChannels aux = skel::find_aux_channels(model.meta().heatmap_names);
+    const skel::Topology topo = skel::make_topology(model.meta().keypoint_parent_ids, model.meta().paf_encoding,
+                                                    model.meta().bridge_encoding, model.meta().skeleton_score_weights);
 
     printf("[main] Processing %s  →  heatmap %dx%dx%d\n",
            cfg.input_src.c_str(), W, H, OCH);
@@ -171,6 +183,8 @@ int main(int argc, char** argv) {
         std::vector<float> heatmap = model.forward(input_buf.data(), W, H);
         total_forward_ms += ms_since(t_fwd);
 
+        if (model.has_tokens()) printf("[main] Description: %s\n", model.describe().c_str());
+
         // --- dump raw heatmap (validation mode) ---
         if (!cfg.dump_path.empty()) {
             FILE* fp = std::fopen(cfg.dump_path.c_str(), "wb");
@@ -180,6 +194,26 @@ int main(int argc, char** argv) {
                 std::fclose(fp);
                 printf("[main] Wrote raw heatmap (%zu floats) to %s\n", heatmap.size(), cfg.dump_path.c_str());
             }
+            std::vector<float> tok = model.token_scores();
+            if (!tok.empty()) {
+                std::string pt = cfg.dump_path + ".tokens";
+                if (FILE* ft = std::fopen(pt.c_str(), "wb")) {
+                    std::fwrite(tok.data(), sizeof(float), tok.size(), ft);
+                    std::fclose(ft);
+                    printf("[main] Wrote token scores (%zu floats) to %s\n", tok.size(), pt.c_str());
+                }
+            }
+            std::vector<float> hm16 = model.heatmap_16bit();
+            if (!hm16.empty()) {
+                std::string p16 = cfg.dump_path + ".16bit";
+                FILE* fp16 = std::fopen(p16.c_str(), "wb");
+                if (!fp16) { fprintf(stderr, "[main] Cannot write dump: %s\n", p16.c_str()); }
+                else {
+                    std::fwrite(hm16.data(), sizeof(float), hm16.size(), fp16);
+                    std::fclose(fp16);
+                    printf("[main] Wrote raw 16-bit heatmap (%zu floats) to %s\n", hm16.size(), p16.c_str());
+                }
+            }
             break;
         }
 
@@ -187,8 +221,7 @@ int main(int argc, char** argv) {
         auto t_post = Clock::now();
         float sx = static_cast<float>(frame.cols) / W;
         float sy = static_cast<float>(frame.rows) / H;
-        std::vector<Keypoint> kps = detect_keypoints(
-            heatmap.data(), W, H, OCH, cfg.threshold, sx, sy);
+        std::vector<Person> persons = resolve_skeletons(heatmap.data(), W, H, OCH, cfg.threshold, aux, topo);
         total_post_ms += ms_since(t_post);
         total_nn_ms   += ms_since(t_pre);  // pre + fwd + post
 
@@ -201,7 +234,7 @@ int main(int argc, char** argv) {
             cv::imshow("YMAPNet Heatmaps", hm_grid);
 
             cv::Mat vis = frame.clone();
-            draw_skeleton(vis, kps, cfg.threshold);
+            draw_skeletons(vis, persons, sx, sy);
 
             // FPS overlay: NN fps (pre+fwd+post) and loop fps (wall)
             double elapsed   = ms_since(loop_start);

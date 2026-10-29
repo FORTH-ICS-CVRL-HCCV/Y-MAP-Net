@@ -301,6 +301,14 @@ def getOptimizerFromCFG(cfg, globalClipNorm=None):
         optimizer = tf.keras.optimizers.AdamW(learning_rate=float(cfg['learningRate']), weight_decay=wd, beta_1=beta_1,
                                               beta_2=beta_2, epsilon=epsilon, clipnorm=None, clipvalue=clip_value,
                                               global_clipnorm=global_clip)
+    elif (cfg['optimizer'] == 'muon'):
+        # Muon on 2D + conv kernels, AdamW (with the adam* betas) on output heads/biases/norms/depthwise.
+        # Weight decay is passed explicitly: keras Muon defaults to 0.004 on both branches.
+        from ymapnet.core.NNMuon import MuonConv, YMAPNET_OUTPUT_LAYERS
+        optimizer = MuonConv(learning_rate=float(cfg['learningRate']), adam_beta_1=beta_1, adam_beta_2=beta_2,
+                             epsilon=epsilon, weight_decay=wd or None, adam_weight_decay=wd or None,
+                             exclude_layers=YMAPNET_OUTPUT_LAYERS, clipnorm=None, clipvalue=clip_value,
+                             global_clipnorm=global_clip)
     else:
         raise ValueError("Unknown optimizer (", cfg['optimizer'], ")")
 

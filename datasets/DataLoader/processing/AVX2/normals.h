@@ -44,14 +44,14 @@ static void computeNormalsOnHeatmaps8Bit_AVX2(
         abort();
     }
 
-    // Run Sobel on the depth channel to fill gradientX/gradientY.
-    // sobelXY8Bit dispatches to sobelXY8Bit_AVX2 when INTEL_OPTIMIZATIONS is set.
+    // Run Sobel on the depth channel to fill gradientX/gradientY (sobelXY8Bit dispatches to sobelXY8Bit_AVX2
+    // when INTEL_OPTIMIZATIONS is set). The depth channel is SIGNED [-120,120]: use the signed wrapper.
     struct Image heatmapWrapper = {0};
     heatmapWrapper.pixels   = (unsigned char *)heatmapPixels;
     heatmapWrapper.width    = heatmapWidth;
     heatmapWrapper.height   = heatmapHeight;
     heatmapWrapper.channels = heatmapChannels;
-    sobelXY8Bit(&heatmapWrapper, gradientX, gradientY, depthMapSourceChannel);
+    sobelXY8BitSigned(&heatmapWrapper, gradientX, gradientY, depthMapSourceChannel);
 
     // Kill one extra border pixel adjacent to the Sobel edge (mirrors _Simple logic).
     borderX += (borderX != 0);

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
+#include <math.h>
 
 #include "processing/augmentations.h"
 
@@ -199,6 +200,63 @@ void drawSignedPAFLine(
         if (stepCount >= maxSteps)
             break;
         // ====================
+    }
+}
+
+
+/*
+ * Limb PAF with PAF_ENCODING_CHILD_LIT (PLAN.md Observation 29 / Experiment W):
+ * value goes linearly from PAF_CHILD_VALUE at the child joint to PAF_PARENT_VALUE at the parent,
+ * for every limb regardless of body side. The whole limb stays well above the -120 background and
+ * above the loss foreground threshold (NNLosses _fn_penalty: y_true > 0.33 ≈ +40), and the bright
+ * end is always at the child, where resolution must pick the right wrist/ankle/elbow/knee.
+ * (drawSignedPAFLine is kept unchanged: the person_lr_bridge instance channel still uses it.)
+ */
+void drawChildLitPAFLine(
+                         signed char *heatmapPTR,
+                         int paf_ch,
+                         int width, int height, int channels,
+                         int cx, int cy,       // child joint
+                         int px, int py,       // parent joint
+                         int lineWidth
+                        )
+{
+    int dx = abs(px - cx);
+    int dy = abs(py - cy);
+    int sx = (cx < px ? 1 : -1);
+    int sy = (cy < py ? 1 : -1);
+    int err = dx - dy;
+
+    float fx = (float)(px - cx);
+    float fy = (float)(py - cy);
+    float L2 = fx*fx + fy*fy;
+    if (L2 < 1e-12f) return;  // no meaningful limb
+    float invL2 = 1.0f / L2;
+
+    int half = lineWidth / 2;
+    int x = cx;
+    int y = cy;
+
+    int maxSteps = (int)(sqrtf(L2) * 1.5f);   // safe termination, as in drawSignedPAFLine
+    if (maxSteps < 100) maxSteps = 100;
+
+    for (int stepCount = 0; stepCount < maxSteps; stepCount++)
+    {
+        // normalized projection t in [0..1]: 0 at the child, 1 at the parent
+        float t = ((float)(x - cx)*fx + (float)(y - cy)*fy) * invL2;
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+        float value = PAF_CHILD_VALUE + (PAF_PARENT_VALUE - PAF_CHILD_VALUE) * t;
+
+        for (int ox = -half; ox <= half; ox++)
+        for (int oy = -half; oy <= half; oy++)
+            { writeSignedPAF(heatmapPTR, width, height, channels, x + ox, y + oy, paf_ch, value); }
+
+        if (x == px && y == py) break;   // reached the parent
+
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x += sx; }
+        if (e2 <  dx) { err += dx; y += sy; }
     }
 }
 
@@ -412,7 +470,8 @@ void drawSingleLRHeatmapGaussian(
     for (int fjID = 0; fjID < db->pdb->keypointsForEachSample; fjID++)
     {
 
-        // Apply left-right augmentation flips
+        // Apply left-right augmentation flips: the side is the OUTPUT label fjID, the position is read
+        // from its mirror jID (on a flipped sample the right channel shows the original left joints)
         int jID = horizontalJointFlip(fjID, doLRFlip);
 
         // =============================
@@ -420,11 +479,11 @@ void drawSingleLRHeatmapGaussian(
         // =============================
         if (right)
         {
-            if (!isRightJoint(jID)) { continue; }
+            if (!isRightJoint(fjID)) { continue; }
         }
         else
         {
-            if (!isLeftJoint(jID)) { continue; }
+            if (!isLeftJoint(fjID)) { continue; }
         }
 
 
@@ -449,9 +508,10 @@ void drawSingleLRHeatmapGaussian(
             xF = (offsetX + (xF * scaleX)) * IORatioX;
             yF = (offsetY + (yF * scaleY)) * IORatioY;
 
-            x = (unsigned short)xF;
-            y = (unsigned short)yF;
-            if (doLRFlip) { x = (unsigned short)(db->out8bit.width - (int)x); }
+            //signed + floorf so joints just off the left/top edge keep their visible part (as the joint heatmaps)
+            int px = (int) floorf(xF);
+            int py = (int) floorf(yF);
+            if (doLRFlip) { px = db->out8bit.width - 1 - px; } //pixel i -> W-1-i, as flipImageHoriz_8bit
 
             // Gradient size selection
             int gradientSize                = gradientSizeDefault + db->pdb->joint[jID].jointDifficulty;
@@ -466,8 +526,8 @@ void drawSingleLRHeatmapGaussian(
             {
              for (int gy = 0; gy < g2; gy++)
              {
-                int xx = x + gx - gradientSize;
-                int yy = y + gy - gradientSize;
+                int xx = px + gx - gradientSize;
+                int yy = py + gy - gradientSize;
 
                 if (xx < 0 || xx >= db->out8bit.width || yy < 0 || yy >= db->out8bit.height) {  continue; }
 
@@ -583,6 +643,17 @@ int ensurePercentageOfJointsInHeatmap(
 
 
 
+//Parent joint of jID's limb PAF (PAF_HIPS_TO_SHOULDERS: hips -> same-side shoulder instead of the nose).
+static int pafParentJoint(struct ImageDatabase * db, int jID)
+{
+    if (PAF_HIPS_TO_SHOULDERS)
+    {   //joint ids: see horizontalJointFlip
+        if (jID==11) { return 5; } //lhip -> lshoulder
+        if (jID==12) { return 6; } //rhip -> rshoulder
+    }
+    return db->pdb->joint[jID].parent;
+}
+
 void drawPAFsOnHeatmaps(
                             struct ImageDatabase * db,
                             signed char * heatmapPTR,
@@ -617,8 +688,15 @@ void drawPAFsOnHeatmaps(
      for (skID = 0; skID < db->pdb->sample[sampleID].numberOfSkeletons; skID++)
         {
                 jID       = PAFJoints[pafID];
-                parentjID = db->pdb->joint[jID].parent;
+                parentjID = pafParentJoint(db,jID);
+                if (PAF_SKIP_MISSING_PARENT)
+                {   //parent not annotated (raw coords 0, as instanceTransformJoint): draw to the grandparent instead
+                    const int fp = horizontalJointFlip(parentjID,doLRFlip);
+                    if ( (db->pdb->sample[sampleID].sk[skID].coords[fp * 3 + 0]==0) || (db->pdb->sample[sampleID].sk[skID].coords[fp * 3 + 1]==0) )
+                       { parentjID = pafParentJoint(db,parentjID); }
+                }
 
+                const int labelJ = jID, labelP = parentjID; //what this channel encodes (pre-flip ids)
                 jID       = horizontalJointFlip(jID,doLRFlip);
                 parentjID = horizontalJointFlip(parentjID,doLRFlip);
                 //fprintf(stderr,"Parent of %s is %s \n",db->pdb->joint[jID].name,db->pdb->joint[parentjID].name);
@@ -632,8 +710,8 @@ void drawPAFsOnHeatmaps(
                 x1 = (int) xF;
                 y1 = (int) yF;
 
-                //X coordinates need to be also horizontally flipped!
-                if (doLRFlip) { x1 = db->out8bit.width - x1;  }
+                //X coordinates need to be also horizontally flipped! (pixel i -> W-1-i, as flipImageHoriz_8bit)
+                if (doLRFlip) { x1 = db->out8bit.width - 1 - x1;  }
                 //--------------------------------------------
 
                 if ((parentjID != jID) && (parentjID<db->pdb->keypointsForEachSample) && (x1!=0) && (y1!=0) && (x1<db->out8bit.width) && (y1<db->out8bit.height) )
@@ -648,17 +726,25 @@ void drawPAFsOnHeatmaps(
                     x2 = (int) xF;
                     y2 = (int) yF;
 
-                    //X coordinates need to be also horizontally flipped!
-                    if (doLRFlip) { x2 = db->out8bit.width - x2;  }
+                    //X coordinates need to be also horizontally flipped! (pixel i -> W-1-i)
+                    if (doLRFlip) { x2 = db->out8bit.width - 1 - x2;  }
                     //--------------------------------------------
 
                     if ((x2!=0) && (y2!=0) && ( x2!=x1 || y2!=y1 ) && (x2<db->out8bit.width) && (y2<db->out8bit.height)  )
                       {
                         //NOT USED drawLineOnHeatmap(heatmapPTR, heatmapTargetChannel+pafID, db->out8bit.width, db->out8bit.height, db->out8bit.channels, x1, y1, x2, y2, foregroundValue, backgroundValue);
                         //STABLE drawThickLineOnHeatmap(heatmapPTR, heatmapTargetChannel+pafID, db->out8bit.width, db->out8bit.height, db->out8bit.channels, x1, y1, x2, y2, thickness, foregroundValue, backgroundValue);
-                        int flipGradient = 0;
-                        if ( (FLIP_PAF_GRADIENTS_FOR_LEFT_JOINTS) && ( (!isRightJoint(jID) || !isRightJoint(parentjID))  ) ) { flipGradient=1; }
-                        drawSignedPAFLine(heatmapPTR,heatmapTargetChannel+pafID, db->out8bit.width, db->out8bit.height, db->out8bit.channels, x1, y1, x2, y2, thickness, flipGradient ); //TEST
+                        //(x1,y1) = child joint jID, (x2,y2) = its parent parentjID
+                        if (PAF_ENCODING_CHILD_LIT)
+                        {
+                          drawChildLitPAFLine(heatmapPTR,heatmapTargetChannel+pafID, db->out8bit.width, db->out8bit.height, db->out8bit.channels, x1, y1, x2, y2, thickness);
+                        } else
+                        { //Legacy (serials <= 288): signed -127..+127 ramp, lit at the child only for left/central limbs
+                          int flipGradient = 0;
+                          //side of the CHANNEL (labelJ/labelP), not of the mirrored source joints, so a flip keeps each channel's convention
+                          if ( (FLIP_PAF_GRADIENTS_FOR_LEFT_JOINTS) && ( (!isRightJoint(labelJ) || !isRightJoint(labelP))  ) ) { flipGradient=1; }
+                          drawSignedPAFLine(heatmapPTR,heatmapTargetChannel+pafID, db->out8bit.width, db->out8bit.height, db->out8bit.channels, x1, y1, x2, y2, thickness, flipGradient ); //TEST
+                        }
                       }
                 }
         } // for each skeleton ID loop
@@ -735,6 +821,276 @@ void drawSkeletonsOnHeatmap(
                 }
             }
         }
+}
+
+//Per-instance person SEGMENTATION targets (SEGMENTATION_PLAN §E redesign, 2026-06-20).
+//Relative to instanceHeatmapChannel:
+//  +0 = person_blob       large size-adaptive Gaussian anchor at the box centre (sigma ~ box size)
+//  +1 = person_lr_bridge  SIGNED cross-body line, -127 (anat. left) -> +127 (anat. right): shoulders + hips
+//  +2 = person_head       Gaussian anchor at the neck (shoulder midpoint; fallback nose)
+//All three are local "name the part you sit on" targets so the decoder can learn them — the old
+//center+size (PLAN.md Obs 14) and box-edge-ridge (Obs 17) encodings both collapsed / mislocated.
+//Box geometry and pixel ownership now live in the Python decode (SEGMENTATION_PLAN §E), not pixels.
+
+//Transform one skeleton joint through the SAME pipeline as the joints/PAFs (pan/zoom -> offset/
+//scale -> IORatio -> LR flip). Returns 1 and fills *outX/*outY if the joint is present (raw!=0).
+static int instanceTransformJoint(
+                            struct ImageDatabase *db, unsigned long sampleID, int skID, int jID,
+                            int doLRFlip, int originalInputWidth, int originalInputHeight,
+                            float zoom_factor, int pan_x, int pan_y,
+                            float offsetX, float offsetY, float scaleX, float scaleY,
+                            int *outX, int *outY)
+{
+   const float IORatioX = (float) db->out8bit.width  / db->in.width;
+   const float IORatioY = (float) db->out8bit.height / db->in.height;
+   const int rx = db->pdb->sample[sampleID].sk[skID].coords[jID * 3 + 0];
+   const int ry = db->pdb->sample[sampleID].sk[skID].coords[jID * 3 + 1];
+   if ((rx==0) || (ry==0)) { return 0; }   //absent joint — mirror the joint/PAF (x,y)!=0 skip
+   float xF = (float) rx, yF = (float) ry;
+   transformCoordinatesPanAndZoom(&xF,&yF,(float)pan_x,(float)pan_y,zoom_factor,originalInputWidth,originalInputHeight);
+   xF = (offsetX + (xF * scaleX)) * IORatioX;
+   yF = (offsetY + (yF * scaleY)) * IORatioY;
+   int xo = (int) floorf(xF), yo = (int) floorf(yF);
+   if (doLRFlip) { xo = (int) db->out8bit.width - 1 - xo; } //pixel i -> W-1-i, as flipImageHoriz_8bit
+   *outX = xo; *outY = yo;
+   return 1;
+}
+
+//Splat a Gaussian ramping from MINV (patch edge) up to MAXV (centre), sigma = radius/3, centred at
+//(px,py) into channel ch, max-blended like the joint / LR heatmaps. Ramping to MINV (not 0) is what
+//lets the tail blend into the MINV background — so the blob reads as a Gaussian, not a 0-floored
+//rectangle (matches how the precomputed joint/head gradient patches decay to MINV).
+static void instanceSplatGaussian(
+                            signed char *heatmapPTR, int ch, int width, int height, int channels,
+                            int px, int py, int radius)
+{
+   if (radius < 1) { radius = 1; }
+   const float inv2s2 = 9.0f / (2.0f * (float)radius * (float)radius);   //1/(2 sigma^2), sigma=radius/3
+   int dx,dy;
+   for (dy=-radius; dy<=radius; dy++)
+   {
+      const int yy = py + dy;
+      if (yy<0 || yy>=height) { continue; }
+      for (dx=-radius; dx<=radius; dx++)
+      {
+         const int xx = px + dx;
+         if (xx<0 || xx>=width) { continue; }
+         const signed char gv = (signed char)((float)MINV + (float)(MAXV - MINV) * expf(-((float)(dx*dx+dy*dy)) * inv2s2));
+         signed char * p = heatmapPTR + ((yy*width*channels)+(xx*channels)+ch);
+         if (gv > *p) { *p = gv; }   //max-blend (tail == MINV leaves background untouched)
+      }
+   }
+}
+
+void drawInstanceCentersOnHeatmaps(
+                            struct ImageDatabase *db,
+                            signed char *heatmapPTR,
+                            int instanceHeatmapChannel,
+                            unsigned long sampleID,
+                            int doLRFlip,
+                            const signed char * gradient,
+                            int gradientSize,
+                            int sizeDiskRadius,
+                            int originalInputWidth,
+                            int originalInputHeight,
+                            float zoom_factor,
+                            int pan_x,
+                            int pan_y,
+                            float offsetX,
+                            float offsetY,
+                            float scaleX,
+                            float scaleY
+                           )
+{
+   const int width    = (int) db->out8bit.width;
+   const int height   = (int) db->out8bit.height;
+   const int channels = (int) db->out8bit.channels;
+   const int blobCh   = instanceHeatmapChannel + 0;
+   const int bridgeCh = instanceHeatmapChannel + 1;
+   const int headCh   = instanceHeatmapChannel + 2;
+   const float IORatioX = (float) db->out8bit.width  / db->in.width;
+   const float IORatioY = (float) db->out8bit.height / db->in.height;
+   const int bridgeThickness = (sizeDiskRadius>1) ? sizeDiskRadius : 1;   //reuse the disk-radius param as line thickness
+
+   //COCO keypoint indices (channels 0..16): 0=nose 5=left_shoulder 6=right_shoulder 11=left_hip 12=right_hip
+   const int NOSE=0, LSHOULDER=5, RSHOULDER=6, LHIP=11, RHIP=12;
+
+   unsigned short skID;
+   for (skID = 0; skID < db->pdb->sample[sampleID].numberOfSkeletons; skID++)
+   {
+       struct Skeleton * sk = &db->pdb->sample[sampleID].sk[skID];
+
+       //--- +0 person_blob: large size-adaptive Gaussian at the (transformed) box centre. ---
+       //The box is stored as corners (x1,y1)-(x2,y2), not x,y,w,h (DATALOADER.md A9)
+       if ((sk->bboxX2>sk->bboxX) && (sk->bboxY2>sk->bboxY))
+       {
+          float x1 = (float) sk->bboxX;
+          float y1 = (float) sk->bboxY;
+          float x2 = (float) sk->bboxX2;
+          float y2 = (float) sk->bboxY2;
+          transformCoordinatesPanAndZoom(&x1,&y1,(float)pan_x,(float)pan_y,zoom_factor,originalInputWidth,originalInputHeight);
+          transformCoordinatesPanAndZoom(&x2,&y2,(float)pan_x,(float)pan_y,zoom_factor,originalInputWidth,originalInputHeight);
+          x1 = (offsetX + (x1 * scaleX)) * IORatioX;
+          y1 = (offsetY + (y1 * scaleY)) * IORatioY;
+          x2 = (offsetX + (x2 * scaleX)) * IORatioX;
+          y2 = (offsetY + (y2 * scaleY)) * IORatioY;
+          if (doLRFlip) { x1 = (float)width - x1; x2 = (float)width - x2; }
+
+          const float cx   = (x1 + x2) * 0.5f;
+          const float cy   = (y1 + y2) * 0.5f;
+          const float boxW = (x2>x1) ? (x2-x1) : (x1-x2);
+          const float boxH = (y2>y1) ? (y2-y1) : (y1-y2);
+          const int   cX   = (int) cx;
+          const int   cY   = (int) cy;
+
+          //Drop boxes whose centre fell outside the (possibly cropped) frame — mirror the
+          //joint (x,y)!=(0,0) skip so the head never learns phantom anchors.
+          if ((cX>0) && (cY>0) && (cX<width) && (cY<height))
+          {
+             int ri = (int)(INSTANCE_BLOB_RADIUS_FRAC * ((boxW<boxH)?boxW:boxH));
+             if (ri < MINIMUM_GRADIENT_SIZE)    { ri = MINIMUM_GRADIENT_SIZE; }
+             if (ri > INSTANCE_BLOB_RADIUS_MAX) { ri = INSTANCE_BLOB_RADIUS_MAX; }
+             instanceSplatGaussian(heatmapPTR, blobCh, width, height, channels, cX, cY, ri);
+          }
+       }
+
+       //--- +1 person_lr_bridge: signed cross-body lines, -127 (anat. left) -> +127 (anat. right).
+       //--- Sign is tied to joint identity (left=parent, right=child), matching the leftjoints/
+       //--- rightjoints (37/38) convention; positions mirror under flip via instanceTransformJoint,
+       //--- and on a flip the left end is the mirrored RIGHT joint (as the joint/side channels).
+       {
+          const int LS = horizontalJointFlip(LSHOULDER,doLRFlip), RS = horizontalJointFlip(RSHOULDER,doLRFlip);
+          const int LH = horizontalJointFlip(LHIP,doLRFlip),      RH = horizontalJointFlip(RHIP,doLRFlip);
+          int lx,ly,rx,ry;
+          if ( instanceTransformJoint(db,sampleID,skID,LS,doLRFlip,originalInputWidth,originalInputHeight,zoom_factor,pan_x,pan_y,offsetX,offsetY,scaleX,scaleY,&lx,&ly)
+            && instanceTransformJoint(db,sampleID,skID,RS,doLRFlip,originalInputWidth,originalInputHeight,zoom_factor,pan_x,pan_y,offsetX,offsetY,scaleX,scaleY,&rx,&ry) )
+          {
+             if (BRIDGE_ENCODING_LIT) { drawChildLitPAFLine(heatmapPTR, bridgeCh, width, height, channels, lx,ly, rx,ry, bridgeThickness); } else
+                                      { drawSignedPAFLine(heatmapPTR, bridgeCh, width, height, channels, lx,ly, rx,ry, bridgeThickness, 0); }
+          }
+          if ( instanceTransformJoint(db,sampleID,skID,LH,doLRFlip,originalInputWidth,originalInputHeight,zoom_factor,pan_x,pan_y,offsetX,offsetY,scaleX,scaleY,&lx,&ly)
+            && instanceTransformJoint(db,sampleID,skID,RH,doLRFlip,originalInputWidth,originalInputHeight,zoom_factor,pan_x,pan_y,offsetX,offsetY,scaleX,scaleY,&rx,&ry) )
+          {
+             if (BRIDGE_ENCODING_LIT) { drawChildLitPAFLine(heatmapPTR, bridgeCh, width, height, channels, lx,ly, rx,ry, bridgeThickness); } else
+                                      { drawSignedPAFLine(heatmapPTR, bridgeCh, width, height, channels, lx,ly, rx,ry, bridgeThickness, 0); }
+          }
+       }
+
+       //--- +2 person_head: Gaussian anchor at the neck = midpoint(shoulders); fallback nose. ---
+       //--- Joint-sized splat from the precomputed gradient patch, max-blended like a joint.
+       if (gradientSize>MINIMUM_GRADIENT_SIZE)
+       {
+          int hx=0, hy=0, haveHead=0;
+          int lsx,lsy,rsx,rsy;
+          const int haveLS = instanceTransformJoint(db,sampleID,skID,LSHOULDER,doLRFlip,originalInputWidth,originalInputHeight,zoom_factor,pan_x,pan_y,offsetX,offsetY,scaleX,scaleY,&lsx,&lsy);
+          const int haveRS = instanceTransformJoint(db,sampleID,skID,RSHOULDER,doLRFlip,originalInputWidth,originalInputHeight,zoom_factor,pan_x,pan_y,offsetX,offsetY,scaleX,scaleY,&rsx,&rsy);
+          if (haveLS && haveRS) { hx=(lsx+rsx)/2; hy=(lsy+rsy)/2; haveHead=1; }
+          else { int nx,ny; if (instanceTransformJoint(db,sampleID,skID,NOSE,doLRFlip,originalInputWidth,originalInputHeight,zoom_factor,pan_x,pan_y,offsetX,offsetY,scaleX,scaleY,&nx,&ny)) { hx=nx; hy=ny; haveHead=1; } }
+
+          if (haveHead && (hx>0) && (hy>0) && (hx<width) && (hy<height))
+          {
+             signed int xG,yG,newX,newY,gradientSizeX2 = gradientSize*2;
+             for (xG=0; xG<gradientSizeX2; xG++)
+             {
+                for (yG=0; yG<gradientSizeX2; yG++)
+                {
+                   newX = hx + xG - gradientSize;
+                   newY = hy + yG - gradientSize;
+                   if (newY>=0 && newY<height && newX>=0 && newX<width)
+                   {
+                      signed char * p = heatmapPTR + ((newY*width*channels) + (newX*channels) + headCh);
+                      const signed char gv = gradient[(yG*gradientSizeX2)+xG];
+                      if (gv > *p) { *p = gv; }
+                   }
+                }
+             }
+          }
+       }
+   }
+}
+
+// Render the sample's SuperPoint keypoints as K heatmap channels. Each keypoint
+// is transformed through the SAME pan/zoom -> offset/scale -> IORatio -> LR-flip
+// pipeline as the skeleton joints (so it tracks augmentation), then for each of
+// the K PCA components a Gaussian blob is splatted whose PEAK equals the scaled,
+// clipped projection value v_j and whose tail decays to MINV (the background /
+// "no keypoint" value). Because v_j >= MINV (clipped), max-blending is correct
+// and consistent with the joint/instance splats.
+//
+// Independent of skeletons — called outside the numberOfSkeletons>0 block.
+static void drawSuperpointOnHeatmaps(
+                            struct ImageDatabase *db,
+                            signed char *heatmapPTR,
+                            int superpointChannelStart,
+                            unsigned long sourceSampleID,
+                            unsigned int doLRFlip,
+                            int gradientSizeDefault,
+                            int originalInputWidth,
+                            int originalInputHeight,
+                            float zoom_factor,
+                            int pan_x,
+                            int pan_y,
+                            float offsetX,
+                            float offsetY,
+                            float scaleX,
+                            float scaleY
+                           )
+{
+    const SuperpointImageEntry *sp = db->pdb->sample[sourceSampleID].superpoint;
+    const SuperpointPCA *pca = db->superpointPCA;
+    if (sp == NULL || pca == NULL || sp->numKeypoints <= 0) { return; }
+
+    int K = db->superpointChannels;
+    if (K > pca->maxComponents) { K = pca->maxComponents; }
+    if (K <= 0) { return; }
+
+    const int width    = (int) db->out8bit.width;
+    const int height   = (int) db->out8bit.height;
+    const int channels = (int) db->out8bit.channels;
+    const float IORatioX = (float) width  / (float) db->in.width;
+    const float IORatioY = (float) height / (float) db->in.height;
+
+    int radius = gradientSizeDefault;
+    if (radius < 1) { radius = 1; }
+    const float inv2s2 = 9.0f / (2.0f * (float)radius * (float)radius);  // sigma = radius/3
+
+    for (int k = 0; k < sp->numKeypoints; ++k)
+    {
+        float xF = sp->xyscore[k * 3 + 0];
+        float yF = sp->xyscore[k * 3 + 1];
+        transformCoordinatesPanAndZoom(&xF, &yF, (float)pan_x, (float)pan_y, zoom_factor, originalInputWidth, originalInputHeight);
+        xF = (offsetX + (xF * scaleX)) * IORatioX;
+        yF = (offsetY + (yF * scaleY)) * IORatioY;
+        int px = (int) xF;
+        int py = (int) yF;
+        if (doLRFlip) { px = width - 1 - px; } //pixel i -> W-1-i, as flipImageHoriz_8bit
+        if (px < 0 || px >= width || py < 0 || py >= height) { continue; }
+
+        const float *desc = sp->descriptors + (size_t)k * (size_t)pca->descDim;
+        for (int j = 0; j < K; ++j)
+        {
+            float v = superpoint_project_component(pca, desc, j);
+            if (v > (float)MAXV) { v = (float)MAXV; }
+            if (v < (float)MINV) { v = (float)MINV; }
+            const int ch = superpointChannelStart + j;
+
+            for (int dy = -radius; dy <= radius; ++dy)
+            {
+                const int yy = py + dy;
+                if (yy < 0 || yy >= height) { continue; }
+                for (int dx = -radius; dx <= radius; ++dx)
+                {
+                    const int xx = px + dx;
+                    if (xx < 0 || xx >= width) { continue; }
+                    // Gaussian ramp from MINV (tail) up to v (peak).
+                    const float t  = expf(-((float)(dx*dx + dy*dy)) * inv2s2);
+                    const signed char gv = (signed char)((float)MINV + (v - (float)MINV) * t);
+                    signed char *p = heatmapPTR + ((yy*width*channels) + (xx*channels) + ch);
+                    if (gv > *p) { *p = gv; }   // max-blend (tail == MINV leaves background untouched)
+                }
+            }
+        }
+    }
 }
 
 int populateHeatmaps(
@@ -828,12 +1184,14 @@ int populateHeatmaps(
                  transformCoordinatesPanAndZoom(&xF,&yF,(float) pan_x,(float) pan_y,zoom_factor, originalInputWidth, originalInputHeight);
                  xF =  (offsetX + (xF * scaleX)) * IORatioX;
                  yF =  (offsetY + (yF * scaleY)) * IORatioY;
-                 x = (unsigned short) xF;
-                 y = (unsigned short) yF;
-                 //fprintf(stderr," ->  %hu,%u \n",x,y);
+                 //signed + floorf: a joint just off the left/top edge still splats its visible part
+                 //(an unsigned cast wrapped negatives far off-canvas, only right/bottom ones kept it)
+                 int px = (int) floorf(xF);
+                 int py = (int) floorf(yF);
+                 //fprintf(stderr," ->  %d,%d \n",px,py);
 
-                 //X coordinates need to be also horizontally flipped!
-                 if (doLRFlip) { x = db->out8bit.width - x; }
+                 //X coordinates need to be also horizontally flipped! (pixel i -> W-1-i, as flipImageHoriz_8bit)
+                 if (doLRFlip) { px = db->out8bit.width - 1 - px; }
                  //--------------------------------------------
 
                  if (gradientSize>MINIMUM_GRADIENT_SIZE)
@@ -844,13 +1202,14 @@ int populateHeatmaps(
                   {
                     for (yG=0; yG<gradientSizeX2; yG++)
                     {
-                        newX = x + xG - gradientSize;
-                        newY = y + yG - gradientSize;
+                        newX = px + xG - gradientSize;
+                        newY = py + yG - gradientSize;
                         if (newY >= 0 && newY < db->out8bit.height && newX >= 0 && newX < db->out8bit.width)
                         {
                             //-------------------------------------------------------------------------------------------------------------------------
                             //Get Back pointers / values
-                            signed char * heatmapJIDPTR     = heatmapPTR + ((newY * db->out8bit.width * db->out8bit.channels) + (newX* db->out8bit.channels) + jID);
+                            //channel fjID: on a flip it receives the mirrored joint jID (left <-> right), like the PAFs
+                            signed char * heatmapJIDPTR     = heatmapPTR + ((newY * db->out8bit.width * db->out8bit.channels) + (newX* db->out8bit.channels) + fjID);
                             const signed char gradientValue = gradient[ (yG * gradientSizeX2) + xG];
                             //Jumpless overflow check
                             existingValueIsHigher = (gradientValue < *heatmapJIDPTR);
@@ -922,11 +1281,32 @@ int populateHeatmaps(
         } //Done adding heatmaps
 
 
+        if (db->addInstanceHeatmaps)
+        {
+            drawInstanceCentersOnHeatmaps(
+                               db,
+                               heatmapPTR,
+                               db->instanceHeatmapIndex,
+                               sourceSampleID,
+                               doLRFlip,
+                               defaultGradient,
+                               gradientSizeDefault,
+                               INSTANCE_SIZE_DISK_RADIUS,
+                               originalInputWidth,
+                               originalInputHeight,
+                               zoom_factor,
+                               pan_x, pan_y,
+                               offsetX, offsetY,
+                               scaleX, scaleY
+                              );
+        } //Done adding instance center+size targets
+
+
         #if ENABLE_LEFT_RIGHT_JOINT_DISAMBIGUATION_OUTPUT
               drawSingleLRHeatmapGaussian(
                                            db,
                                            heatmapPTR,
-                                           LEFT_RIGHT_JOINT_DISAMBIGUATION_HEATMAP_START,
+                                           db->leftRightHeatmapIndex,
                                            1,
                                            sourceSampleID,
                                            doLRFlip,
@@ -945,7 +1325,7 @@ int populateHeatmaps(
               drawSingleLRHeatmapGaussian(
                                            db,
                                            heatmapPTR,
-                                           LEFT_RIGHT_JOINT_DISAMBIGUATION_HEATMAP_START+1,
+                                           db->leftRightHeatmapIndex+1,
                                            0,
                                            sourceSampleID,
                                            doLRFlip,
@@ -963,6 +1343,27 @@ int populateHeatmaps(
        #endif
 
     } //We have skeletons in the image
+
+
+    // SuperPoint keypoints are independent of human skeletons — render them for
+    // every sample (even background-only ones) when the modality is enabled.
+    if (db->addSuperpointHeatmaps && db->superpointChannels > 0)
+    {
+        drawSuperpointOnHeatmaps(
+                               db,
+                               heatmapPTR,
+                               db->superpointHeatmapIndex,
+                               sourceSampleID,
+                               doLRFlip,
+                               (int) gradientSizeDefaultRAW,
+                               originalInputWidth,
+                               originalInputHeight,
+                               zoom_factor,
+                               pan_x, pan_y,
+                               offsetX, offsetY,
+                               scaleX, scaleY
+                              );
+    } //Done adding SuperPoint heatmaps
 
 
     if (db->addBackgroundHeatmap)
