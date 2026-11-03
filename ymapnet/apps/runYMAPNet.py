@@ -73,6 +73,10 @@ def build_arg_parser():
                         "trainTENpamy.py) and show the synthesized RGB reconstruction. "
                         "Requires tenpamy_model/best.weights.h5 to exist; not supported with --tile.")
     p.add_argument("--tile", action="store_true")
+    p.add_argument("--showoff", nargs="?", const="", default=None, metavar="SCREEN",
+                   help="Fullscreen neon spatial-perception view (normals, depth edges, semantic categories, "
+                        "joints) instead of the debug windows, optionally on monitor SCREEN (xrandr index, "
+                        "e.g. 1, or output name, e.g. DP-1). Keys: h HUD, f fullscreen. Not supported with --tile.")
     p.add_argument("--illustrate", action="store_true")
     p.add_argument("--collab", action="store_true", help="illustrate + save, no display")
     p.add_argument("--headless", "--novisualization", action="store_true", dest="headless")
@@ -757,9 +761,17 @@ def main_pose_estimation(args):
                 cv2.moveWindow("TENpamy", tx, ty)
                 print(bcolors.OKGREEN, "[TENpamy] Window created at (%d, %d)" % (tx, ty), bcolors.ENDC)
 
+    showoff = None
+    if args.showoff is not None:
+        if args.tile or not show:
+            print(bcolors.WARNING, "--showoff needs a display and no --tile, ignoring --showoff", bcolors.ENDC)
+        else:
+            from ymapnet.apps.teslaView import TeslaView
+            showoff = TeslaView(source_name=os.path.basename(str(args.videoFilePath)), screen=args.showoff)
+
     if save and show:
         disable_screensaver()
-    if show:
+    if show and showoff is None:
         estimator.setup_threshold_control_window()
 
     face_crop_counter = [0]  # mutable counter shared across frames
@@ -812,14 +824,17 @@ def main_pose_estimation(args):
                         draw_pose_match_overlay(frame, pm_result, estimator, pose_matcher)
 
             if visualize:
-                if show:
+                if show and showoff is None:
                     estimator.update_thresholds_from_gui()
                 if args.tile:
                     frameWithVis = frame.copy()
                     tiler.visualize(frameWithVis)
                 else:
                     frameWithVis = frame.copy()
-                    estimator.visualize(frameWithVis, show=show, save=save)
+                    if showoff is not None:
+                        showoff.show(frameWithVis, estimator)
+                    else:
+                        estimator.visualize(frameWithVis, show=show, save=save)
                     if tenpamy_model is not None and show:
                         try:
                             cv2.imshow("TENpamy", run_tenpamy(tenpamy_model, estimator))
@@ -828,6 +843,8 @@ def main_pose_estimation(args):
                             tenpamy_model = None
 
                 key = cv2.waitKey(1) & 0xFF if show else 255
+                if showoff is not None:
+                    showoff.handle_key(key)
                 if handle_keypress(key, args, estimator, frame, pose_matcher):
                     break
 
@@ -838,6 +855,8 @@ def main_pose_estimation(args):
         print("\nInterrupted by user")
 
     print("Average Framerate :", np.average(estimator.keypoints_model.hz), "Hz")
+    if showoff is not None:
+        showoff.close()
     cap.release()
     if show:
         cv2.destroyAllWindows()
