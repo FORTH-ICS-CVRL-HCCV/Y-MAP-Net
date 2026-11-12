@@ -11,6 +11,7 @@ display height, centred, and the HUD / insets use the side margins.
 
 Keys (in addition to runYMAPNet's): h toggle the HUD, f toggle fullscreen.
 """
+import os
 import re
 import threading
 import time
@@ -514,8 +515,13 @@ class TeslaView:
     each waitKey() value to handle_key(). The window, render size and display canvas are set up on
     the first frame."""
 
-    def __init__(self, source_name="webcam", screen=""):
+    def __init__(self, source_name="webcam", screen="", shm_stream=None, shm_path=None):
         self.args = SimpleNamespace(**DEFAULT_OPTIONS)
+        self.shm_stream = shm_stream  # also publish each rendered frame to this SharedMemoryVideoBuffers stream
+        self.shm_path = shm_path or os.environ.get(
+            "SHARED_MEMORY_VIDEO_BUFFERS", os.path.expanduser("~/Documents/Programming/SharedMemoryVideoBuffers"))
+        self.shm = None
+        self.shm_size = None
         self.source_name = source_name
         self.screen = screen      # xrandr monitor index or output name; "" = wherever the window opens
         self.renderer = None
@@ -567,6 +573,27 @@ class TeslaView:
         self.renderer.submit(frame, small, scene, fps, estimator.frameNumber)
         out = self.renderer.take()
         cv2.imshow(WINDOW, out if out is not None else frame)
+        if out is not None and self.shm_stream:
+            self._publish_shm(out)
+
+    def _publish_shm(self, out):
+        if self.shm is None:
+            import sys
+            pydir = os.path.join(self.shm_path, "src", "python")
+            if pydir not in sys.path:
+                sys.path.insert(0, pydir)
+            from SharedMemoryManager import SharedMemoryManager
+            h, w = out.shape[:2]
+            self.shm = SharedMemoryManager(os.path.join(self.shm_path, "libSharedMemoryVideoBuffers.so"),
+                                           descriptor="video_frames.shm", frameName=self.shm_stream,
+                                           width=w, height=h, channels=3)
+            self.shm_size = (w, h)
+            print(f"[showoff] publishing {w}x{h} to shared memory stream '{self.shm_stream}'")
+        if (out.shape[1], out.shape[0]) != self.shm_size:
+            out = cv2.resize(out, self.shm_size, interpolation=cv2.INTER_AREA)
+        if out.ndim == 2:
+            out = cv2.cvtColor(out, cv2.COLOR_GRAY2RGB)
+        self.shm.copy_numpy_to_shared_memory(cv2.cvtColor(out[:, :, :3], cv2.COLOR_BGR2RGB))
 
     def handle_key(self, key):
         if key in (ord("h"), ord("H")):
@@ -580,3 +607,4 @@ class TeslaView:
         if self.renderer is not None:
             self.renderer.stop()
             self.renderer.join(timeout=10.0)
+        self.shm = None

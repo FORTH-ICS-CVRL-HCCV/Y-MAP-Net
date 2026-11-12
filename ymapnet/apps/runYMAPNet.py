@@ -77,6 +77,10 @@ def build_arg_parser():
                    help="Fullscreen neon spatial-perception view (normals, depth edges, semantic categories, "
                         "joints) instead of the debug windows, optionally on monitor SCREEN (xrandr index, "
                         "e.g. 1, or output name, e.g. DP-1). Keys: h HUD, f fullscreen. Not supported with --tile.")
+    p.add_argument("--showoffshm", default=None, metavar="STREAM",
+                   help="With --showoff, also publish the rendered view to SharedMemoryVideoBuffers stream "
+                        "STREAM (descriptor video_frames.shm, RGB). Library location: $SHARED_MEMORY_VIDEO_BUFFERS "
+                        "or ~/Documents/Programming/SharedMemoryVideoBuffers.")
     p.add_argument("--illustrate", action="store_true")
     p.add_argument("--collab", action="store_true", help="illustrate + save, no display")
     p.add_argument("--headless", "--novisualization", action="store_true", dest="headless")
@@ -767,7 +771,8 @@ def main_pose_estimation(args):
             print(bcolors.WARNING, "--showoff needs a display and no --tile, ignoring --showoff", bcolors.ENDC)
         else:
             from ymapnet.apps.teslaView import TeslaView
-            showoff = TeslaView(source_name=os.path.basename(str(args.videoFilePath)), screen=args.showoff)
+            showoff = TeslaView(source_name=os.path.basename(str(args.videoFilePath)), screen=args.showoff,
+                                 shm_stream=args.showoffshm)
 
     if save and show:
         disable_screensaver()
